@@ -57,9 +57,11 @@ pub fn has_session(name: &str) -> bool {
     matches!(status, Ok(s) if s.success())
 }
 
-/// Format `=name` so tmux treats it as an exact session match.
+/// Pass session names through to tmux as-is. The `=` exact-match prefix
+/// works for some commands but not split-window/etc, where tmux interprets
+/// it as a literal pane name search.
 pub fn exact_target(name: &str) -> String {
-    format!("={}", name)
+    name.to_string()
 }
 
 /// True if we're already inside a tmux client.

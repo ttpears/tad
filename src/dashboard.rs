@@ -193,16 +193,18 @@ pub fn run() -> Result<i32> {
     let header_text = format!(
         "[ sessions ]    groups     hosts  \n  tab: cycle view  ·  enter: open  ·  ctrl-k: kill (sessions)  ·  ctrl-r: reload  ·  esc: quit"
     );
+    // reload-sync (fzf 0.39+) blocks until the command finishes, so the
+    // state file is written before transform-prompt/transform-header read it.
     let tab_bind = format!(
-        "tab:reload({0} dash-cycle)+transform-prompt({0} dash-prompt)+transform-header({0} dash-header)",
+        "tab:reload-sync({0} dash-cycle)+transform-prompt({0} dash-prompt)+transform-header({0} dash-header)",
         exe_s
     );
     let reload_bind = format!(
-        "ctrl-r:reload({0} dash-source $({0} dash-state))",
+        "ctrl-r:reload-sync({0} dash-source $({0} dash-state))",
         exe_s
     );
     let kill_bind = format!(
-        "ctrl-k:execute-silent({0} dash-kill {{1}} {{2}})+reload({0} dash-source $({0} dash-state))",
+        "ctrl-k:execute-silent({0} dash-kill {{1}} {{2}})+reload-sync({0} dash-source $({0} dash-state))",
         exe_s
     );
     let preview_cmd = format!("{} dash-preview {{1}} {{2}}", exe_s);
