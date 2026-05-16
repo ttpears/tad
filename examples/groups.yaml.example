@@ -1,0 +1,52 @@
+# Example tad groups file. Copy to ~/.config/tad/groups.yaml and customize.
+# All hostnames here are fictional.
+#
+# Schema:
+#   groups.<name>.layout = panes | synced-panes | windows | browse
+#     panes         — one window split into one pane per host (default)
+#     synced-panes  — same as panes, plus tmux synchronize-panes on
+#     windows       — one window per host within the session
+#     browse        — don't open anything; tab-complete shows the host list
+#   groups.<name>.hosts = [host1, host2, ...]
+#     Hosts can be short names (relying on your ~/.ssh/config to resolve)
+#     or FQDNs.
+#
+# Open with:  tad -g <name>
+# Drill in:   tad -g <name> <host>
+# Edit:       tad groups-edit
+
+_meta:
+  description: Example tad groups (fictional hosts).
+
+groups:
+  # 3-node cluster, default panes layout
+  web:
+    layout: panes
+    hosts:
+      - web-1.example.com
+      - web-2.example.com
+      - web-3.example.com
+
+  # Synced panes — typing in one fans out to all (good for fleet ops)
+  cache:
+    layout: synced-panes
+    hosts:
+      - cache-a.example.com
+      - cache-b.example.com
+      - cache-c.example.com
+
+  # One window per host (use Ctrl-b n/p to switch windows)
+  db:
+    layout: windows
+    hosts:
+      - db-primary.example.com
+      - db-replica-1.example.com
+      - db-replica-2.example.com
+
+  # Browse mode: no auto-open. `tad -g devs <TAB>` lists members.
+  devs:
+    layout: browse
+    hosts:
+      - alice.dev.example.com
+      - bob.dev.example.com
+      - carol.dev.example.com
