@@ -124,8 +124,31 @@ pub(crate) fn parse_ssh_config(text: &str) -> Vec<String> {
     out
 }
 
-pub(crate) fn parse_known_hosts(_text: &str) -> Vec<String> {
-    Vec::new()
+pub(crate) fn parse_known_hosts(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("|1|") || line.starts_with("@cert-authority") {
+            continue;
+        }
+        let first = line.split_whitespace().next().unwrap_or("");
+        for entry in first.split(',') {
+            let mut e = entry.trim();
+            if let Some(stripped) = e.strip_prefix('[') {
+                if let Some(idx) = stripped.rfind(']') {
+                    e = &stripped[..idx];
+                }
+            }
+            if e.is_empty() {
+                continue;
+            }
+            out.push(e.to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -180,6 +203,28 @@ mod tests {
         assert!(!hosts.iter().any(|h| h.contains('*')));
         assert!(!hosts.iter().any(|h| h.contains('?')));
         assert!(!hosts.contains(&"prod-*".to_string()));
+    }
+
+    #[test]
+    fn known_hosts_parses_plain_and_comma_lists() {
+        let text = include_str!("../../tests/fixtures/wizard/known_hosts.txt");
+        let hosts = parse_known_hosts(text);
+        assert!(hosts.contains(&"host1.example.com".to_string()));
+        assert!(hosts.contains(&"host2.example.com".to_string()));
+        assert!(hosts.contains(&"10.0.0.2".to_string()));
+        assert!(hosts.contains(&"host3".to_string()));
+        assert!(hosts.contains(&"host3-alias.example.com".to_string()));
+    }
+
+    #[test]
+    fn known_hosts_strips_brackets_and_skips_hashed_and_ca() {
+        let text = include_str!("../../tests/fixtures/wizard/known_hosts.txt");
+        let hosts = parse_known_hosts(text);
+        assert!(hosts.contains(&"bracketed.example.com".to_string()));
+        assert!(!hosts.iter().any(|h| h.starts_with('|')));
+        assert!(!hosts.iter().any(|h| h.starts_with('@')));
+        assert!(!hosts.iter().any(|h| h.contains('[')));
+        assert!(!hosts.iter().any(|h| h.contains(']')));
     }
 }
 
