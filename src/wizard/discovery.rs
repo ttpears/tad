@@ -124,7 +124,52 @@ pub(crate) fn parse_ssh_config_includes(text: &str) -> Vec<String> {
 }
 
 pub fn scan_tmux_sessions() -> Vec<SessionCandidate> {
-    Vec::new()
+    use crate::tmux;
+    let out = match tmux::run(["list-sessions", "-F", "#{session_name}"]) {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    let mut raw = Vec::new();
+    for name in names {
+        let wins = match tmux::run([
+            "list-windows",
+            "-t",
+            &name,
+            "-F",
+            "#{window_name}",
+        ]) {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        raw.push((name, wins));
+    }
+    scan_tmux_sessions_from(raw)
+}
+
+pub(crate) fn scan_tmux_sessions_from(raw: Vec<(String, Vec<String>)>) -> Vec<SessionCandidate> {
+    raw.into_iter()
+        .map(|(name, windows)| {
+            let usable = windows.iter().any(|w| is_usable_window_name(w));
+            SessionCandidate { name, windows, usable }
+        })
+        .collect()
+}
+
+fn is_usable_window_name(name: &str) -> bool {
+    let n = name.trim();
+    if n.is_empty() {
+        return false;
+    }
+    !matches!(n, "bash" | "zsh" | "sh" | "fish") && !n.chars().all(|c| c.is_ascii_digit())
 }
 
 pub(crate) fn parse_bash_zsh_history(text: &str) -> Vec<String> {
@@ -347,6 +392,23 @@ mod tests {
             assert!(!e.is_empty());
         }
         let _ = candidates;
+    }
+
+    #[test]
+    fn tmux_sessions_marks_unusable_when_all_windows_are_shell_names() {
+        let raw = vec![
+            ("prod-web".to_string(), vec!["host1".to_string(), "host2".to_string()]),
+            ("just-shell".to_string(), vec!["bash".to_string(), "zsh".to_string()]),
+            ("numbers".to_string(), vec!["1".to_string(), "2".to_string()]),
+            ("mixed".to_string(), vec!["bash".to_string(), "realhost".to_string()]),
+        ];
+        let candidates = scan_tmux_sessions_from(raw);
+        let by_name: std::collections::HashMap<_, _> =
+            candidates.iter().map(|c| (c.name.clone(), c)).collect();
+        assert!(by_name["prod-web"].usable);
+        assert!(!by_name["just-shell"].usable);
+        assert!(!by_name["numbers"].usable);
+        assert!(by_name["mixed"].usable);
     }
 }
 
