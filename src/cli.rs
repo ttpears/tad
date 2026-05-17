@@ -9,7 +9,7 @@ use crate::{dashboard, groups, sessions};
 #[command(
     name = "tad",
     version,
-    about = "Tmux session and group manager with fzf-powered dashboard",
+    about = "Tmux session and group manager with native TUI dashboard",
     long_about = None,
     disable_help_subcommand = true,
 )]
@@ -19,7 +19,7 @@ pub struct Cli {
     #[arg(short = 'g', value_name = "GROUP", num_args = 1..=2)]
     pub group: Option<Vec<String>>,
 
-    /// Free-form positional: attach/create a session by name.
+    /// Attach/create a session by name.
     pub session: Option<String>,
 
     #[command(subcommand)]
@@ -33,14 +33,12 @@ pub enum Cmd {
     /// List groups (name:description) for shell completion.
     Groups,
     /// Print hosts in a group.
-    GroupHosts {
-        group: String,
-    },
-    /// Add a group.
+    GroupHosts { group: String },
+    /// Add a group. With no args, launches an interactive wizard.
     GroupsAdd {
-        name: String,
+        name: Option<String>,
         /// One of: panes | synced-panes | windows | browse
-        layout: String,
+        layout: Option<String>,
         /// Hosts (FQDN or short).
         hosts: Vec<String>,
     },
@@ -48,22 +46,6 @@ pub enum Cmd {
     GroupsRm { name: String },
     /// Open the groups file in $EDITOR.
     GroupsEdit,
-
-    // Internal flags consumed by the fzf dashboard.
-    #[command(hide = true)]
-    DashSource { view: String },
-    #[command(hide = true)]
-    DashCycle,
-    #[command(hide = true)]
-    DashPrompt,
-    #[command(hide = true)]
-    DashHeader,
-    #[command(hide = true)]
-    DashState,
-    #[command(hide = true)]
-    DashPreview { view: String, name: String },
-    #[command(hide = true)]
-    DashKill { view: String, name: String },
 }
 
 pub fn dispatch(cli: Cli) -> Result<i32> {
@@ -80,7 +62,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(name) = cli.session {
         return sessions::attach_or_create(&name);
     }
-    // No args → dashboard, with fallback to numeric picker.
+    // No args → ratatui dashboard. Fall back to a numbered picker if the
+    // terminal can't be controlled (non-TTY, weird env, etc.).
     match dashboard::run() {
         Ok(rc) => Ok(rc),
         Err(e) => {
@@ -104,46 +87,14 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             groups::print_hosts(&group)?;
             Ok(0)
         }
-        Cmd::GroupsAdd {
-            name,
-            layout,
-            hosts,
-        } => {
-            if hosts.is_empty() {
-                bail!("at least one host required");
+        Cmd::GroupsAdd { name, layout, hosts } => {
+            match (name, layout) {
+                (Some(n), Some(l)) if !hosts.is_empty() => groups::add(&n, &l, &hosts),
+                (None, None) => groups::add_interactive(),
+                _ => bail!("usage: tad groups-add NAME LAYOUT HOST [HOST...]  (or no args for the wizard)"),
             }
-            groups::add(&name, &layout, &hosts)
         }
         Cmd::GroupsRm { name } => groups::remove(&name),
         Cmd::GroupsEdit => groups::edit(),
-
-        Cmd::DashSource { view } => {
-            dashboard::source(&view)?;
-            Ok(0)
-        }
-        Cmd::DashCycle => {
-            dashboard::cycle()?;
-            Ok(0)
-        }
-        Cmd::DashPrompt => {
-            dashboard::prompt();
-            Ok(0)
-        }
-        Cmd::DashHeader => {
-            dashboard::header();
-            Ok(0)
-        }
-        Cmd::DashState => {
-            println!("{}", dashboard::read_state());
-            Ok(0)
-        }
-        Cmd::DashPreview { view, name } => {
-            dashboard::preview(&view, &name)?;
-            Ok(0)
-        }
-        Cmd::DashKill { view, name } => {
-            dashboard::kill(&view, &name);
-            Ok(0)
-        }
     }
 }

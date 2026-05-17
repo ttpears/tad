@@ -52,6 +52,53 @@ pub fn add(name: &str, layout: &str, hosts: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// Interactive group-add wizard. Prompts for name, layout, and hosts.
+pub fn add_interactive() -> Result<i32> {
+    use inquire::{Select, Text};
+
+    let existing = config::load()?;
+    let name = Text::new("Group name:")
+        .with_validator(move |s: &str| {
+            if s.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid("required".into()))
+            } else if existing.groups.contains_key(s.trim()) {
+                Ok(inquire::validator::Validation::Invalid(
+                    "group already exists".into(),
+                ))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+    let name = name.trim().to_string();
+
+    let layout = Select::new("Layout:", LAYOUTS.iter().map(|s| s.to_string()).collect())
+        .with_starting_cursor(0)
+        .with_help_message(
+            "panes=tiled split, synced-panes=tiled+input-sync, windows=one per host, browse=list-only",
+        )
+        .prompt()?;
+
+    let hosts_str = Text::new("Hosts (comma or space separated, FQDN or short):")
+        .with_validator(|s: &str| {
+            if s.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid(
+                    "at least one host required".into(),
+                ))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()?;
+    let hosts: Vec<String> = hosts_str
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    add(&name, &layout, &hosts)
+}
+
 pub fn remove(name: &str) -> Result<i32> {
     let mut doc = config::load()?;
     if doc.groups.shift_remove(name).is_none() {

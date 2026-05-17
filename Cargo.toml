@@ -1,9 +1,9 @@
 [package]
 name = "tad"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["ttpears <ttpears@gmail.com>"]
-description = "Tmux session/group manager with fzf-powered dashboard"
+description = "Tmux session/group manager with native TUI dashboard"
 publish = false
 
 [dependencies]
@@ -13,6 +13,11 @@ serde_yml = "0.0.12"
 anyhow = "1"
 dirs = "5"
 indexmap = { version = "2", features = ["serde"] }
+ratatui = "0.29"
+crossterm = "0.28"
+owo-colors = "4"
+inquire = "0.7"
+libc = "0.2"
 
 [profile.release]
 strip = true
