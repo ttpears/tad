@@ -1,0 +1,19 @@
+# A comment
+Host bastion.example.com
+    User ops
+    Port 22
+
+Host prod-* staging-*
+    User deploy
+
+Host db1 db2
+    HostName 10.0.0.5
+
+Host *
+    ServerAliveInterval 60
+
+  HOST   indented-host.example.com
+    User indenttest
+
+Host has?wildcard
+    User wild

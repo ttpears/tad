@@ -98,8 +98,30 @@ pub(crate) fn parse_fish_history(text: &str) -> Vec<String> {
     out
 }
 
-pub(crate) fn parse_ssh_config(_text: &str) -> Vec<String> {
-    Vec::new()
+pub(crate) fn parse_ssh_config(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let key = parts.next().unwrap_or("");
+        if !key.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        let rest = parts.next().unwrap_or("").trim();
+        for pat in rest.split_whitespace() {
+            if pat.contains('*') || pat.contains('?') {
+                continue;
+            }
+            if pat.is_empty() {
+                continue;
+            }
+            out.push(pat.to_string());
+        }
+    }
+    out
 }
 
 pub(crate) fn parse_known_hosts(_text: &str) -> Vec<String> {
@@ -139,6 +161,25 @@ mod tests {
         assert!(hosts.contains(&"fish-host1.example.com".to_string()));
         assert!(hosts.contains(&"fish-db.example.com".to_string()));
         assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn ssh_config_extracts_concrete_hosts() {
+        let text = include_str!("../../tests/fixtures/wizard/ssh_config.txt");
+        let hosts = parse_ssh_config(text);
+        assert!(hosts.contains(&"bastion.example.com".to_string()));
+        assert!(hosts.contains(&"db1".to_string()));
+        assert!(hosts.contains(&"db2".to_string()));
+        assert!(hosts.contains(&"indented-host.example.com".to_string()));
+    }
+
+    #[test]
+    fn ssh_config_skips_wildcards() {
+        let text = include_str!("../../tests/fixtures/wizard/ssh_config.txt");
+        let hosts = parse_ssh_config(text);
+        assert!(!hosts.iter().any(|h| h.contains('*')));
+        assert!(!hosts.iter().any(|h| h.contains('?')));
+        assert!(!hosts.contains(&"prod-*".to_string()));
     }
 }
 
