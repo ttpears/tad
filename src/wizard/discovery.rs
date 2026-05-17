@@ -84,8 +84,18 @@ fn extract_ssh_host(line: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn parse_fish_history(_text: &str) -> Vec<String> {
-    Vec::new()
+pub(crate) fn parse_fish_history(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- cmd:") {
+            let cmd = rest.trim();
+            if let Some(host) = extract_ssh_host(cmd) {
+                out.push(host);
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn parse_ssh_config(_text: &str) -> Vec<String> {
@@ -120,6 +130,15 @@ mod tests {
         assert!(!hosts.iter().any(|h| h.starts_with("-")));
         assert!(!hosts.iter().any(|h| h.contains('/')));
         assert!(!hosts.iter().any(|h| h.contains('@')));
+    }
+
+    #[test]
+    fn fish_history_extracts_hosts() {
+        let text = include_str!("../../tests/fixtures/wizard/shell_history_fish.txt");
+        let hosts = parse_fish_history(text);
+        assert!(hosts.contains(&"fish-host1.example.com".to_string()));
+        assert!(hosts.contains(&"fish-db.example.com".to_string()));
+        assert_eq!(hosts.len(), 2);
     }
 }
 

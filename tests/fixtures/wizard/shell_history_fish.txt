@@ -1,0 +1,8 @@
+- cmd: ls
+  when: 1700000000
+- cmd: ssh fish-host1.example.com
+  when: 1700000100
+- cmd: ssh user@fish-db.example.com -p 2222
+  when: 1700000200
+- cmd: git status
+  when: 1700000300
