@@ -70,7 +70,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match dashboard::run() {
         Ok(rc) => Ok(rc),
         Err(e) => {
-            eprintln!("tad: dashboard unavailable ({:#}); falling back to picker", e);
+            eprintln!(
+                "tad: dashboard unavailable ({:#}); falling back to picker",
+                e
+            );
             sessions::picker_fallback()
         }
     }
@@ -90,13 +93,17 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             groups::print_hosts(&group)?;
             Ok(0)
         }
-        Cmd::GroupsAdd { name, layout, hosts } => {
-            match (name, layout) {
-                (Some(n), Some(l)) if !hosts.is_empty() => groups::add(&n, &l, &hosts),
-                (None, None) => groups::add_interactive(),
-                _ => bail!("usage: tad groups-add NAME LAYOUT HOST [HOST...]  (or no args for the wizard)"),
-            }
-        }
+        Cmd::GroupsAdd {
+            name,
+            layout,
+            hosts,
+        } => match (name, layout) {
+            (Some(n), Some(l)) if !hosts.is_empty() => groups::add(&n, &l, &hosts),
+            (None, None) => groups::add_interactive(),
+            _ => bail!(
+                "usage: tad groups-add NAME LAYOUT HOST [HOST...]  (or no args for the wizard)"
+            ),
+        },
         Cmd::GroupsRm { name } => groups::remove(&name),
         Cmd::GroupsEdit => groups::edit(),
         Cmd::Config => crate::wizard::run_config(),

@@ -76,7 +76,11 @@ impl WizardState {
     pub fn for_config(config_exists: bool) -> Self {
         let mut s = Self::for_first_launch();
         s.config_exists = config_exists;
-        s.stage = if config_exists { Stage::EditMode } else { Stage::Welcome };
+        s.stage = if config_exists {
+            Stage::EditMode
+        } else {
+            Stage::Welcome
+        };
         s
     }
 
@@ -86,9 +90,7 @@ impl WizardState {
             Stage::Welcome => {
                 if self.sources.tmux_sessions {
                     Some(Stage::Sessions)
-                } else if self.sources.shell
-                    || self.sources.ssh_config
-                    || self.sources.known_hosts
+                } else if self.sources.shell || self.sources.ssh_config || self.sources.known_hosts
                 {
                     Some(Stage::Hosts)
                 } else {
@@ -96,10 +98,7 @@ impl WizardState {
                 }
             }
             Stage::Sessions => {
-                if self.sources.shell
-                    || self.sources.ssh_config
-                    || self.sources.known_hosts
-                {
+                if self.sources.shell || self.sources.ssh_config || self.sources.known_hosts {
                     Some(Stage::Hosts)
                 } else {
                     Some(Stage::Confirm)
@@ -276,7 +275,9 @@ pub fn run(entry: Entry) -> Result<()> {
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else { continue };
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -294,7 +295,9 @@ pub fn run(entry: Entry) -> Result<()> {
             Stage::Welcome => handle_welcome(&mut state, key, &mut cursors.welcome),
             Stage::Sessions => handle_sessions(&mut state, key, &mut cursors.sessions),
             Stage::Hosts => handle_hosts(&mut state, key, &mut cursors.hosts, &mut filter_mode),
-            Stage::BuildGroups => handle_build_groups(&mut state, key, &mut form_field, &mut cursors.built),
+            Stage::BuildGroups => {
+                handle_build_groups(&mut state, key, &mut form_field, &mut cursors.built)
+            }
             Stage::Confirm => {
                 if let KeyCode::Char(c) = key.code {
                     if c == 'y' || c == 'Y' {
@@ -326,8 +329,16 @@ fn previous_stage(state: &WizardState) -> Option<Stage> {
 
 fn handle_welcome(state: &mut WizardState, key: crossterm::event::KeyEvent, cursor: &mut usize) {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { if *cursor < 3 { *cursor += 1; } }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *cursor < 3 {
+                *cursor += 1;
+            }
+        }
         KeyCode::Char(' ') => state.toggle_source(*cursor),
         KeyCode::Enter => {
             if let Err(msg) = state.can_advance(Stage::Welcome) {
@@ -368,8 +379,16 @@ fn handle_sessions(state: &mut WizardState, key: crossterm::event::KeyEvent, cur
         return;
     }
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { if *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *cursor + 1 < len {
+                *cursor += 1;
+            }
+        }
         KeyCode::Char(' ') => {
             let name = state.session_candidates[*cursor].name.clone();
             if !state.selected_sessions.remove(&name) {
@@ -378,7 +397,9 @@ fn handle_sessions(state: &mut WizardState, key: crossterm::event::KeyEvent, cur
         }
         KeyCode::Char('l') => {
             let name = state.session_candidates[*cursor].name.clone();
-            let entry = state.session_overrides.entry(name.clone())
+            let entry = state
+                .session_overrides
+                .entry(name.clone())
                 .or_insert((name, 2));
             entry.1 = (entry.1 + 1) % LAYOUTS.len();
         }
@@ -393,7 +414,9 @@ fn handle_sessions(state: &mut WizardState, key: crossterm::event::KeyEvent, cur
 
 fn filtered_hosts(state: &WizardState) -> Vec<&HostCandidate> {
     let f = state.filter.to_lowercase();
-    state.host_candidates.iter()
+    state
+        .host_candidates
+        .iter()
         .filter(|c| f.is_empty() || c.host.to_lowercase().contains(&f))
         .collect()
 }
@@ -407,28 +430,46 @@ fn handle_hosts(
     if *filter_mode {
         match key.code {
             KeyCode::Enter | KeyCode::Esc => *filter_mode = false,
-            KeyCode::Backspace => { state.filter.pop(); }
+            KeyCode::Backspace => {
+                state.filter.pop();
+            }
             KeyCode::Char(c) => state.filter.push(c),
             _ => {}
         }
         *cursor = 0;
         return;
     }
-    let visible: Vec<String> = filtered_hosts(state).iter().map(|c| c.host.clone()).collect();
+    let visible: Vec<String> = filtered_hosts(state)
+        .iter()
+        .map(|c| c.host.clone())
+        .collect();
     let len = visible.len();
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { if len > 0 && *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if len > 0 && *cursor + 1 < len {
+                *cursor += 1;
+            }
+        }
         KeyCode::Char(' ') => {
             if let Some(h) = visible.get(*cursor) {
                 state.toggle_host(h);
             }
         }
         KeyCode::Char('a') => {
-            for h in &visible { state.selected_hosts.insert(h.clone()); }
+            for h in &visible {
+                state.selected_hosts.insert(h.clone());
+            }
         }
         KeyCode::Char('n') => state.selected_hosts.clear(),
-        KeyCode::Char('/') => { *filter_mode = true; state.filter.clear(); }
+        KeyCode::Char('/') => {
+            *filter_mode = true;
+            state.filter.clear();
+        }
         KeyCode::Enter => {
             if let Err(msg) = state.can_advance(Stage::Hosts) {
                 state.status_flash = Some(msg.to_string());
@@ -464,7 +505,9 @@ fn handle_build_groups(
             }
         }
         KeyCode::Char(c) if *form_field == 0 => state.form.name.push(c),
-        KeyCode::Backspace if *form_field == 0 => { state.form.name.pop(); }
+        KeyCode::Backspace if *form_field == 0 => {
+            state.form.name.pop();
+        }
         KeyCode::Char(' ') if *form_field == 2 => {
             let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
             if let Some(h) = hosts.get(*cursor_built) {
@@ -473,10 +516,16 @@ fn handle_build_groups(
                 }
             }
         }
-        KeyCode::Up if *form_field == 2 => { if *cursor_built > 0 { *cursor_built -= 1; } }
+        KeyCode::Up if *form_field == 2 => {
+            if *cursor_built > 0 {
+                *cursor_built -= 1;
+            }
+        }
         KeyCode::Down if *form_field == 2 => {
             let n = state.selected_hosts.len();
-            if n > 0 && *cursor_built + 1 < n { *cursor_built += 1; }
+            if n > 0 && *cursor_built + 1 < n {
+                *cursor_built += 1;
+            }
         }
         KeyCode::Enter => {
             if state.form.name.trim().is_empty() {
@@ -501,8 +550,16 @@ fn handle_edit_mode(state: &mut WizardState, key: crossterm::event::KeyEvent, cu
     let names: Vec<String> = doc.groups.keys().cloned().collect();
     let len = names.len();
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
-        KeyCode::Down | KeyCode::Char('j') => { if len > 0 && *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if len > 0 && *cursor + 1 < len {
+                *cursor += 1;
+            }
+        }
         KeyCode::Char('d') => {
             if let Some(name) = names.get(*cursor) {
                 let mut d = config::load().unwrap_or_default();
@@ -524,9 +581,16 @@ fn write_and_finish(state: &mut WizardState) -> Result<()> {
     let count = incoming.len();
     let renames = merge_into_doc(&mut doc, incoming);
     config::save(&doc)?;
-    let mut msg = format!("wrote {} groups to {}", count, config::config_path().display());
+    let mut msg = format!(
+        "wrote {} groups to {}",
+        count,
+        config::config_path().display()
+    );
     if !renames.is_empty() {
-        let rs: Vec<String> = renames.iter().map(|(a, b)| format!("{}→{}", a, b)).collect();
+        let rs: Vec<String> = renames
+            .iter()
+            .map(|(a, b)| format!("{}→{}", a, b))
+            .collect();
         msg.push_str(&format!(" (renamed: {})", rs.join(", ")));
     }
     state.status_flash = Some(msg);
@@ -534,11 +598,21 @@ fn write_and_finish(state: &mut WizardState) -> Result<()> {
     Ok(())
 }
 
-fn draw(f: &mut Frame, state: &WizardState, cursors: &Cursors, filter_mode: bool, form_field: usize) {
+fn draw(
+    f: &mut Frame,
+    state: &WizardState,
+    cursors: &Cursors,
+    filter_mode: bool,
+    form_field: usize,
+) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
         .split(area);
     draw_header(f, chunks[0], state);
     draw_body(f, chunks[1], state, cursors, filter_mode, form_field);
@@ -581,7 +655,10 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &WizardState, filter_mode: bool
     let mut lines = vec![Line::from(hint)];
     if let Some(flash) = &state.status_flash {
         if state.stage != Stage::Done {
-            lines.push(Line::from(Span::styled(flash.clone(), Style::default().add_modifier(Modifier::REVERSED))));
+            lines.push(Line::from(Span::styled(
+                flash.clone(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            )));
         }
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -598,11 +675,25 @@ fn draw_body(
     match state.stage {
         Stage::EditMode => {
             let doc = config::load().unwrap_or_default();
-            let items: Vec<ListItem> = doc.groups.iter().enumerate().map(|(i, (n, g))| {
-                let marker = if i == cursors.edit { "→ " } else { "  " };
-                ListItem::new(format!("{}{:<20} {:<14} {} hosts", marker, n, g.layout, g.hosts.len()))
-            }).collect();
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Groups")), area);
+            let items: Vec<ListItem> = doc
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(i, (n, g))| {
+                    let marker = if i == cursors.edit { "→ " } else { "  " };
+                    ListItem::new(format!(
+                        "{}{:<20} {:<14} {} hosts",
+                        marker,
+                        n,
+                        g.layout,
+                        g.hosts.len()
+                    ))
+                })
+                .collect();
+            f.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title("Groups")),
+                area,
+            );
         }
         Stage::Welcome => {
             let labels = [
@@ -611,43 +702,109 @@ fn draw_body(
                 "~/.ssh/known_hosts  accepted hosts (not hashed)",
                 "Tmux sessions       import existing sessions as groups",
             ];
-            let on = [state.sources.shell, state.sources.ssh_config, state.sources.known_hosts, state.sources.tmux_sessions];
-            let items: Vec<ListItem> = labels.iter().enumerate().map(|(i, l)| {
-                let mark = if i == cursors.welcome { "→ " } else { "  " };
-                let box_ = if on[i] { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{}{} {}", mark, box_, l))
-            }).collect();
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Sources")), area);
+            let on = [
+                state.sources.shell,
+                state.sources.ssh_config,
+                state.sources.known_hosts,
+                state.sources.tmux_sessions,
+            ];
+            let items: Vec<ListItem> = labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let mark = if i == cursors.welcome { "→ " } else { "  " };
+                    let box_ = if on[i] { "[x]" } else { "[ ]" };
+                    ListItem::new(format!("{}{} {}", mark, box_, l))
+                })
+                .collect();
+            f.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title("Sources")),
+                area,
+            );
         }
         Stage::Sessions => {
-            let items: Vec<ListItem> = state.session_candidates.iter().enumerate().map(|(i, s)| {
-                let mark = if i == cursors.sessions { "→ " } else { "  " };
-                let box_ = if state.selected_sessions.contains(&s.name) { "[x]" } else { "[ ]" };
-                let (gname, layout_idx) = state.session_overrides.get(&s.name).cloned()
-                    .unwrap_or_else(|| (s.name.clone(), 2));
-                let tail = if !s.usable { "  (skipped: no host-like windows)" } else { "" };
-                ListItem::new(format!("{}{} {:<20} {} windows  group:{:<18} layout:{}{}",
-                    mark, box_, s.name, s.windows.len(), gname, LAYOUTS[layout_idx], tail))
-            }).collect();
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Tmux sessions")), area);
+            let items: Vec<ListItem> = state
+                .session_candidates
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let mark = if i == cursors.sessions { "→ " } else { "  " };
+                    let box_ = if state.selected_sessions.contains(&s.name) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    let (gname, layout_idx) = state
+                        .session_overrides
+                        .get(&s.name)
+                        .cloned()
+                        .unwrap_or_else(|| (s.name.clone(), 2));
+                    let tail = if !s.usable {
+                        "  (skipped: no host-like windows)"
+                    } else {
+                        ""
+                    };
+                    ListItem::new(format!(
+                        "{}{} {:<20} {} windows  group:{:<18} layout:{}{}",
+                        mark,
+                        box_,
+                        s.name,
+                        s.windows.len(),
+                        gname,
+                        LAYOUTS[layout_idx],
+                        tail
+                    ))
+                })
+                .collect();
+            f.render_widget(
+                List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Tmux sessions"),
+                ),
+                area,
+            );
         }
         Stage::Hosts => {
             let visible = filtered_hosts(state);
-            let items: Vec<ListItem> = visible.iter().enumerate().map(|(i, c)| {
-                let mark = if i == cursors.hosts { "→ " } else { "  " };
-                let box_ = if state.selected_hosts.contains(&c.host) { "[x]" } else { "[ ]" };
-                let mut tags = Vec::new();
-                if c.sources.shell { tags.push("shell"); }
-                if c.sources.ssh_config { tags.push("ssh-config"); }
-                if c.sources.known_hosts { tags.push("known-hosts"); }
-                ListItem::new(format!("{}{} {:<30} ({})", mark, box_, c.host, tags.join(", ")))
-            }).collect();
+            let items: Vec<ListItem> = visible
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let mark = if i == cursors.hosts { "→ " } else { "  " };
+                    let box_ = if state.selected_hosts.contains(&c.host) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    let mut tags = Vec::new();
+                    if c.sources.shell {
+                        tags.push("shell");
+                    }
+                    if c.sources.ssh_config {
+                        tags.push("ssh-config");
+                    }
+                    if c.sources.known_hosts {
+                        tags.push("known-hosts");
+                    }
+                    ListItem::new(format!(
+                        "{}{} {:<30} ({})",
+                        mark,
+                        box_,
+                        c.host,
+                        tags.join(", ")
+                    ))
+                })
+                .collect();
             let title = if state.filter.is_empty() {
                 "Hosts".to_string()
             } else {
                 format!("Hosts (filter: {})", state.filter)
             };
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title(title)), area);
+            f.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+                area,
+            );
         }
         Stage::BuildGroups => {
             let cols = Layout::default()
@@ -655,13 +812,32 @@ fn draw_body(
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
             let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
-            let items: Vec<ListItem> = hosts.iter().enumerate().map(|(i, h)| {
-                let mark = if form_field == 2 && i == cursors.built { "→ " } else { "  " };
-                let box_ = if state.form.members.contains(h) { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{}{} {}", mark, box_, h))
-            }).collect();
-            let title = if form_field == 2 { "Members ●" } else { "Members" };
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title(title)), cols[0]);
+            let items: Vec<ListItem> = hosts
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let mark = if form_field == 2 && i == cursors.built {
+                        "→ "
+                    } else {
+                        "  "
+                    };
+                    let box_ = if state.form.members.contains(h) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    ListItem::new(format!("{}{} {}", mark, box_, h))
+                })
+                .collect();
+            let title = if form_field == 2 {
+                "Members ●"
+            } else {
+                "Members"
+            };
+            f.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+                cols[0],
+            );
 
             let right = Layout::default()
                 .direction(Direction::Vertical)
@@ -671,19 +847,38 @@ fn draw_body(
             f.render_widget(
                 Paragraph::new(state.form.name.as_str())
                     .block(Block::default().borders(Borders::ALL).title(name_title)),
-                Rect { x: right[0].x, y: right[0].y, width: right[0].width, height: 3 },
+                Rect {
+                    x: right[0].x,
+                    y: right[0].y,
+                    width: right[0].width,
+                    height: 3,
+                },
             );
-            let layout_title = if form_field == 1 { "Layout ●" } else { "Layout" };
+            let layout_title = if form_field == 1 {
+                "Layout ●"
+            } else {
+                "Layout"
+            };
             f.render_widget(
                 Paragraph::new(LAYOUTS[state.form.layout_idx])
                     .block(Block::default().borders(Borders::ALL).title(layout_title)),
-                Rect { x: right[0].x, y: right[0].y + 3, width: right[0].width, height: 2 },
+                Rect {
+                    x: right[0].x,
+                    y: right[0].y + 3,
+                    width: right[0].width,
+                    height: 2,
+                },
             );
-            let built_items: Vec<ListItem> = state.built.iter().map(|(n, g)| {
-                ListItem::new(format!("{} ({}, {} hosts)", n, g.layout, g.hosts.len()))
-            }).collect();
+            let built_items: Vec<ListItem> = state
+                .built
+                .iter()
+                .map(|(n, g)| {
+                    ListItem::new(format!("{} ({}, {} hosts)", n, g.layout, g.hosts.len()))
+                })
+                .collect();
             f.render_widget(
-                List::new(built_items).block(Block::default().borders(Borders::ALL).title("Built so far")),
+                List::new(built_items)
+                    .block(Block::default().borders(Borders::ALL).title("Built so far")),
                 right[1],
             );
         }
@@ -692,20 +887,33 @@ fn draw_body(
             let mut lines = Vec::new();
             if state.config_exists {
                 lines.push(Line::from(Span::styled(
-                    format!("{} new groups will be merged into existing config", incoming.len()),
+                    format!(
+                        "{} new groups will be merged into existing config",
+                        incoming.len()
+                    ),
                     Style::default().add_modifier(Modifier::BOLD),
                 )));
             }
             for (n, g) in &incoming {
-                lines.push(Line::from(format!("  {:<20} {:<14} hosts: {}", n, g.layout, g.hosts.join(", "))));
+                lines.push(Line::from(format!(
+                    "  {:<20} {:<14} hosts: {}",
+                    n,
+                    g.layout,
+                    g.hosts.join(", ")
+                )));
             }
             f.render_widget(
-                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Confirm")).wrap(Wrap { trim: false }),
+                Paragraph::new(lines)
+                    .block(Block::default().borders(Borders::ALL).title("Confirm"))
+                    .wrap(Wrap { trim: false }),
                 area,
             );
         }
         Stage::Done | Stage::Cancelled => {
-            let msg = state.status_flash.clone().unwrap_or_else(|| "done".to_string());
+            let msg = state
+                .status_flash
+                .clone()
+                .unwrap_or_else(|| "done".to_string());
             f.render_widget(Paragraph::new(msg), area);
         }
     }
@@ -727,14 +935,24 @@ mod tests {
     #[test]
     fn next_stage_skips_sessions_when_off() {
         let mut s = WizardState::for_first_launch();
-        s.sources = SourceSet { shell: true, ssh_config: false, known_hosts: false, tmux_sessions: false };
+        s.sources = SourceSet {
+            shell: true,
+            ssh_config: false,
+            known_hosts: false,
+            tmux_sessions: false,
+        };
         assert_eq!(s.next_stage_from(Stage::Welcome), Some(Stage::Hosts));
     }
 
     #[test]
     fn next_stage_skips_hosts_when_only_sessions_on() {
         let mut s = WizardState::for_first_launch();
-        s.sources = SourceSet { shell: false, ssh_config: false, known_hosts: false, tmux_sessions: true };
+        s.sources = SourceSet {
+            shell: false,
+            ssh_config: false,
+            known_hosts: false,
+            tmux_sessions: true,
+        };
         assert_eq!(s.next_stage_from(Stage::Welcome), Some(Stage::Sessions));
         assert_eq!(s.next_stage_from(Stage::Sessions), Some(Stage::Confirm));
     }
@@ -785,7 +1003,8 @@ mod tests {
             usable: true,
         }];
         s.selected_sessions.insert("tmuxA".into());
-        s.session_overrides.insert("tmuxA".into(), ("renamed".into(), 0));
+        s.session_overrides
+            .insert("tmuxA".into(), ("renamed".into(), 0));
         s.form.name = "hand".into();
         s.form.members.insert("h3".into());
         s.commit_form().unwrap();
@@ -799,8 +1018,20 @@ mod tests {
     #[test]
     fn merge_into_doc_resolves_collisions() {
         let mut doc = config::Doc::default();
-        doc.groups.insert("g".into(), config::Group { layout: "windows".into(), hosts: vec!["x".into()] });
-        let incoming = vec![("g".into(), config::Group { layout: "panes".into(), hosts: vec!["y".into()] })];
+        doc.groups.insert(
+            "g".into(),
+            config::Group {
+                layout: "windows".into(),
+                hosts: vec!["x".into()],
+            },
+        );
+        let incoming = vec![(
+            "g".into(),
+            config::Group {
+                layout: "panes".into(),
+                hosts: vec!["y".into()],
+            },
+        )];
         let renames = merge_into_doc(&mut doc, incoming);
         assert_eq!(renames, vec![("g".into(), "g-2".into())]);
         assert!(doc.groups.contains_key("g"));
@@ -814,8 +1045,20 @@ mod tests {
     fn end_to_end_assemble_from_session_and_handbuilt() {
         let mut s = WizardState::for_first_launch();
         s.host_candidates = vec![
-            HostCandidate { host: "h1".into(), sources: SourceFlags { shell: true, ..Default::default() } },
-            HostCandidate { host: "h2".into(), sources: SourceFlags { ssh_config: true, ..Default::default() } },
+            HostCandidate {
+                host: "h1".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+            },
+            HostCandidate {
+                host: "h2".into(),
+                sources: SourceFlags {
+                    ssh_config: true,
+                    ..Default::default()
+                },
+            },
         ];
         s.session_candidates = vec![SessionCandidate {
             name: "tmux1".into(),

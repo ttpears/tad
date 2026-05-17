@@ -135,13 +135,7 @@ pub fn scan_tmux_sessions() -> Vec<SessionCandidate> {
         .collect();
     let mut raw = Vec::new();
     for name in names {
-        let wins = match tmux::run([
-            "list-windows",
-            "-t",
-            &name,
-            "-F",
-            "#{window_name}",
-        ]) {
+        let wins = match tmux::run(["list-windows", "-t", &name, "-F", "#{window_name}"]) {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .filter(|l| !l.is_empty())
@@ -158,7 +152,11 @@ pub(crate) fn scan_tmux_sessions_from(raw: Vec<(String, Vec<String>)>) -> Vec<Se
     raw.into_iter()
         .map(|(name, windows)| {
             let usable = windows.iter().any(|w| is_usable_window_name(w));
-            SessionCandidate { name, windows, usable }
+            SessionCandidate {
+                name,
+                windows,
+                usable,
+            }
         })
         .collect()
 }
@@ -193,8 +191,8 @@ fn extract_ssh_host(line: &str) -> Option<String> {
         return None;
     }
     const FLAGS_WITH_VALUE: &[&str] = &[
-        "-p", "-i", "-o", "-l", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-F",
-        "-I", "-m", "-O", "-Q", "-S", "-W", "-w", "-B",
+        "-p", "-i", "-o", "-l", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-F", "-I", "-m", "-O",
+        "-Q", "-S", "-W", "-w", "-B",
     ];
     let mut skip_next = false;
     for tok in tokens {
@@ -291,6 +289,36 @@ pub(crate) fn parse_known_hosts(text: &str) -> Vec<String> {
     out
 }
 
+pub(crate) fn aggregate(
+    shell: Vec<String>,
+    ssh_config: Vec<String>,
+    known_hosts: Vec<String>,
+) -> Vec<HostCandidate> {
+    let mut map: BTreeMap<String, (String, SourceFlags)> = BTreeMap::new();
+    let mut record = |host: String, set: fn(&mut SourceFlags)| {
+        let key = host.to_lowercase();
+        let entry = map
+            .entry(key)
+            .or_insert((host.clone(), SourceFlags::default()));
+        set(&mut entry.1);
+    };
+    for h in shell {
+        record(h, |f| f.shell = true);
+    }
+    for h in ssh_config {
+        record(h, |f| f.ssh_config = true);
+    }
+    for h in known_hosts {
+        record(h, |f| f.known_hosts = true);
+    }
+    map.into_iter()
+        .map(|(_, (display, sources))| HostCandidate {
+            host: display,
+            sources,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,7 +402,10 @@ mod tests {
             vec!["foo.example.com".to_string()],
             vec!["BAR".to_string(), "baz".to_string()],
         );
-        let foo = result.iter().find(|c| c.host.eq_ignore_ascii_case("foo.example.com")).unwrap();
+        let foo = result
+            .iter()
+            .find(|c| c.host.eq_ignore_ascii_case("foo.example.com"))
+            .unwrap();
         assert_eq!(foo.host, "Foo.Example.com"); // first-seen casing preserved
         assert!(foo.sources.shell);
         assert!(foo.sources.ssh_config);
@@ -408,10 +439,22 @@ mod tests {
     #[test]
     fn tmux_sessions_marks_unusable_when_all_windows_are_shell_names() {
         let raw = vec![
-            ("prod-web".to_string(), vec!["host1".to_string(), "host2".to_string()]),
-            ("just-shell".to_string(), vec!["bash".to_string(), "zsh".to_string()]),
-            ("numbers".to_string(), vec!["1".to_string(), "2".to_string()]),
-            ("mixed".to_string(), vec!["bash".to_string(), "realhost".to_string()]),
+            (
+                "prod-web".to_string(),
+                vec!["host1".to_string(), "host2".to_string()],
+            ),
+            (
+                "just-shell".to_string(),
+                vec!["bash".to_string(), "zsh".to_string()],
+            ),
+            (
+                "numbers".to_string(),
+                vec!["1".to_string(), "2".to_string()],
+            ),
+            (
+                "mixed".to_string(),
+                vec!["bash".to_string(), "realhost".to_string()],
+            ),
         ];
         let candidates = scan_tmux_sessions_from(raw);
         let by_name: std::collections::HashMap<_, _> =
@@ -421,23 +464,4 @@ mod tests {
         assert!(!by_name["numbers"].usable);
         assert!(by_name["mixed"].usable);
     }
-}
-
-pub(crate) fn aggregate(
-    shell: Vec<String>,
-    ssh_config: Vec<String>,
-    known_hosts: Vec<String>,
-) -> Vec<HostCandidate> {
-    let mut map: BTreeMap<String, (String, SourceFlags)> = BTreeMap::new();
-    let mut record = |host: String, set: fn(&mut SourceFlags)| {
-        let key = host.to_lowercase();
-        let entry = map.entry(key).or_insert((host.clone(), SourceFlags::default()));
-        set(&mut entry.1);
-    };
-    for h in shell { record(h, |f| f.shell = true); }
-    for h in ssh_config { record(h, |f| f.ssh_config = true); }
-    for h in known_hosts { record(h, |f| f.known_hosts = true); }
-    map.into_iter()
-        .map(|(_, (display, sources))| HostCandidate { host: display, sources })
-        .collect()
 }

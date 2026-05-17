@@ -42,18 +42,16 @@ pub fn load() -> Result<Doc> {
     if !path.exists() {
         return Ok(Doc::default());
     }
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let doc: Doc = serde_yml::from_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let doc: Doc =
+        serde_yml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(doc)
 }
 
 pub fn save(doc: &Doc) -> Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut out = Doc {
         meta: default_meta(),
@@ -63,22 +61,8 @@ pub fn save(doc: &Doc) -> Result<()> {
         out.meta = doc.meta.clone();
     }
     let text = serde_yml::to_string(&out)?;
-    fs::write(&path, text)
-        .with_context(|| format!("writing {}", path.display()))?;
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn config_dir_is_parent_of_config_path() {
-        let dir = config_dir();
-        let path = config_path();
-        assert_eq!(path.parent().unwrap(), dir);
-        assert!(dir.ends_with("tad"));
-    }
 }
 
 fn default_meta() -> serde_yml::Value {
@@ -96,4 +80,17 @@ fn default_meta() -> serde_yml::Value {
         "groups.<name>.hosts = [fqdn, ...]".into(),
     );
     serde_yml::Value::Mapping(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_dir_is_parent_of_config_path() {
+        let dir = config_dir();
+        let path = config_path();
+        assert_eq!(path.parent().unwrap(), dir);
+        assert!(dir.ends_with("tad"));
+    }
 }

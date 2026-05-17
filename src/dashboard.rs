@@ -90,7 +90,11 @@ impl AppData {
             gs.sort();
         }
         let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
-        Self { sessions, groups, hosts }
+        Self {
+            sessions,
+            groups,
+            hosts,
+        }
     }
 }
 
@@ -98,7 +102,10 @@ enum OpenTarget {
     /// Attach to an existing session by name, no prompt.
     AttachExisting(String),
     /// Create a new session, optionally running `ssh <host>` as its command.
-    CreateNew { name: String, host: Option<String> },
+    CreateNew {
+        name: String,
+        host: Option<String>,
+    },
     Group(String),
     Host(String),
 }
@@ -136,9 +143,17 @@ impl App {
     fn new() -> Self {
         let data = AppData::load();
         let mut s = ListState::default();
-        s.select(if data.sessions.is_empty() { None } else { Some(0) });
+        s.select(if data.sessions.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
         let mut g = ListState::default();
-        g.select(if data.groups.is_empty() { None } else { Some(0) });
+        g.select(if data.groups.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
         let mut h = ListState::default();
         h.select(if data.hosts.is_empty() { None } else { Some(0) });
         App {
@@ -228,9 +243,7 @@ pub fn run() -> Result<i32> {
 
     let app = result?;
     match app.open_after {
-        Some(OpenTarget::AttachExisting(name)) => {
-            sessions::attach_or_create_silent(&name, None)
-        }
+        Some(OpenTarget::AttachExisting(name)) => sessions::attach_or_create_silent(&name, None),
         Some(OpenTarget::CreateNew { name, host }) => {
             sessions::attach_or_create_silent(&name, host.as_deref())
         }
@@ -304,7 +317,11 @@ fn handle_new_session_key(app: &mut App, code: KeyCode) {
             }
             let host = {
                 let h = app.new_session_host.trim();
-                if h.is_empty() { None } else { Some(h.to_string()) }
+                if h.is_empty() {
+                    None
+                } else {
+                    Some(h.to_string())
+                }
             };
             app.input_mode = InputMode::None;
             app.new_session_name.clear();
@@ -325,16 +342,14 @@ fn handle_new_session_key(app: &mut App, code: KeyCode) {
                 NewSessionField::Host => NewSessionField::Name,
             };
         }
-        KeyCode::Backspace => {
-            match app.new_session_field {
-                NewSessionField::Name => {
-                    app.new_session_name.pop();
-                }
-                NewSessionField::Host => {
-                    app.new_session_host.pop();
-                }
+        KeyCode::Backspace => match app.new_session_field {
+            NewSessionField::Name => {
+                app.new_session_name.pop();
             }
-        }
+            NewSessionField::Host => {
+                app.new_session_host.pop();
+            }
+        },
         KeyCode::Char(c) => match app.new_session_field {
             NewSessionField::Name => app.new_session_name.push(c),
             NewSessionField::Host => app.new_session_host.push(c),
@@ -485,7 +500,9 @@ fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
     let active = app.new_session_field;
     let field_line = |label: &str, value: &str, active: bool, placeholder: &str| -> Line<'static> {
         let label_style = if active {
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.muted)
         };
@@ -601,7 +618,9 @@ fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'stati
         marker,
         Span::styled(
             format!("{:<22}", truncate(&s.name, 22)),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3}w  ", s.windows),
@@ -624,7 +643,9 @@ fn format_group_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static>
     Line::from(vec![
         Span::styled(
             format!("{:<28}", truncate(name, 28)),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3} hosts  ", g.hosts.len()),
@@ -667,7 +688,9 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(app.theme.muted),
         ))],
     };
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
@@ -694,7 +717,9 @@ fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
         Span::styled("session: ", Style::default().fg(theme.muted)),
         Span::styled(
             name.to_string(),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
     ])];
     lines.push(Line::from(""));
@@ -724,7 +749,9 @@ fn preview_group(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>
             Span::styled("group: ", Style::default().fg(theme.muted)),
             Span::styled(
                 name.to_string(),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -757,13 +784,12 @@ fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>>
             Span::styled("host: ", Style::default().fg(theme.muted)),
             Span::styled(
                 name.to_string(),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(Span::styled(
-            "member of:",
-            Style::default().fg(theme.fg),
-        )),
+        Line::from(Span::styled("member of:", Style::default().fg(theme.fg))),
     ];
     for g in &in_groups {
         lines.push(Line::from(Span::styled(
@@ -793,10 +819,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
                 vec![
                     Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
-                    Span::styled(
-                        format!("{}  ", label),
-                        Style::default().fg(theme.fg),
-                    ),
+                    Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
                 ]
             };
             let mut spans = Vec::new();

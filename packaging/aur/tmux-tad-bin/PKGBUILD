@@ -8,9 +8,11 @@ arch=('x86_64')
 url="https://github.com/ttpears/tad"
 license=('MIT')
 depends=('tmux' 'gcc-libs' 'glibc')
+provides=("tmux-tad=$pkgver")
 # Installs /usr/bin/tad — collides with the unrelated AUR `tad-bin`
-# (CSV viewer) and `tad` (C++ array library) packages.
-conflicts=('tad-bin' 'tad')
+# (CSV viewer) and `tad` (C++ array library) packages, plus a future
+# from-source sibling `tmux-tad` package (ships the same binary).
+conflicts=('tad-bin' 'tad' 'tmux-tad')
 source=(
     "$_pkgname-$pkgver::$url/releases/download/v$pkgver/tad-v$pkgver-x86_64-linux"
     "tad.bash-$pkgver::$url/releases/download/v$pkgver/tad.bash"
