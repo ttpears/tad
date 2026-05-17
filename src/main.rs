@@ -6,6 +6,7 @@ mod config;
 mod dashboard;
 mod groups;
 mod sessions;
+mod theme;
 mod tmux;
 
 fn main() {

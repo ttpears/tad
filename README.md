@@ -99,12 +99,35 @@ Keys:
 - `1`, `2`, `3`          jump to Sessions / Groups / Hosts
 - `g` / `G`              first / last item
 - `Enter`                open the highlighted item
+- `n`                    new session — opens a name prompt (preseeded
+                         with the highlighted item's short name; edit
+                         and Enter to create)
 - `d`                    kill (sessions view only)
 - `/`                    enter filter mode (type to filter, Esc/Enter exits)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
 
 Sessions/groups/hosts auto-refresh every ~1.5 seconds.
+
+## Theme
+
+Set in `~/.config/tad/config.yaml`. Default is `tokyonight`. See
+`examples/config.yaml.example`.
+
+Built-in names: `tokyonight`, `tokyonight-storm`, `dracula`, `nord`,
+`gruvbox`, `catppuccin`, `solarized-dark`, `onedark`, `terminal`.
+
+```yaml
+theme: catppuccin
+```
+
+Or override individual colors inline (hex `#rrggbb`):
+
+```yaml
+theme:
+  accent: "#ff79c6"
+  selection_bg: "#222536"
+```
 
 ## Files
 

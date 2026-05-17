@@ -10,9 +10,9 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
 use std::time::{Duration, Instant};
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crate::{
     config, groups,
     sessions::{self, Session},
+    theme::{self, Theme},
     tmux,
 };
 
@@ -100,6 +101,13 @@ enum OpenTarget {
     Host(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    None,
+    Filter,
+    NewSession,
+}
+
 struct App {
     view: View,
     data: AppData,
@@ -107,9 +115,11 @@ struct App {
     list_state_groups: ListState,
     list_state_hosts: ListState,
     filter: String,
-    filter_mode: bool,
+    input_mode: InputMode,
+    input_buffer: String,
     should_quit: bool,
     open_after: Option<OpenTarget>,
+    theme: Theme,
 }
 
 impl App {
@@ -128,9 +138,11 @@ impl App {
             list_state_groups: g,
             list_state_hosts: h,
             filter: String::new(),
-            filter_mode: false,
+            input_mode: InputMode::None,
+            input_buffer: String::new(),
             should_quit: false,
             open_after: None,
+            theme: theme::load(),
         }
     }
 
@@ -224,10 +236,10 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                if app.filter_mode {
-                    handle_filter_key(&mut app, key.code);
-                } else {
-                    handle_key(&mut app, key.code, key.modifiers);
+                match app.input_mode {
+                    InputMode::Filter => handle_filter_key(&mut app, key.code),
+                    InputMode::NewSession => handle_new_session_key(&mut app, key.code),
+                    InputMode::None => handle_key(&mut app, key.code, key.modifiers),
                 }
             }
         }
@@ -239,7 +251,7 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
 
 fn handle_filter_key(app: &mut App, code: KeyCode) {
     match code {
-        KeyCode::Enter | KeyCode::Esc => app.filter_mode = false,
+        KeyCode::Enter | KeyCode::Esc => app.input_mode = InputMode::None,
         KeyCode::Backspace => {
             app.filter.pop();
         }
@@ -251,6 +263,29 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
     match state.selected() {
         Some(i) if i >= len => state.select(if len == 0 { None } else { Some(len - 1) }),
         None if len > 0 => state.select(Some(0)),
+        _ => {}
+    }
+}
+
+fn handle_new_session_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::None;
+            app.input_buffer.clear();
+        }
+        KeyCode::Enter => {
+            let name = app.input_buffer.trim().to_string();
+            app.input_mode = InputMode::None;
+            app.input_buffer.clear();
+            if !name.is_empty() {
+                app.open_after = Some(OpenTarget::Session(name));
+                app.should_quit = true;
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => app.input_buffer.push(c),
         _ => {}
     }
 }
@@ -298,12 +333,21 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('/') => {
-            app.filter_mode = true;
+            app.input_mode = InputMode::Filter;
             app.filter.clear();
             let len = app.items().len();
             if len > 0 {
                 app.list_state_mut().select(Some(0));
             }
+        }
+        KeyCode::Char('n') => {
+            // Pre-seed the new-session name from the highlighted item so
+            // the user can edit instead of typing from scratch.
+            app.input_buffer = app
+                .selected()
+                .map(|s| short_name(&s))
+                .unwrap_or_default();
+            app.input_mode = InputMode::NewSession;
         }
         KeyCode::Char('r') => app.refresh(),
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
@@ -336,6 +380,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_tabs(f, chunks[0], app);
     render_main(f, chunks[1], app);
     render_status(f, chunks[2], app);
+
+    if app.input_mode == InputMode::NewSession {
+        render_new_session_modal(f, area, app);
+    }
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
@@ -344,15 +392,53 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         .map(|v| Line::from(v.title()))
         .collect();
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" tad "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.theme.border))
+                .title(" tad "),
+        )
         .select(app.view.index())
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(app.theme.muted))
         .highlight_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         );
     f.render_widget(tabs, area);
+}
+
+fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
+    let width = 60.min(area.width.saturating_sub(4));
+    let height = 5;
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .title(Span::styled(
+            " new session ",
+            Style::default()
+                .fg(app.theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = Paragraph::new(Line::from(vec![
+        Span::styled("name: ", Style::default().fg(app.theme.muted)),
+        Span::styled(
+            app.input_buffer.clone(),
+            Style::default()
+                .fg(app.theme.fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("_", Style::default().fg(app.theme.accent)),
+        Span::raw("    "),
+        Span::styled(
+            "↵ create   Esc cancel",
+            Style::default().fg(app.theme.muted),
+        ),
+    ]))
+    .block(block);
+    f.render_widget(inner, popup);
 }
 
 fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
@@ -366,29 +452,35 @@ fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     let items_strs = app.items();
+    let theme = &app.theme;
     let list_items: Vec<ListItem> = items_strs
         .iter()
         .map(|name| {
             let line = match app.view {
-                View::Sessions => format_session_line(&app.data, name),
-                View::Groups => format_group_line(&app.data, name),
-                View::Hosts => format_host_line(&app.data, name),
+                View::Sessions => format_session_line(&app.data, name, theme),
+                View::Groups => format_group_line(&app.data, name, theme),
+                View::Hosts => format_host_line(&app.data, name, theme),
             };
             ListItem::new(line)
         })
         .collect();
 
-    let title = if app.filter_mode || !app.filter.is_empty() {
+    let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
         format!(" {} — /{} ", app.view.title(), app.filter)
     } else {
         format!(" {} ({}) ", app.view.title(), items_strs.len())
     };
 
     let list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.theme.border))
+                .title(title),
+        )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(app.theme.selection_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -401,13 +493,13 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, area, state);
 }
 
-fn format_session_line(data: &AppData, name: &str) -> Line<'static> {
+fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     let s = match data.sessions.iter().find(|s| s.name == name) {
         Some(s) => s,
         None => return Line::from(name.to_string()),
     };
     let marker = if s.attached {
-        Span::styled("● ", Style::default().fg(Color::Green))
+        Span::styled("● ", Style::default().fg(theme.success))
     } else {
         Span::raw("  ")
     };
@@ -415,27 +507,22 @@ fn format_session_line(data: &AppData, name: &str) -> Line<'static> {
         marker,
         Span::styled(
             format!("{:<22}", truncate(&s.name, 22)),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3}w  ", s.windows),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.warning),
         ),
         Span::styled(
             format!("{:<12}", truncate(&s.active_window, 12)),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.fg),
         ),
         Span::raw(" "),
-        Span::styled(
-            s.activity_str.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled(s.activity_str.clone(), Style::default().fg(theme.muted)),
     ])
 }
 
-fn format_group_line(data: &AppData, name: &str) -> Line<'static> {
+fn format_group_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     let g = match data.groups.iter().find(|(n, _)| n == name) {
         Some((_, g)) => g,
         None => return Line::from(name.to_string()),
@@ -443,22 +530,17 @@ fn format_group_line(data: &AppData, name: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{:<28}", truncate(name, 28)),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{:>3} hosts  ", g.hosts.len()),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.warning),
         ),
-        Span::styled(
-            g.layout.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled(g.layout.clone(), Style::default().fg(theme.muted)),
     ])
 }
 
-fn format_host_line(data: &AppData, name: &str) -> Line<'static> {
+fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     let in_groups = data
         .hosts
         .iter()
@@ -468,34 +550,34 @@ fn format_host_line(data: &AppData, name: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{:<45}", truncate(name, 45)),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.accent),
         ),
         Span::raw("  "),
-        Span::styled(
-            in_groups.join(", "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled(in_groups.join(", "), Style::default().fg(theme.muted)),
     ])
 }
 
 fn render_preview(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" preview ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(" preview ");
     let lines: Vec<Line> = match app.selected() {
         Some(name) => match app.view {
-            View::Sessions => preview_session(&name),
-            View::Groups => preview_group(&app.data, &name),
-            View::Hosts => preview_host(&app.data, &name),
+            View::Sessions => preview_session(&name, &app.theme),
+            View::Groups => preview_group(&app.data, &name, &app.theme),
+            View::Hosts => preview_host(&app.data, &name, &app.theme),
         },
         None => vec![Line::from(Span::styled(
             "no selection",
-            Style::default().add_modifier(Modifier::DIM),
+            Style::default().fg(app.theme.muted),
         ))],
     };
     let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
-fn preview_session(name: &str) -> Vec<Line<'static>> {
+fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
     let windows = tmux::run([
         "list-windows",
         "-t",
@@ -515,56 +597,61 @@ fn preview_session(name: &str) -> Vec<Line<'static>> {
     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     .unwrap_or_default();
     let mut lines = vec![Line::from(vec![
-        Span::styled("session: ", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled("session: ", Style::default().fg(theme.muted)),
         Span::styled(
             name.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
     ])];
     lines.push(Line::from(""));
     for l in windows.lines() {
-        lines.push(Line::from(l.to_string()));
+        lines.push(Line::from(Span::styled(
+            l.to_string(),
+            Style::default().fg(theme.fg),
+        )));
     }
     lines.push(Line::from(""));
     for l in meta.lines() {
         lines.push(Line::from(Span::styled(
             l.to_string(),
-            Style::default().add_modifier(Modifier::DIM),
+            Style::default().fg(theme.muted),
         )));
     }
     lines
 }
 
-fn preview_group(data: &AppData, name: &str) -> Vec<Line<'static>> {
+fn preview_group(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
     let g = match data.groups.iter().find(|(n, _)| n == name) {
         Some((_, g)) => g,
         None => return vec![Line::from("?")],
     };
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("group: ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("group: ", Style::default().fg(theme.muted)),
             Span::styled(
                 name.to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("layout: ", Style::default().add_modifier(Modifier::DIM)),
-            Span::styled(g.layout.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled("layout: ", Style::default().fg(theme.muted)),
+            Span::styled(g.layout.clone(), Style::default().fg(theme.warning)),
         ]),
-        Line::from(format!("hosts ({}):", g.hosts.len())),
+        Line::from(Span::styled(
+            format!("hosts ({}):", g.hosts.len()),
+            Style::default().fg(theme.fg),
+        )),
     ];
     for h in &g.hosts {
-        lines.push(Line::from(format!("  {}", h)));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", h),
+            Style::default().fg(theme.fg),
+        )));
     }
     lines
 }
 
-fn preview_host(data: &AppData, name: &str) -> Vec<Line<'static>> {
+fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
     let in_groups: Vec<String> = data
         .hosts
         .iter()
@@ -573,51 +660,65 @@ fn preview_host(data: &AppData, name: &str) -> Vec<Line<'static>> {
         .unwrap_or_default();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("host: ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("host: ", Style::default().fg(theme.muted)),
             Span::styled(
                 name.to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from("member of:"),
+        Line::from(Span::styled(
+            "member of:",
+            Style::default().fg(theme.fg),
+        )),
     ];
     for g in &in_groups {
-        lines.push(Line::from(format!("  {}", g)));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", g),
+            Style::default().fg(theme.fg),
+        )));
     }
     lines
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
-    let line = if app.filter_mode {
-        Line::from(vec![
-            Span::styled("/", Style::default().fg(Color::Yellow)),
-            Span::raw(app.filter.clone()),
+    let theme = &app.theme;
+    let line = match app.input_mode {
+        InputMode::Filter => Line::from(vec![
+            Span::styled("/", Style::default().fg(theme.warning)),
+            Span::styled(app.filter.clone(), Style::default().fg(theme.fg)),
             Span::styled(
                 "    Esc/Enter exits filter",
-                Style::default().add_modifier(Modifier::DIM),
+                Style::default().fg(theme.muted),
             ),
-        ])
-    } else {
-        let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
-            vec![
-                Span::styled(format!("{} ", key), Style::default().fg(Color::Cyan)),
-                Span::raw(format!("{}  ", label)),
-            ]
-        };
-        let mut spans = Vec::new();
-        spans.extend(bind("↑↓/jk", "nav"));
-        spans.extend(bind("⇥", "view"));
-        spans.extend(bind("1/2/3", "jump"));
-        spans.extend(bind("↵", "open"));
-        if app.view == View::Sessions {
-            spans.extend(bind("d", "kill"));
+        ]),
+        InputMode::NewSession => Line::from(Span::styled(
+            "type session name, Enter to create, Esc to cancel",
+            Style::default().fg(theme.muted),
+        )),
+        InputMode::None => {
+            let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
+                vec![
+                    Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
+                    Span::styled(
+                        format!("{}  ", label),
+                        Style::default().fg(theme.fg),
+                    ),
+                ]
+            };
+            let mut spans = Vec::new();
+            spans.extend(bind("↑↓/jk", "nav"));
+            spans.extend(bind("⇥", "view"));
+            spans.extend(bind("1/2/3", "jump"));
+            spans.extend(bind("↵", "open"));
+            spans.extend(bind("n", "new"));
+            if app.view == View::Sessions {
+                spans.extend(bind("d", "kill"));
+            }
+            spans.extend(bind("/", "filter"));
+            spans.extend(bind("r", "refresh"));
+            spans.extend(bind("q", "quit"));
+            Line::from(spans)
         }
-        spans.extend(bind("/", "filter"));
-        spans.extend(bind("r", "refresh"));
-        spans.extend(bind("q", "quit"));
-        Line::from(spans)
     };
     f.render_widget(Paragraph::new(line), area);
 }
@@ -627,5 +728,21 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+/// Strip any FQDN suffix to make a tmux-friendly session name.
+fn short_name(s: &str) -> String {
+    s.split('.').next().unwrap_or(s).to_string()
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
     }
 }
