@@ -828,4 +828,41 @@ mod tests {
         assert!(doc.groups.contains_key("g"));
         assert!(doc.groups.contains_key("g-2"));
     }
+
+    use crate::wizard::discovery::HostCandidate;
+    use crate::wizard::discovery::SourceFlags;
+
+    #[test]
+    fn end_to_end_assemble_from_session_and_handbuilt() {
+        let mut s = WizardState::for_first_launch();
+        s.host_candidates = vec![
+            HostCandidate { host: "h1".into(), sources: SourceFlags { shell: true, ..Default::default() } },
+            HostCandidate { host: "h2".into(), sources: SourceFlags { ssh_config: true, ..Default::default() } },
+        ];
+        s.session_candidates = vec![SessionCandidate {
+            name: "tmux1".into(),
+            windows: vec!["wA".into(), "wB".into()],
+            usable: true,
+        }];
+        s.selected_sessions.insert("tmux1".into());
+
+        assert!(s.can_advance(Stage::Welcome).is_ok());
+        s.selected_hosts.insert("h1".into());
+        s.selected_hosts.insert("h2".into());
+        assert!(s.can_advance(Stage::Hosts).is_ok());
+        s.form.name = "all".into();
+        s.form.layout_idx = 0;
+        s.form.members.insert("h1".into());
+        s.form.members.insert("h2".into());
+        s.commit_form().unwrap();
+
+        let groups = s.assemble_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "tmux1");
+        assert_eq!(groups[0].1.layout, "windows");
+        assert_eq!(groups[0].1.hosts, vec!["wA".to_string(), "wB".to_string()]);
+        assert_eq!(groups[1].0, "all");
+        assert_eq!(groups[1].1.layout, "panes");
+        assert_eq!(groups[1].1.hosts, vec!["h1".to_string(), "h2".to_string()]);
+    }
 }
