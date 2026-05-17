@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/ttpears/tad/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ttpears/tad/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/ttpears/tad/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ttpears/tad?display_name=tag&sort=semver"></a>
-  <a href="https://aur.archlinux.org/packages/tmux-tad-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/tmux-tad-bin"></a>
+  <a href="https://aur.archlinux.org/packages/tmux-tad"><img alt="AUR version" src="https://img.shields.io/aur/version/tmux-tad"></a>
   <a href="https://github.com/ttpears/tad/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ttpears/tad/total"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/ttpears/tad"></a>
 </p>
@@ -28,13 +28,13 @@ binary.
 ### Arch Linux (AUR)
 
 ```sh
-yay -S tmux-tad-bin           # or: paru -S tmux-tad-bin
+yay -S tmux-tad           # or: paru -S tmux-tad
 ```
 
-The [`tmux-tad-bin`](https://aur.archlinux.org/packages/tmux-tad-bin) package
+The [`tmux-tad`](https://aur.archlinux.org/packages/tmux-tad) package
 installs the prebuilt x86_64 binary from the GitHub release plus the
 bash/zsh completions and example configs. PKGBUILD source lives at
-`packaging/aur/tmux-tad-bin/PKGBUILD` in this repo.
+`packaging/aur/tmux-tad/PKGBUILD` in this repo.
 
 ### From a release (any Linux x86_64)
 
@@ -42,7 +42,7 @@ Each [release](https://github.com/ttpears/tad/releases) ships a static
 Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
 
 ```sh
-TAD_VERSION=v0.4.0
+TAD_VERSION=v0.5.0
 BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
 
 mkdir -p ~/.local/bin \
@@ -316,9 +316,9 @@ ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=2 /tmp/tad-f%03d.png
    ```
    Paste each hash (binary, `tad.bash`, `_tad`, `groups.yaml.example`,
    `config.yaml.example`, `LICENSE`) into the corresponding `SKIP` slot
-   in `packaging/aur/tmux-tad-bin/PKGBUILD`, bump `pkgver`, then push to AUR:
+   in `packaging/aur/tmux-tad/PKGBUILD`, bump `pkgver`, then push to AUR:
    ```sh
-   cd packaging/aur/tmux-tad-bin
+   cd packaging/aur/tmux-tad
    makepkg --printsrcinfo > .SRCINFO
-   # commit + push to ssh://aur@aur.archlinux.org/tmux-tad-bin.git
+   # commit + push to ssh://aur@aur.archlinux.org/tmux-tad.git
    ```

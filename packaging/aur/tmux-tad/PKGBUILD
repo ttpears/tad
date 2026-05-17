@@ -1,18 +1,20 @@
 # Maintainer: Tim Pearson <ttpears@gmail.com>
-pkgname=tmux-tad-bin
+pkgname=tmux-tad
 _pkgname=tad
-pkgver=0.4.1
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Tmux session and group manager with a native TUI dashboard (prebuilt binary)"
 arch=('x86_64')
 url="https://github.com/ttpears/tad"
 license=('MIT')
 depends=('tmux' 'gcc-libs' 'glibc')
-provides=("tmux-tad=$pkgver")
-# Installs /usr/bin/tad — collides with the unrelated AUR `tad-bin`
-# (CSV viewer) and `tad` (C++ array library) packages, plus a future
-# from-source sibling `tmux-tad` package (ships the same binary).
-conflicts=('tad-bin' 'tad' 'tmux-tad')
+# Installs /usr/bin/tad — conflicts with unrelated AUR packages:
+#   `tad-bin` (CSV viewer) and `tad` (C++ array library).
+# `tmux-tad-bin` is the legacy name for this same package; `provides`
+# lets anyone still holding the old install upgrade cleanly.
+# `tmux-tad-git` is reserved for a future from-source variant.
+provides=("tmux-tad-bin=$pkgver")
+conflicts=('tad-bin' 'tad' 'tmux-tad-bin' 'tmux-tad-git')
 source=(
     "$_pkgname-$pkgver::$url/releases/download/v$pkgver/tad-v$pkgver-x86_64-linux"
     "tad.bash-$pkgver::$url/releases/download/v$pkgver/tad.bash"
@@ -24,7 +26,10 @@ source=(
 # Regenerate after each release with:
 #   curl -sL https://github.com/ttpears/tad/releases/download/v$pkgver/SHA256SUMS
 # and paste the binary, tad.bash, _tad, groups.example, config.example, LICENSE
-# hashes (in source[] order) below.
+# hashes (in source[] order) below. NOTE: hashes below are STALE (from
+# v0.4.1) until the v0.5.0 release artifacts land; a follow-up commit
+# will refresh them. `makepkg --verifysource` will fail until then —
+# do not push this to AUR until the hashes are updated.
 sha256sums=(
     'd6e814a0eb38c4ef3129ad839c12524dc73ed7b68b55224bacda45cc3cbcc35b'
     '8f8f2b70da4f3477f54f4da7d4c6867eed4dc3afe17a6fc2d12b61feaafa597c'
