@@ -32,8 +32,9 @@ pub fn save_theme_name(name: &str) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let mut root: serde_yml::Value = match std::fs::read_to_string(&path) {
-        Ok(text) if !text.trim().is_empty() => serde_yml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?,
+        Ok(text) if !text.trim().is_empty() => {
+            serde_yml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        }
         _ => serde_yml::Value::Mapping(serde_yml::Mapping::new()),
     };
     let map = root

@@ -616,68 +616,68 @@ fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
 
     let active = app.new_session_field;
     let theme = app.theme;
-    let field_line = move |label: &str,
-                           field: &TextInput,
-                           active: bool,
-                           placeholder: &str|
-          -> Line<'static> {
-        let label_style = if active {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let mut spans = vec![Span::styled(format!("  {:<6}", label), label_style)];
-        let value = field.as_str();
-        if value.is_empty() {
-            if active {
-                spans.push(Span::styled(
-                    placeholder.to_string(),
-                    Style::default().fg(theme.muted),
-                ));
-                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-            } else {
-                spans.push(Span::styled(
-                    placeholder.to_string(),
-                    Style::default().fg(theme.muted),
-                ));
-            }
-        } else if !active {
-            spans.push(Span::styled(value.to_string(), Style::default().fg(theme.fg)));
-        } else {
-            // Active field with content. Pristine values get muted/italic so
-            // the user knows the next keystroke will replace them. Otherwise
-            // render with a block cursor at the cursor position.
-            let value_style = if field.pristine {
+    let field_line =
+        move |label: &str, field: &TextInput, active: bool, placeholder: &str| -> Line<'static> {
+            let label_style = if active {
                 Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::ITALIC)
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.fg)
+                Style::default().fg(theme.muted)
             };
-            let cur = field.cursor.min(value.len());
-            let (pre, post) = value.split_at(cur);
-            if field.pristine {
-                spans.push(Span::styled(value.to_string(), value_style));
-                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-            } else if post.is_empty() {
-                spans.push(Span::styled(pre.to_string(), value_style));
-                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-            } else {
-                let mut chars = post.chars();
-                let cursor_char = chars.next().unwrap_or(' ');
-                let after_cursor: String = chars.collect();
-                spans.push(Span::styled(pre.to_string(), value_style));
+            let mut spans = vec![Span::styled(format!("  {:<6}", label), label_style)];
+            let value = field.as_str();
+            if value.is_empty() {
+                if active {
+                    spans.push(Span::styled(
+                        placeholder.to_string(),
+                        Style::default().fg(theme.muted),
+                    ));
+                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+                } else {
+                    spans.push(Span::styled(
+                        placeholder.to_string(),
+                        Style::default().fg(theme.muted),
+                    ));
+                }
+            } else if !active {
                 spans.push(Span::styled(
-                    cursor_char.to_string(),
-                    Style::default().bg(theme.accent).fg(theme.fg),
+                    value.to_string(),
+                    Style::default().fg(theme.fg),
                 ));
-                spans.push(Span::styled(after_cursor, value_style));
+            } else {
+                // Active field with content. Pristine values get muted/italic so
+                // the user knows the next keystroke will replace them. Otherwise
+                // render with a block cursor at the cursor position.
+                let value_style = if field.pristine {
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(theme.fg)
+                };
+                let cur = field.cursor.min(value.len());
+                let (pre, post) = value.split_at(cur);
+                if field.pristine {
+                    spans.push(Span::styled(value.to_string(), value_style));
+                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+                } else if post.is_empty() {
+                    spans.push(Span::styled(pre.to_string(), value_style));
+                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+                } else {
+                    let mut chars = post.chars();
+                    let cursor_char = chars.next().unwrap_or(' ');
+                    let after_cursor: String = chars.collect();
+                    spans.push(Span::styled(pre.to_string(), value_style));
+                    spans.push(Span::styled(
+                        cursor_char.to_string(),
+                        Style::default().bg(theme.accent).fg(theme.fg),
+                    ));
+                    spans.push(Span::styled(after_cursor, value_style));
+                }
             }
-        }
-        Line::from(spans)
-    };
+            Line::from(spans)
+        };
 
     let lines = vec![
         Line::from(""),

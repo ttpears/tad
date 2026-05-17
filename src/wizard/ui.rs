@@ -359,7 +359,9 @@ pub fn run(entry: Entry) -> Result<()> {
         }
 
         match state.stage {
-            Stage::EditMode => handle_edit_mode(&mut state, key, &mut cursors.edit, &mut cursors.theme),
+            Stage::EditMode => {
+                handle_edit_mode(&mut state, key, &mut cursors.edit, &mut cursors.theme)
+            }
             Stage::ThemePicker => handle_theme_picker(&mut state, key, &mut cursors.theme),
             Stage::Welcome => handle_welcome(&mut state, key, &mut cursors.welcome),
             Stage::Sessions => handle_sessions(&mut state, key, &mut cursors.sessions),
@@ -692,11 +694,7 @@ fn handle_edit_mode(
         KeyCode::Char('t') => {
             // Position cursor on the currently-active theme (if any).
             *theme_cursor = crate::theme::current_name()
-                .and_then(|n| {
-                    crate::theme::BUILTIN_THEMES
-                        .iter()
-                        .position(|&t| t == n)
-                })
+                .and_then(|n| crate::theme::BUILTIN_THEMES.iter().position(|&t| t == n))
                 .unwrap_or(0);
             state.stage = Stage::ThemePicker;
         }
