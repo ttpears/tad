@@ -1,0 +1,38 @@
+_meta:
+  description: Sample groups used to generate the README screenshots. All hostnames fictional.
+
+groups:
+  web:
+    layout: panes
+    hosts:
+      - web-1.example.com
+      - web-2.example.com
+      - web-3.example.com
+
+  cache:
+    layout: synced-panes
+    hosts:
+      - cache-a.example.com
+      - cache-b.example.com
+      - cache-c.example.com
+
+  db:
+    layout: windows
+    hosts:
+      - db-primary.example.com
+      - db-replica-1.example.com
+      - db-replica-2.example.com
+
+  edge:
+    layout: panes
+    hosts:
+      - edge-nyc.example.com
+      - edge-fra.example.com
+      - edge-sin.example.com
+
+  devs:
+    layout: browse
+    hosts:
+      - alice.dev.example.com
+      - bob.dev.example.com
+      - carol.dev.example.com

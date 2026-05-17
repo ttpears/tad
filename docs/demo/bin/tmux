@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# A tmux wrapper that forces -L tad-demo so demo activity can NEVER reach
+# the user's real tmux server. Used by the README screenshot pipeline.
+# We resolve the real tmux via `command -v` after pruning ourselves out of PATH.
+self_dir="$(cd "$(dirname "$0")" && pwd)"
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$self_dir" | paste -sd:)"
+exec tmux -L tad-demo "$@"

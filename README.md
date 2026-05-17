@@ -6,6 +6,11 @@ groups, with live updates every ~1.5s. `tad <name>` attaches or creates a
 session. `tad -g <group>` opens a multi-host session whose layout you
 control per group.
 
+![tad dashboard demo](docs/screenshots/dashboard.gif)
+
+> Sessions, groups, and hostnames in the screenshots are fictional — see
+> `docs/demo/` for the sample data and the `vhs` tape used to regenerate.
+
 ## Install
 
 Only requirement at runtime: `tmux`. No fzf needed — the dashboard is
@@ -152,23 +157,12 @@ Layouts:
 
 ## Dashboard
 
-Bare `tad` opens a TUI:
+Bare `tad` opens a TUI with three views — Sessions, Groups, Hosts — that
+you cycle through with `Tab` (or jump to with `1`/`2`/`3`):
 
-```
-┌─ tad ────────────────────────────────────────────────────┐
-│  Sessions  Groups  Hosts                                  │
-├──────────────────────────┬───────────────────────────────┤
-│ Sessions (12)            │ preview                        │
-│ ▶ ● web-prod  1w     │ session: web-prod          │
-│   ● docker        2w     │                                │
-│     web-...   1w     │   1: claude (1 panes)          │
-│     ...                  │                                │
-│                          │ created: ...                   │
-│                          │ activity: ...                  │
-├──────────────────────────┴───────────────────────────────┤
-│ ↑↓/jk nav  ⇥ view  1/2/3 jump  ↵ open  d kill  / filter  │
-└──────────────────────────────────────────────────────────┘
-```
+| Sessions | Groups | Hosts |
+| --- | --- | --- |
+| ![sessions](docs/screenshots/dashboard-sessions.png) | ![groups](docs/screenshots/dashboard-groups.png) | ![hosts](docs/screenshots/dashboard-hosts.png) |
 
 Keys:
 - `↑/↓` or `j/k`         move selection
@@ -211,4 +205,25 @@ theme:
 ```
 ~/.config/tad/groups.yaml      — your group definitions
 /tmp/tad-dashboard-$USER.state — current dashboard view (transient)
+```
+
+## Regenerating the README screenshots
+
+The dashboard demo gif and stills are produced from a `vhs` tape using
+sample data under `docs/demo/`. A throwaway tmux server on socket
+`tad-demo` is seeded with fictional sessions, and a tmux shim
+(`docs/demo/bin/tmux`) pins every call to that socket so your real tmux
+is never touched.
+
+```sh
+cargo build --release          # tape uses target/release/tad if present
+vhs docs/demo/dashboard.tape   # writes docs/screenshots/dashboard.gif
+```
+
+To refresh the per-view PNGs (`dashboard-sessions.png`, etc.) extract
+frames from the new gif:
+
+```sh
+ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=1 /tmp/tad-f%02d.png
+# then cp the frames you like into docs/screenshots/
 ```
