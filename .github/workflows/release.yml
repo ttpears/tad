@@ -45,6 +45,7 @@ jobs:
           cp completions/tad.bash dist/tad.bash
           cp examples/groups.yaml.example dist/groups.yaml.example
           cp examples/config.yaml.example dist/config.yaml.example
+          cp LICENSE dist/LICENSE
           (cd dist && sha256sum * > SHA256SUMS)
           ls -la dist/
 
@@ -63,4 +64,5 @@ jobs:
             dist/tad.bash
             dist/groups.yaml.example
             dist/config.yaml.example
+            dist/LICENSE
             dist/SHA256SUMS

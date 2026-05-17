@@ -42,7 +42,7 @@ Each [release](https://github.com/ttpears/tad/releases) ships a static
 Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
 
 ```sh
-TAD_VERSION=v0.3.1
+TAD_VERSION=v0.4.0
 BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
 
 mkdir -p ~/.local/bin \

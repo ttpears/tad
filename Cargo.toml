@@ -1,9 +1,13 @@
 [package]
 name = "tad"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["ttpears <ttpears@gmail.com>"]
 description = "Tmux session/group manager with native TUI dashboard"
+license = "MIT"
+repository = "https://github.com/ttpears/tad"
+homepage = "https://github.com/ttpears/tad"
+readme = "README.md"
 publish = false
 
 [dependencies]

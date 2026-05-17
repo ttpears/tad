@@ -1,0 +1,47 @@
+# Maintainer: Tim Pearson <ttpears@gmail.com>
+pkgname=tad-bin
+_pkgname=tad
+pkgver=0.3.1
+pkgrel=1
+pkgdesc="Tmux session and group manager with a native TUI dashboard (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/ttpears/tad"
+license=('MIT')
+depends=('tmux' 'gcc-libs' 'glibc')
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+source=(
+    "$_pkgname-$pkgver::$url/releases/download/v$pkgver/tad-v$pkgver-x86_64-linux"
+    "tad.bash-$pkgver::$url/releases/download/v$pkgver/tad.bash"
+    "_tad-$pkgver::$url/releases/download/v$pkgver/_tad"
+    "groups.yaml.example-$pkgver::$url/releases/download/v$pkgver/groups.yaml.example"
+    "config.yaml.example-$pkgver::$url/releases/download/v$pkgver/config.yaml.example"
+    "LICENSE-$pkgver::$url/releases/download/v$pkgver/LICENSE"
+)
+# Regenerate after each release with:
+#   curl -sL https://github.com/ttpears/tad/releases/download/v$pkgver/SHA256SUMS
+# and paste the binary, tad.bash, _tad, groups.example, config.example, LICENSE
+# hashes (in source[] order) below.
+sha256sums=(
+    'SKIP'
+    'SKIP'
+    'SKIP'
+    'SKIP'
+    'SKIP'
+    'SKIP'
+)
+
+package() {
+    install -Dm755 "$srcdir/$_pkgname-$pkgver" \
+        "$pkgdir/usr/bin/$_pkgname"
+    install -Dm644 "$srcdir/tad.bash-$pkgver" \
+        "$pkgdir/usr/share/bash-completion/completions/$_pkgname"
+    install -Dm644 "$srcdir/_tad-$pkgver" \
+        "$pkgdir/usr/share/zsh/site-functions/_tad"
+    install -Dm644 "$srcdir/groups.yaml.example-$pkgver" \
+        "$pkgdir/usr/share/doc/$_pkgname/groups.yaml.example"
+    install -Dm644 "$srcdir/config.yaml.example-$pkgver" \
+        "$pkgdir/usr/share/doc/$_pkgname/config.yaml.example"
+    install -Dm644 "$srcdir/LICENSE-$pkgver" \
+        "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+}
