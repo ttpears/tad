@@ -8,16 +8,40 @@ control per group.
 
 ## Install
 
-Requires:
-- `tmux`
-- Rust toolchain to build
+Only requirement at runtime: `tmux`. No fzf needed — the dashboard is
+built into the binary via ratatui.
 
-No fzf needed — the dashboard is built into the binary via ratatui.
+### From a release (no compile needed)
+
+Grab the latest from
+https://github.com/ttpears/tad/releases. Each release has a Linux
+x86_64 binary and matching completion files attached.
 
 ```sh
-git clone <repo-url> ~/git/tad
+mkdir -p ~/.local/bin \
+         ~/.local/share/bash-completion/completions \
+         ~/.local/share/zsh/site-functions
+
+VERSION=v0.3.0
+BASE="https://github.com/ttpears/tad/releases/download/${VERSION}"
+
+curl -L "${BASE}/tad-${VERSION}-x86_64-linux" -o ~/.local/bin/tad
+chmod +x ~/.local/bin/tad
+
+curl -L "${BASE}/tad.bash" -o ~/.local/share/bash-completion/completions/tad
+curl -L "${BASE}/_tad"     -o ~/.local/share/zsh/site-functions/_tad
+```
+
+Make sure `~/.local/bin` is in `PATH` and (for zsh) that
+`~/.local/share/zsh/site-functions` is in `fpath`.
+
+### From source
+
+```sh
+git clone git@github.com:ttpears/tad.git ~/git/tad
 cd ~/git/tad
-make install              # builds and installs to ~/.local/bin
+make install              # builds release binary + installs binary and
+                          # completions under ~/.local
 ```
 
 Or manually:
@@ -26,21 +50,74 @@ cargo build --release
 install -Dm755 target/release/tad ~/.local/bin/tad
 ```
 
-### Shell completions
+### Shell completions (installed from source)
+
+`make install` puts them in the standard XDG paths. If you installed
+the binary by other means, do this once:
 
 bash:
 ```sh
-ln -s ~/git/tad/completions/tad.bash ~/.bash_completion.d/tad
-# or source it from your rc
-echo '. ~/git/tad/completions/tad.bash' >> ~/.bashrc
+ln -s ~/git/tad/completions/tad.bash ~/.local/share/bash-completion/completions/tad
 ```
 
-zsh:
+zsh — add to your `.zshrc` if it's not already:
 ```sh
-# Add the dir to fpath in your .zshrc, then compinit
-fpath=(~/git/tad/completions $fpath)
+fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -Uz compinit && compinit
 ```
+
+## Migrating from a shell-function `tad`
+
+`tad` started as a small bash function — usually a few lines wrapping
+`tmux attach/new-session` with a confirmation prompt. If you've been
+carrying something like this around in your `.bashrc`, `.zshrc`, or a
+dotfiles repo:
+
+```bash
+function tad() {
+   local s=$1
+   if [ -z "$s" ]; then tmux ls; return; fi
+   tmux has-session -t "$s" 2>/dev/null && tmux attach -d -t "$s" \
+      || tmux new-session -s "$s"
+}
+```
+
+…the binary replaces it entirely. To migrate:
+
+1. **Install the binary** (see above). Make sure `~/.local/bin` comes
+   before any directory holding the old function on `PATH`. Verify:
+   ```sh
+   command -v tad     # should print ~/.local/bin/tad
+   tad --version      # should print a version number
+   ```
+2. **Remove the function definition** from your shell rc files. Grep
+   for it:
+   ```sh
+   grep -nE 'function tad|^\s*tad\s*\(\)' ~/.bash* ~/.zsh* 2>/dev/null
+   ```
+   Then delete those blocks. Functions in your current shell session
+   live in memory — `unfunction tad` (zsh) or `unset -f tad` (bash) to
+   evict the old one without restarting.
+3. **Remove any `complete -F` line** that paired with the old function:
+   ```sh
+   grep -n 'complete .* tad' ~/.bash*
+   ```
+   The Rust binary ships its own bash + zsh completions; the old one
+   would conflict.
+4. **Optional: define your groups**. Open `tad groups-edit` and add
+   entries (or run `tad groups-add` for the interactive wizard). The
+   config file lives at `~/.config/tad/groups.yaml`. The old function
+   knew nothing about groups; everything else is a strict superset of
+   the old behavior so existing muscle memory still works:
+   - `tad <name>` — attach or create (same as old)
+   - `tad` — opens the dashboard (was: list sessions)
+   - new: `tad -g <group>`, `tad groups`, `tad complete`, etc.
+5. **Optional: pick a theme**. Drop `theme: tokyonight` into
+   `~/.config/tad/config.yaml` (or any of the built-ins; see Theme
+   section).
+
+Your existing tmux sessions are untouched — `tad` only reads tmux state
+and asks tmux to attach/create. Nothing on disk changes for tmux.
 
 ## Usage
 

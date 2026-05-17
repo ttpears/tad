@@ -1,0 +1,66 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: "-D warnings"
+          CARGO_TERM_COLOR: always
+        run: cargo build --release --locked
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp target/release/tad dist/tad-${GITHUB_REF_NAME}-x86_64-linux
+          cp completions/_tad dist/_tad
+          cp completions/tad.bash dist/tad.bash
+          cp examples/groups.yaml.example dist/groups.yaml.example
+          cp examples/config.yaml.example dist/config.yaml.example
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "tad ${{ github.ref_name }}"
+          body: |
+            Release ${{ github.ref_name }}.
+
+            Linux x86_64 binary and shell completions attached. See README
+            for install instructions.
+          files: |
+            dist/tad-${{ github.ref_name }}-x86_64-linux
+            dist/_tad
+            dist/tad.bash
+            dist/groups.yaml.example
+            dist/config.yaml.example
+            dist/SHA256SUMS
