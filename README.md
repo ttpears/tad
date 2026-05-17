@@ -27,14 +27,18 @@ binary.
 
 ### Arch Linux (AUR)
 
+Two variants per AUR convention:
+
 ```sh
-yay -S tmux-tad           # or: paru -S tmux-tad
+yay -S tmux-tad           # builds from source (needs cargo/rust)
+yay -S tmux-tad-bin       # prebuilt x86_64 binary from the GitHub release
 ```
 
-The [`tmux-tad`](https://aur.archlinux.org/packages/tmux-tad) package
-installs the prebuilt x86_64 binary from the GitHub release plus the
-bash/zsh completions and example configs. PKGBUILD source lives at
-`packaging/aur/tmux-tad/PKGBUILD` in this repo.
+Both install the same `/usr/bin/tad`, completions, and example configs;
+they conflict with each other and `provides`-substitute. Pick whichever
+you prefer — `tmux-tad-bin` is faster to install, `tmux-tad` is closer
+to upstream. PKGBUILD sources live at `packaging/aur/tmux-tad/` and
+`packaging/aur/tmux-tad-bin/` in this repo.
 
 ### From a release (any Linux x86_64)
 
@@ -315,15 +319,26 @@ ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=2 /tmp/tad-f%03d.png
    `.github/workflows/release.yml` builds the binary, bundles
    completions + examples + `LICENSE`, computes `SHA256SUMS`, and
    publishes the GitHub release.
-3. Refresh the AUR PKGBUILD hashes:
+3. Refresh both AUR PKGBUILDs and push to AUR:
+
+   **`tmux-tad`** (source build) — bump `pkgver` and refresh the source
+   tarball hash:
    ```sh
-   curl -sL https://github.com/ttpears/tad/releases/download/vX.Y.Z/SHA256SUMS
-   ```
-   Paste each hash (binary, `tad.bash`, `_tad`, `groups.yaml.example`,
-   `config.yaml.example`, `LICENSE`) into the corresponding `SKIP` slot
-   in `packaging/aur/tmux-tad/PKGBUILD`, bump `pkgver`, then push to AUR:
-   ```sh
+   curl -sL https://github.com/ttpears/tad/archive/vX.Y.Z.tar.gz | sha256sum
+   # paste into packaging/aur/tmux-tad/PKGBUILD, bump pkgver, then:
    cd packaging/aur/tmux-tad
    makepkg --printsrcinfo > .SRCINFO
    # commit + push to ssh://aur@aur.archlinux.org/tmux-tad.git
+   ```
+
+   **`tmux-tad-bin`** (prebuilt binary) — bump `pkgver` and refresh the
+   release-artifact hashes:
+   ```sh
+   curl -sL https://github.com/ttpears/tad/releases/download/vX.Y.Z/SHA256SUMS
+   # paste each hash (binary, tad.bash, _tad, groups.example,
+   # config.example, LICENSE) into packaging/aur/tmux-tad-bin/PKGBUILD,
+   # bump pkgver, then:
+   cd packaging/aur/tmux-tad-bin
+   makepkg --printsrcinfo > .SRCINFO
+   # commit + push to ssh://aur@aur.archlinux.org/tmux-tad-bin.git
    ```

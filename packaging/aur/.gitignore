@@ -1,0 +1,11 @@
+# makepkg build artifacts
+*/src/
+*/pkg/
+*/*.pkg.tar.*
+# downloaded source/release files (named with the version suffix)
+*/tad-*
+*/_tad-*
+*/tad.bash-*
+*/groups.yaml.example-*
+*/config.yaml.example-*
+*/LICENSE-*
