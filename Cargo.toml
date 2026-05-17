@@ -28,3 +28,41 @@ strip = true
 lto = true
 opt-level = "z"
 codegen-units = 1
+
+# Debian/Ubuntu .deb produced by `cargo deb` (see release.yml).
+[package.metadata.deb]
+maintainer = "Tim Pearson <ttpears@gmail.com>"
+copyright = "2026, Tim Pearson <ttpears@gmail.com>"
+extended-description = """\
+Bare `tad` opens a native TUI dashboard that cycles between live tmux \
+sessions, named groups, and the hosts inside those groups. \
+`tad <name>` attaches or creates a session. \
+`tad -g <group>` opens a multi-host session whose layout you control \
+per group."""
+depends = "tmux"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/tad", "usr/bin/", "755"],
+    ["completions/tad.bash", "usr/share/bash-completion/completions/tad", "644"],
+    ["completions/_tad", "usr/share/zsh/vendor-completions/_tad", "644"],
+    ["examples/groups.yaml.example", "usr/share/doc/tad/", "644"],
+    ["examples/config.yaml.example", "usr/share/doc/tad/", "644"],
+    ["README.md", "usr/share/doc/tad/", "644"],
+]
+
+# Fedora/RHEL .rpm produced by `cargo generate-rpm` (see release.yml).
+[package.metadata.generate-rpm]
+summary = "Tmux session and group manager with native TUI dashboard"
+assets = [
+    { source = "target/release/tad", dest = "/usr/bin/tad", mode = "755" },
+    { source = "completions/tad.bash", dest = "/usr/share/bash-completion/completions/tad", mode = "644" },
+    { source = "completions/_tad", dest = "/usr/share/zsh/site-functions/_tad", mode = "644" },
+    { source = "examples/groups.yaml.example", dest = "/usr/share/doc/tad/groups.yaml.example", mode = "644", doc = true },
+    { source = "examples/config.yaml.example", dest = "/usr/share/doc/tad/config.yaml.example", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/tad/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/tad/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+tmux = "*"
