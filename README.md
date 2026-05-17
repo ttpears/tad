@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="tad" width="128" height="128">
+</p>
+
 # tad
 
 A tmux session and group manager. Bare `tad` opens a native TUI dashboard
@@ -7,9 +11,6 @@ session. `tad -g <group>` opens a multi-host session whose layout you
 control per group.
 
 ![tad dashboard demo](docs/screenshots/dashboard.gif)
-
-> Sessions, groups, and hostnames in the screenshots are fictional — see
-> `docs/demo/` for the sample data and the `vhs` tape used to regenerate.
 
 ## Install
 
@@ -188,6 +189,14 @@ Set in `~/.config/tad/config.yaml`. Default is `tokyonight`. See
 Built-in names: `tokyonight`, `tokyonight-storm`, `dracula`, `nord`,
 `gruvbox`, `catppuccin`, `solarized-dark`, `onedark`, `terminal`.
 
+| tokyonight | tokyonight-storm | dracula | nord |
+| --- | --- | --- | --- |
+| ![tokyonight](docs/screenshots/theme-tokyonight.png) | ![tokyonight-storm](docs/screenshots/theme-tokyonight-storm.png) | ![dracula](docs/screenshots/theme-dracula.png) | ![nord](docs/screenshots/theme-nord.png) |
+
+| gruvbox | catppuccin | solarized-dark | onedark |
+| --- | --- | --- | --- |
+| ![gruvbox](docs/screenshots/theme-gruvbox.png) | ![catppuccin](docs/screenshots/theme-catppuccin.png) | ![solarized-dark](docs/screenshots/theme-solarized-dark.png) | ![onedark](docs/screenshots/theme-onedark.png) |
+
 ```yaml
 theme: catppuccin
 ```
@@ -209,21 +218,22 @@ theme:
 
 ## Regenerating the README screenshots
 
-The dashboard demo gif and stills are produced from a `vhs` tape using
+The dashboard demo gif and stills are produced from `vhs` tapes using
 sample data under `docs/demo/`. A throwaway tmux server on socket
-`tad-demo` is seeded with fictional sessions, and a tmux shim
+`tad-demo` is seeded with sample sessions, and a tmux shim
 (`docs/demo/bin/tmux`) pins every call to that socket so your real tmux
 is never touched.
 
 ```sh
-cargo build --release          # tape uses target/release/tad if present
-vhs docs/demo/dashboard.tape   # writes docs/screenshots/dashboard.gif
+cargo build --release             # tapes use target/release/tad if present
+vhs docs/demo/dashboard.tape      # writes docs/screenshots/dashboard.gif
+bash docs/demo/render-themes.sh   # writes docs/screenshots/theme-*.png
 ```
 
 To refresh the per-view PNGs (`dashboard-sessions.png`, etc.) extract
 frames from the new gif:
 
 ```sh
-ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=1 /tmp/tad-f%02d.png
+ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=2 /tmp/tad-f%03d.png
 # then cp the frames you like into docs/screenshots/
 ```

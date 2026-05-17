@@ -1,10 +1,10 @@
-# Captures the tad dashboard against the fictional demo state. Run with:
-#   vhs docs/demo/dashboard.tape
+# Feature tour of the tad dashboard against the demo state.
+# Run with: vhs docs/demo/dashboard.tape
+# Output:   docs/screenshots/dashboard.gif
 #
-# Output lands at docs/screenshots/dashboard.gif (and dashboard.png for the
-# final frame). The demo data lives entirely under /tmp/tad-demo and is
-# routed through a tmux shim (docs/demo/bin/tmux) that pins the socket to
-# `tad-demo`, so your real tmux server is never touched.
+# State lives under /tmp/tad-demo. The tmux shim at docs/demo/bin/tmux
+# pins every call to the `tad-demo` socket, so this never touches the
+# user's real tmux server.
 
 Output docs/screenshots/dashboard.gif
 
@@ -14,7 +14,7 @@ Set Width 1180
 Set Height 640
 Set Theme "TokyoNight"
 Set Padding 16
-Set TypingSpeed 40ms
+Set TypingSpeed 55ms
 
 # Bootstrap demo state silently.
 Hide
@@ -23,33 +23,67 @@ Enter
 Sleep 1s
 Show
 
-# Launch the dashboard.
+# Launch the dashboard on the Sessions view.
 Type "tad"
 Enter
+Sleep 3s
+
+# Move down through sessions; pause on each so the preview updates.
+Down
+Sleep 1500ms
+Down
+Sleep 1500ms
+Down
+Sleep 1500ms
+
+# Filter: `/` opens filter, then narrow to `web` and back out.
+Type "/web"
 Sleep 2500ms
-
-# Drift down a couple sessions to show the preview update.
-Down
-Sleep 900ms
-Down
+Backspace
+Backspace
+Backspace
+Sleep 1200ms
+Escape
 Sleep 1200ms
 
-# Cycle to Groups view.
+# Cycle to Groups.
 Tab
-Sleep 1800ms
+Sleep 2500ms
 Down
-Sleep 900ms
+Sleep 1500ms
 Down
+Sleep 1500ms
+Down
+Sleep 1500ms
+
+# Cycle to Hosts.
+Tab
+Sleep 2500ms
+Down 5
+Sleep 1500ms
+Down 3
+Sleep 1500ms
+
+# Back to Sessions for the new-session prompt.
+Tab
+Sleep 2000ms
+
+# `n` opens the new-session modal — preseeded with the highlighted item's
+# short name. Clear it, type a fresh name, Tab to the host field, type an
+# SSH host, then Escape to dismiss.
+Type "n"
+Sleep 1500ms
+Backspace 10
+Sleep 500ms
+Type "deploy-eu"
 Sleep 1200ms
-
-# Cycle to Hosts view.
 Tab
-Sleep 2200ms
-
-# Back to Sessions for the final frame (the PNG).
-Tab
+Sleep 800ms
+Type "deploy-eu.example.com"
+Sleep 2000ms
+Escape
 Sleep 1500ms
 
 # Quit cleanly.
 Type "q"
-Sleep 500ms
+Sleep 600ms

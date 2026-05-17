@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="tad">
+  <title>tad</title>
+
+  <!-- terminal background (tokyonight bg) -->
+  <rect width="256" height="256" rx="36" fill="#1a1b26"/>
+
+  <!-- inner pane area -->
+  <rect x="24" y="24" width="208" height="208" rx="14" fill="none" stroke="#414868" stroke-width="2"/>
+
+  <!-- tmux pane vertical dividers (drawn only above and below the letter band so glyphs read cleanly) -->
+  <g stroke="#414868" stroke-width="2">
+    <line x1="93.33"  y1="24"  x2="93.33"  y2="78"/>
+    <line x1="93.33"  y1="178" x2="93.33"  y2="232"/>
+    <line x1="162.67" y1="24"  x2="162.67" y2="78"/>
+    <line x1="162.67" y1="178" x2="162.67" y2="232"/>
+  </g>
+
+  <!-- intersection ticks where dividers meet the outer frame -->
+  <g>
+    <circle cx="93.33"  cy="24"  r="3" fill="#7aa2f7"/>
+    <circle cx="162.67" cy="24"  r="3" fill="#bb9af7"/>
+    <circle cx="93.33"  cy="232" r="3" fill="#7aa2f7"/>
+    <circle cx="162.67" cy="232" r="3" fill="#bb9af7"/>
+  </g>
+
+  <!-- letters: t / a / d -->
+  <g font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', Menlo, monospace"
+     font-size="92" font-weight="700" text-anchor="middle" dominant-baseline="central">
+    <text x="58.66"  y="130" fill="#7aa2f7">t</text>
+    <text x="128"    y="130" fill="#bb9af7">a</text>
+    <text x="197.33" y="130" fill="#9ece6a">d</text>
+  </g>
+</svg>
