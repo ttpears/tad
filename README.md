@@ -14,8 +14,8 @@ control per group.
 
 ## Install
 
-Only requirement at runtime: `tmux`. No fzf needed — the dashboard is
-built into the binary via ratatui.
+Only requirement at runtime: `tmux`. The dashboard ships inside the
+binary.
 
 ### From a release (no compile needed)
 
@@ -128,7 +128,7 @@ and asks tmux to attach/create. Nothing on disk changes for tmux.
 ## Usage
 
 ```
-tad                          fzf dashboard (sessions / groups / hosts)
+tad                          TUI dashboard (sessions / groups / hosts)
 tad <session>                attach or create a tmux session by name
 tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group

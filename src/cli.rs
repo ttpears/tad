@@ -62,7 +62,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(name) = cli.session {
         return sessions::attach_or_create(&name);
     }
-    // No args → ratatui dashboard. Fall back to a numbered picker if the
+    // No args → TUI dashboard. Fall back to a numbered picker if the
     // terminal can't be controlled (non-TTY, weird env, etc.).
     match dashboard::run() {
         Ok(rc) => Ok(rc),

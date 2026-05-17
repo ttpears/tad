@@ -123,7 +123,8 @@ pub fn attach_or_create_remote(fqdn: &str) -> Result<i32> {
     tmux::enter(&short)
 }
 
-/// Legacy `select`-style picker used as fallback when fzf isn't available.
+/// Numbered `select`-style picker used as fallback when the TUI dashboard
+/// can't run (non-TTY, broken terminal, etc.).
 pub fn picker_fallback() -> Result<i32> {
     let sessions = list()?;
     if sessions.is_empty() {

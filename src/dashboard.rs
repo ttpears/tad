@@ -1,5 +1,4 @@
-//! Native TUI dashboard built on ratatui + crossterm. Live updates every
-//! ~1.5s. No external fzf dependency.
+//! Native TUI dashboard. Live updates every ~1.5s.
 
 use anyhow::Result;
 use crossterm::{
