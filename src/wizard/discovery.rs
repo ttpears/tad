@@ -26,8 +26,101 @@ pub struct SessionCandidate {
     pub usable: bool,
 }
 
-pub fn scan_hosts(_sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
-    (Vec::new(), Vec::new())
+pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
+    let mut shell = Vec::new();
+    let mut ssh_cfg = Vec::new();
+    let mut khosts = Vec::new();
+    let mut errors = Vec::new();
+
+    if sources.shell {
+        let paths = shell_history_paths();
+        let mut any_ok = false;
+        for (label, path) in &paths {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    any_ok = true;
+                    if label == &"fish" {
+                        shell.extend(parse_fish_history(&text));
+                    } else {
+                        shell.extend(parse_bash_zsh_history(&text));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if !any_ok && !paths.is_empty() {
+            errors.push("couldn't read shell history (no readable files)".to_string());
+        }
+    }
+
+    if sources.ssh_config {
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join(".ssh").join("config");
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    ssh_cfg.extend(parse_ssh_config(&text));
+                    for include in parse_ssh_config_includes(&text) {
+                        let inc_path = if include.starts_with('/') {
+                            std::path::PathBuf::from(&include)
+                        } else {
+                            home.join(".ssh").join(&include)
+                        };
+                        if let Ok(t) = std::fs::read_to_string(&inc_path) {
+                            ssh_cfg.extend(parse_ssh_config(&t));
+                        }
+                    }
+                }
+                Err(_) => errors.push("couldn't read ~/.ssh/config".to_string()),
+            }
+        }
+    }
+
+    if sources.known_hosts {
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join(".ssh").join("known_hosts");
+            match std::fs::read_to_string(&path) {
+                Ok(text) => khosts.extend(parse_known_hosts(&text)),
+                Err(_) => errors.push("couldn't read ~/.ssh/known_hosts".to_string()),
+            }
+        }
+    }
+
+    (aggregate(shell, ssh_cfg, khosts), errors)
+}
+
+fn shell_history_paths() -> Vec<(&'static str, std::path::PathBuf)> {
+    let mut out: Vec<(&'static str, std::path::PathBuf)> = Vec::new();
+    if let Ok(h) = std::env::var("HISTFILE") {
+        if !h.is_empty() {
+            out.push(("bash", std::path::PathBuf::from(h)));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        out.push(("bash", home.join(".bash_history")));
+        out.push(("zsh", home.join(".zsh_history")));
+        out.push(("fish", home.join(".local/share/fish/fish_history")));
+    }
+    out
+}
+
+pub(crate) fn parse_ssh_config_includes(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let key = parts.next().unwrap_or("");
+        if key.eq_ignore_ascii_case("include") {
+            if let Some(rest) = parts.next() {
+                for tok in rest.split_whitespace() {
+                    out.push(tok.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn scan_tmux_sessions() -> Vec<SessionCandidate> {
@@ -225,6 +318,35 @@ mod tests {
         assert!(!hosts.iter().any(|h| h.starts_with('@')));
         assert!(!hosts.iter().any(|h| h.contains('[')));
         assert!(!hosts.iter().any(|h| h.contains(']')));
+    }
+
+    #[test]
+    fn aggregate_dedupes_case_insensitively_and_unions_sources() {
+        let result = aggregate(
+            vec!["Foo.Example.com".to_string(), "bar".to_string()],
+            vec!["foo.example.com".to_string()],
+            vec!["BAR".to_string(), "baz".to_string()],
+        );
+        let foo = result.iter().find(|c| c.host == "foo.example.com").unwrap();
+        assert!(foo.sources.shell);
+        assert!(foo.sources.ssh_config);
+        assert!(!foo.sources.known_hosts);
+
+        let bar = result.iter().find(|c| c.host == "bar").unwrap();
+        assert!(bar.sources.shell);
+        assert!(!bar.sources.ssh_config);
+        assert!(bar.sources.known_hosts);
+
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn scan_hosts_reports_missing_files_as_errors_not_panics() {
+        let (candidates, errors) = scan_hosts(SourceSet::ALL);
+        for e in &errors {
+            assert!(!e.is_empty());
+        }
+        let _ = candidates;
     }
 }
 
