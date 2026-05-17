@@ -4,6 +4,14 @@
 
 # tad
 
+<p align="center">
+  <a href="https://github.com/ttpears/tad/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ttpears/tad/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/ttpears/tad/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ttpears/tad?display_name=tag&sort=semver"></a>
+  <a href="https://aur.archlinux.org/packages/tad-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/tad-bin"></a>
+  <a href="https://github.com/ttpears/tad/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ttpears/tad/total"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/ttpears/tad"></a>
+</p>
+
 A tmux session and group manager. Bare `tad` opens a native TUI dashboard
 that cycles between live sessions, named groups, and the hosts inside those
 groups, with live updates every ~1.5s. `tad <name>` attaches or creates a
@@ -17,25 +25,42 @@ control per group.
 Only requirement at runtime: `tmux`. The dashboard ships inside the
 binary.
 
-### From a release (no compile needed)
-
-Grab the latest from
-https://github.com/ttpears/tad/releases. Each release has a Linux
-x86_64 binary and matching completion files attached.
+### Arch Linux (AUR)
 
 ```sh
+yay -S tad-bin           # or: paru -S tad-bin
+```
+
+The [`tad-bin`](https://aur.archlinux.org/packages/tad-bin) package
+installs the prebuilt x86_64 binary from the GitHub release plus the
+bash/zsh completions and example configs. PKGBUILD source lives at
+`packaging/aur/tad-bin/PKGBUILD` in this repo.
+
+### From a release (any Linux x86_64)
+
+Each [release](https://github.com/ttpears/tad/releases) ships a static
+Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
+
+```sh
+TAD_VERSION=v0.3.1
+BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
+
 mkdir -p ~/.local/bin \
          ~/.local/share/bash-completion/completions \
          ~/.local/share/zsh/site-functions
 
-VERSION=v0.3.0
-BASE="https://github.com/ttpears/tad/releases/download/${VERSION}"
-
-curl -L "${BASE}/tad-${VERSION}-x86_64-linux" -o ~/.local/bin/tad
+curl -fL "${BASE}/tad-${TAD_VERSION}-x86_64-linux" -o ~/.local/bin/tad
 chmod +x ~/.local/bin/tad
 
-curl -L "${BASE}/tad.bash" -o ~/.local/share/bash-completion/completions/tad
-curl -L "${BASE}/_tad"     -o ~/.local/share/zsh/site-functions/_tad
+curl -fL "${BASE}/tad.bash" -o ~/.local/share/bash-completion/completions/tad
+curl -fL "${BASE}/_tad"     -o ~/.local/share/zsh/site-functions/_tad
+```
+
+Verify against `SHA256SUMS` from the release if you care:
+
+```sh
+curl -fL "${BASE}/SHA256SUMS" | grep "tad-${TAD_VERSION}-x86_64-linux" \
+    | sha256sum -c --ignore-missing -
 ```
 
 Make sure `~/.local/bin` is in `PATH` and (for zsh) that
@@ -44,22 +69,21 @@ Make sure `~/.local/bin` is in `PATH` and (for zsh) that
 ### From source
 
 ```sh
-git clone git@github.com:ttpears/tad.git ~/git/tad
+git clone https://github.com/ttpears/tad.git ~/git/tad
 cd ~/git/tad
 make install              # builds release binary + installs binary and
                           # completions under ~/.local
 ```
 
-Or manually:
+Or just:
 ```sh
-cargo build --release
-install -Dm755 target/release/tad ~/.local/bin/tad
+cargo install --git https://github.com/ttpears/tad --locked
 ```
 
-### Shell completions (installed from source)
+### Shell completions (manual)
 
-`make install` puts them in the standard XDG paths. If you installed
-the binary by other means, do this once:
+`make install` and the AUR package both put completions in the standard
+locations. If you installed the binary by other means, do this once:
 
 bash:
 ```sh
@@ -71,6 +95,38 @@ zsh — add to your `.zshrc` if it's not already:
 fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -Uz compinit && compinit
 ```
+
+## First-launch wizard / `tad config`
+
+The first time you run bare `tad` with no `~/.config/tad/groups.yaml`,
+a TUI wizard offers to import SSH hosts from sources you already have
+on disk and shape them into groups. You can also launch it any time
+with `tad config` — when a config already exists, that opens an edit
+view with the option to re-run imports.
+
+All scanning is **local**: the wizard reads files on this machine. It
+does not contact hosts, perform DNS lookups, or call any resolver.
+
+Sources it can pull from (each toggleable):
+
+- **Shell history** — `$HISTFILE`, `~/.bash_history`, `~/.zsh_history`,
+  fish history. Extracts hosts from `ssh user@host -p 22` style
+  invocations, strips `user@` and flag values, ignores `sshfs` /
+  `ssh-add` / `ssh-keygen` / `ssh-copy-id`.
+- **`~/.ssh/config`** — concrete `Host` entries, including
+  one-level-deep `Include`. Wildcard patterns are skipped.
+- **`~/.ssh/known_hosts`** — non-hashed entries. `@cert-authority` and
+  `|1|...` hashed entries are skipped.
+- **Tmux sessions** — existing sessions become pre-formed group
+  candidates (window names → hosts, layout defaults to `windows`).
+  Sessions whose windows are all generic shell names are pre-marked
+  unusable, but you can still force-import them.
+
+Flow: pick sources → review/toggle imported tmux sessions → review/toggle
+discovered hosts (with `/` filter, `a` select-all, `n` clear) → build
+groups one at a time (name, layout, member hosts) → confirm and write.
+On a re-run via `tad config`, new groups are merged into the existing
+config; name collisions get `-2`, `-3`, ... suffixes.
 
 ## Migrating from a shell-function `tad`
 
@@ -110,14 +166,16 @@ function tad() {
    ```
    The Rust binary ships its own bash + zsh completions; the old one
    would conflict.
-4. **Optional: define your groups**. Open `tad groups-edit` and add
-   entries (or run `tad groups-add` for the interactive wizard). The
-   config file lives at `~/.config/tad/groups.yaml`. The old function
-   knew nothing about groups; everything else is a strict superset of
-   the old behavior so existing muscle memory still works:
+4. **Define your groups**. Either let the first-launch wizard /
+   `tad config` mine them from your shell history and `~/.ssh/config`,
+   or open `tad groups-edit` and hand-edit, or run `tad groups-add`
+   for a single-group interactive prompt. The config lives at
+   `~/.config/tad/groups.yaml`. The old function knew nothing about
+   groups; everything else is a strict superset of the old behavior so
+   existing muscle memory still works:
    - `tad <name>` — attach or create (same as old)
    - `tad` — opens the dashboard (was: list sessions)
-   - new: `tad -g <group>`, `tad groups`, `tad complete`, etc.
+   - new: `tad -g <group>`, `tad groups`, `tad config`, `tad complete`, etc.
 5. **Optional: pick a theme**. Drop `theme: tokyonight` into
    `~/.config/tad/config.yaml` (or any of the built-ins; see Theme
    section).
@@ -133,6 +191,7 @@ tad <session>                attach or create a tmux session by name
 tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
+tad config                   first-launch wizard / groups editor (TUI)
 tad groups                   list known groups
 tad group-hosts <group>      list hosts in a group
 tad groups-add <name> <layout> <host>...
@@ -146,7 +205,8 @@ tad complete                 emit completion source (used by shell)
 ## Groups config
 
 Lives at `~/.config/tad/groups.yaml`. See `examples/groups.yaml.example` for
-the schema. Edit by hand or via the `groups-*` subcommands.
+the schema. Edit by hand, via `tad config`, or via the `groups-*`
+subcommands.
 
 Layouts:
 - `panes`         — single window, one pane per host. **Default.**
@@ -213,6 +273,7 @@ theme:
 
 ```
 ~/.config/tad/groups.yaml      — your group definitions
+~/.config/tad/config.yaml      — theme + UI preferences (optional)
 /tmp/tad-dashboard-$USER.state — current dashboard view (transient)
 ```
 
@@ -237,3 +298,27 @@ frames from the new gif:
 ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=2 /tmp/tad-f%03d.png
 # then cp the frames you like into docs/screenshots/
 ```
+
+## Cutting a release
+
+1. Bump `version` in `Cargo.toml`, run `cargo build --release` so
+   `Cargo.lock` updates, and commit.
+2. Tag and push:
+   ```sh
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+   `.github/workflows/release.yml` builds the binary, bundles
+   completions + examples + `LICENSE`, computes `SHA256SUMS`, and
+   publishes the GitHub release.
+3. Refresh the AUR PKGBUILD hashes:
+   ```sh
+   curl -sL https://github.com/ttpears/tad/releases/download/vX.Y.Z/SHA256SUMS
+   ```
+   Paste each hash (binary, `tad.bash`, `_tad`, `groups.yaml.example`,
+   `config.yaml.example`, `LICENSE`) into the corresponding `SKIP` slot
+   in `packaging/aur/tad-bin/PKGBUILD`, bump `pkgver`, then push to AUR:
+   ```sh
+   cd packaging/aur/tad-bin
+   makepkg --printsrcinfo > .SRCINFO
+   # commit + push to ssh://aur@aur.archlinux.org/tad-bin.git
+   ```
