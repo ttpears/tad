@@ -231,6 +231,17 @@ use std::time::Duration;
 
 use crate::wizard::discovery;
 
+/// View-layer cursor positions per screen. Kept outside `WizardState` since
+/// these are purely UI concerns the state machine doesn't care about.
+#[derive(Default)]
+struct Cursors {
+    welcome: usize,
+    hosts: usize,
+    sessions: usize,
+    built: usize,
+    edit: usize,
+}
+
 /// RAII guard restoring the terminal even on panic.
 struct TermGuard;
 
@@ -255,16 +266,12 @@ pub fn run(entry: Entry) -> Result<()> {
         Entry::Config => WizardState::for_config(config_exists),
     };
 
-    let mut cursor_welcome = 0usize;
-    let mut cursor_hosts = 0usize;
-    let mut cursor_sessions = 0usize;
-    let mut cursor_built = 0usize;
-    let mut cursor_edit = 0usize;
+    let mut cursors = Cursors::default();
     let mut filter_mode = false;
     let mut form_field = 0usize;
 
     loop {
-        term.draw(|f| draw(f, &state, cursor_welcome, cursor_hosts, cursor_sessions, cursor_built, cursor_edit, filter_mode, form_field))?;
+        term.draw(|f| draw(f, &state, &cursors, filter_mode, form_field))?;
 
         if !event::poll(Duration::from_millis(200))? {
             continue;
@@ -274,21 +281,20 @@ pub fn run(entry: Entry) -> Result<()> {
             continue;
         }
 
-        if !filter_mode
-            && !(state.stage == Stage::BuildGroups && form_field == 0)
-            && (key.code == KeyCode::Esc
-                || (key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::SHIFT)))
-        {
+        let typing_name = state.stage == Stage::BuildGroups && form_field == 0;
+        let cancel_pressed = key.code == KeyCode::Esc
+            || (key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::SHIFT));
+        if !filter_mode && !typing_name && cancel_pressed {
             state.stage = Stage::Cancelled;
             break;
         }
 
         match state.stage {
-            Stage::EditMode => handle_edit_mode(&mut state, key, &mut cursor_edit),
-            Stage::Welcome => handle_welcome(&mut state, key, &mut cursor_welcome),
-            Stage::Sessions => handle_sessions(&mut state, key, &mut cursor_sessions),
-            Stage::Hosts => handle_hosts(&mut state, key, &mut cursor_hosts, &mut filter_mode),
-            Stage::BuildGroups => handle_build_groups(&mut state, key, &mut form_field, &mut cursor_built),
+            Stage::EditMode => handle_edit_mode(&mut state, key, &mut cursors.edit),
+            Stage::Welcome => handle_welcome(&mut state, key, &mut cursors.welcome),
+            Stage::Sessions => handle_sessions(&mut state, key, &mut cursors.sessions),
+            Stage::Hosts => handle_hosts(&mut state, key, &mut cursors.hosts, &mut filter_mode),
+            Stage::BuildGroups => handle_build_groups(&mut state, key, &mut form_field, &mut cursors.built),
             Stage::Confirm => {
                 if let KeyCode::Char(c) = key.code {
                     if c == 'y' || c == 'Y' {
@@ -528,24 +534,14 @@ fn write_and_finish(state: &mut WizardState) -> Result<()> {
     Ok(())
 }
 
-fn draw(
-    f: &mut Frame,
-    state: &WizardState,
-    cursor_welcome: usize,
-    cursor_hosts: usize,
-    cursor_sessions: usize,
-    cursor_built: usize,
-    cursor_edit: usize,
-    filter_mode: bool,
-    form_field: usize,
-) {
+fn draw(f: &mut Frame, state: &WizardState, cursors: &Cursors, filter_mode: bool, form_field: usize) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
         .split(area);
     draw_header(f, chunks[0], state);
-    draw_body(f, chunks[1], state, cursor_welcome, cursor_hosts, cursor_sessions, cursor_built, cursor_edit, filter_mode, form_field);
+    draw_body(f, chunks[1], state, cursors, filter_mode, form_field);
     draw_footer(f, chunks[2], state, filter_mode);
 }
 
@@ -595,11 +591,7 @@ fn draw_body(
     f: &mut Frame,
     area: Rect,
     state: &WizardState,
-    cursor_welcome: usize,
-    cursor_hosts: usize,
-    cursor_sessions: usize,
-    cursor_built: usize,
-    cursor_edit: usize,
+    cursors: &Cursors,
     _filter_mode: bool,
     form_field: usize,
 ) {
@@ -607,7 +599,7 @@ fn draw_body(
         Stage::EditMode => {
             let doc = config::load().unwrap_or_default();
             let items: Vec<ListItem> = doc.groups.iter().enumerate().map(|(i, (n, g))| {
-                let marker = if i == cursor_edit { "→ " } else { "  " };
+                let marker = if i == cursors.edit { "→ " } else { "  " };
                 ListItem::new(format!("{}{:<20} {:<14} {} hosts", marker, n, g.layout, g.hosts.len()))
             }).collect();
             f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Groups")), area);
@@ -621,7 +613,7 @@ fn draw_body(
             ];
             let on = [state.sources.shell, state.sources.ssh_config, state.sources.known_hosts, state.sources.tmux_sessions];
             let items: Vec<ListItem> = labels.iter().enumerate().map(|(i, l)| {
-                let mark = if i == cursor_welcome { "→ " } else { "  " };
+                let mark = if i == cursors.welcome { "→ " } else { "  " };
                 let box_ = if on[i] { "[x]" } else { "[ ]" };
                 ListItem::new(format!("{}{} {}", mark, box_, l))
             }).collect();
@@ -629,7 +621,7 @@ fn draw_body(
         }
         Stage::Sessions => {
             let items: Vec<ListItem> = state.session_candidates.iter().enumerate().map(|(i, s)| {
-                let mark = if i == cursor_sessions { "→ " } else { "  " };
+                let mark = if i == cursors.sessions { "→ " } else { "  " };
                 let box_ = if state.selected_sessions.contains(&s.name) { "[x]" } else { "[ ]" };
                 let (gname, layout_idx) = state.session_overrides.get(&s.name).cloned()
                     .unwrap_or_else(|| (s.name.clone(), 2));
@@ -642,7 +634,7 @@ fn draw_body(
         Stage::Hosts => {
             let visible = filtered_hosts(state);
             let items: Vec<ListItem> = visible.iter().enumerate().map(|(i, c)| {
-                let mark = if i == cursor_hosts { "→ " } else { "  " };
+                let mark = if i == cursors.hosts { "→ " } else { "  " };
                 let box_ = if state.selected_hosts.contains(&c.host) { "[x]" } else { "[ ]" };
                 let mut tags = Vec::new();
                 if c.sources.shell { tags.push("shell"); }
@@ -664,7 +656,7 @@ fn draw_body(
                 .split(area);
             let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
             let items: Vec<ListItem> = hosts.iter().enumerate().map(|(i, h)| {
-                let mark = if form_field == 2 && i == cursor_built { "→ " } else { "  " };
+                let mark = if form_field == 2 && i == cursors.built { "→ " } else { "  " };
                 let box_ = if state.form.members.contains(h) { "[x]" } else { "[ ]" };
                 ListItem::new(format!("{}{} {}", mark, box_, h))
             }).collect();

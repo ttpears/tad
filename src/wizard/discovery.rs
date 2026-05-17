@@ -36,16 +36,13 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
         let paths = shell_history_paths();
         let mut any_ok = false;
         for (label, path) in &paths {
-            match std::fs::read_to_string(path) {
-                Ok(text) => {
-                    any_ok = true;
-                    if label == &"fish" {
-                        shell.extend(parse_fish_history(&text));
-                    } else {
-                        shell.extend(parse_bash_zsh_history(&text));
-                    }
+            if let Ok(text) = std::fs::read_to_string(path) {
+                any_ok = true;
+                if label == &"fish" {
+                    shell.extend(parse_fish_history(&text));
+                } else {
+                    shell.extend(parse_bash_zsh_history(&text));
                 }
-                Err(_) => {}
             }
         }
         if !any_ok && !paths.is_empty() {
@@ -62,8 +59,8 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
                     for include in parse_ssh_config_includes(&text) {
                         let inc_path = if include.starts_with('/') {
                             std::path::PathBuf::from(&include)
-                        } else if include.starts_with("~/") {
-                            home.join(&include[2..])
+                        } else if let Some(rest) = include.strip_prefix("~/") {
+                            home.join(rest)
                         } else {
                             home.join(".ssh").join(&include)
                         };
