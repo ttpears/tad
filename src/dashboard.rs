@@ -96,7 +96,10 @@ impl AppData {
 }
 
 enum OpenTarget {
-    Session(String),
+    /// Attach to an existing session by name, no prompt.
+    AttachExisting(String),
+    /// Create a new session, optionally running `ssh <host>` as its command.
+    CreateNew { name: String, host: Option<String> },
     Group(String),
     Host(String),
 }
@@ -108,6 +111,12 @@ enum InputMode {
     NewSession,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NewSessionField {
+    Name,
+    Host,
+}
+
 struct App {
     view: View,
     data: AppData,
@@ -116,7 +125,9 @@ struct App {
     list_state_hosts: ListState,
     filter: String,
     input_mode: InputMode,
-    input_buffer: String,
+    new_session_name: String,
+    new_session_host: String,
+    new_session_field: NewSessionField,
     should_quit: bool,
     open_after: Option<OpenTarget>,
     theme: Theme,
@@ -139,7 +150,9 @@ impl App {
             list_state_hosts: h,
             filter: String::new(),
             input_mode: InputMode::None,
-            input_buffer: String::new(),
+            new_session_name: String::new(),
+            new_session_host: String::new(),
+            new_session_field: NewSessionField::Name,
             should_quit: false,
             open_after: None,
             theme: theme::load(),
@@ -211,7 +224,12 @@ pub fn run() -> Result<i32> {
 
     let app = result?;
     match app.open_after {
-        Some(OpenTarget::Session(name)) => sessions::attach_or_create(&name),
+        Some(OpenTarget::AttachExisting(name)) => {
+            sessions::attach_or_create_silent(&name, None)
+        }
+        Some(OpenTarget::CreateNew { name, host }) => {
+            sessions::attach_or_create_silent(&name, host.as_deref())
+        }
         Some(OpenTarget::Group(name)) => groups::open(&name, None),
         Some(OpenTarget::Host(name)) => sessions::attach_or_create_remote(&name),
         None => Ok(1),
@@ -271,21 +289,52 @@ fn handle_new_session_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             app.input_mode = InputMode::None;
-            app.input_buffer.clear();
+            app.new_session_name.clear();
+            app.new_session_host.clear();
+            app.new_session_field = NewSessionField::Name;
         }
         KeyCode::Enter => {
-            let name = app.input_buffer.trim().to_string();
-            app.input_mode = InputMode::None;
-            app.input_buffer.clear();
-            if !name.is_empty() {
-                app.open_after = Some(OpenTarget::Session(name));
-                app.should_quit = true;
+            let name = app.new_session_name.trim().to_string();
+            if name.is_empty() {
+                return;
             }
+            let host = {
+                let h = app.new_session_host.trim();
+                if h.is_empty() { None } else { Some(h.to_string()) }
+            };
+            app.input_mode = InputMode::None;
+            app.new_session_name.clear();
+            app.new_session_host.clear();
+            app.new_session_field = NewSessionField::Name;
+            app.open_after = Some(OpenTarget::CreateNew { name, host });
+            app.should_quit = true;
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            app.new_session_field = match app.new_session_field {
+                NewSessionField::Name => NewSessionField::Host,
+                NewSessionField::Host => NewSessionField::Name,
+            };
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            app.new_session_field = match app.new_session_field {
+                NewSessionField::Name => NewSessionField::Host,
+                NewSessionField::Host => NewSessionField::Name,
+            };
         }
         KeyCode::Backspace => {
-            app.input_buffer.pop();
+            match app.new_session_field {
+                NewSessionField::Name => {
+                    app.new_session_name.pop();
+                }
+                NewSessionField::Host => {
+                    app.new_session_host.pop();
+                }
+            }
         }
-        KeyCode::Char(c) => app.input_buffer.push(c),
+        KeyCode::Char(c) => match app.new_session_field {
+            NewSessionField::Name => app.new_session_name.push(c),
+            NewSessionField::Host => app.new_session_host.push(c),
+        },
         _ => {}
     }
 }
@@ -317,7 +366,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
                 app.open_after = Some(match app.view {
-                    View::Sessions => OpenTarget::Session(name),
+                    View::Sessions => OpenTarget::AttachExisting(name),
                     View::Groups => OpenTarget::Group(name),
                     View::Hosts => OpenTarget::Host(name),
                 });
@@ -341,12 +390,18 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('n') => {
-            // Pre-seed the new-session name from the highlighted item so
-            // the user can edit instead of typing from scratch.
-            app.input_buffer = app
-                .selected()
-                .map(|s| short_name(&s))
-                .unwrap_or_default();
+            // Pre-seed name + host from the highlighted item where possible:
+            // - Sessions view: name = session name, host blank
+            // - Groups view: name = group name, host blank
+            // - Hosts view: name = short host, host = full FQDN
+            let (name, host) = match (app.view, app.selected()) {
+                (View::Hosts, Some(h)) => (short_name(&h), h),
+                (_, Some(s)) => (short_name(&s), String::new()),
+                _ => (String::new(), String::new()),
+            };
+            app.new_session_name = name;
+            app.new_session_host = host;
+            app.new_session_field = NewSessionField::Name;
             app.input_mode = InputMode::NewSession;
         }
         KeyCode::Char('r') => app.refresh(),
@@ -409,8 +464,8 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
-    let width = 60.min(area.width.saturating_sub(4));
-    let height = 5;
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = 7;
     let popup = centered_rect(width, height, area);
     f.render_widget(Clear, popup);
     let block = Block::default()
@@ -422,22 +477,57 @@ fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
                 .fg(app.theme.accent_bold)
                 .add_modifier(Modifier::BOLD),
         ));
-    let inner = Paragraph::new(Line::from(vec![
-        Span::styled("name: ", Style::default().fg(app.theme.muted)),
-        Span::styled(
-            app.input_buffer.clone(),
-            Style::default()
-                .fg(app.theme.fg)
-                .add_modifier(Modifier::BOLD),
+
+    let active = app.new_session_field;
+    let field_line = |label: &str, value: &str, active: bool, placeholder: &str| -> Line<'static> {
+        let label_style = if active {
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.muted)
+        };
+        let value_style = Style::default().fg(app.theme.fg);
+        let cursor = if active {
+            Span::styled("█", Style::default().fg(app.theme.accent))
+        } else {
+            Span::raw("")
+        };
+        let value_span = if value.is_empty() && !active {
+            Span::styled(
+                placeholder.to_string(),
+                Style::default().fg(app.theme.muted),
+            )
+        } else {
+            Span::styled(value.to_string(), value_style)
+        };
+        Line::from(vec![
+            Span::styled(format!("  {:<6}", label), label_style),
+            value_span,
+            cursor,
+        ])
+    };
+
+    let lines = vec![
+        Line::from(""),
+        field_line(
+            "name:",
+            &app.new_session_name,
+            active == NewSessionField::Name,
+            "(required)",
         ),
-        Span::styled("_", Style::default().fg(app.theme.accent)),
-        Span::raw("    "),
-        Span::styled(
-            "↵ create   Esc cancel",
+        field_line(
+            "ssh:",
+            &app.new_session_host,
+            active == NewSessionField::Host,
+            "(optional — blank = no ssh)",
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Tab next field   ↵ create   Esc cancel",
             Style::default().fg(app.theme.muted),
-        ),
-    ]))
-    .block(block);
+        )),
+    ];
+
+    let inner = Paragraph::new(lines).block(block);
     f.render_widget(inner, popup);
 }
 

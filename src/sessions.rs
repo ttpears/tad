@@ -89,6 +89,25 @@ pub fn attach_or_create(name: &str) -> Result<i32> {
     tmux::enter(name)
 }
 
+/// Attach if it exists, else create without prompting. Optional `host` runs
+/// `ssh <host>` as the new window's command. Used by the dashboard, where
+/// the user already confirmed by typing the name and pressing Enter.
+pub fn attach_or_create_silent(name: &str, host: Option<&str>) -> Result<i32> {
+    if tmux::has_session(name) {
+        return tmux::enter(name);
+    }
+    match host {
+        Some(h) => {
+            let cmd = format!("ssh {}", h);
+            tmux::try_run(["new-session", "-d", "-s", name, &cmd])?;
+        }
+        None => {
+            tmux::try_run(["new-session", "-d", "-s", name])?;
+        }
+    }
+    tmux::enter(name)
+}
+
 /// Open a single-host tmux session whose name is the short hostname.
 pub fn attach_or_create_remote(fqdn: &str) -> Result<i32> {
     let short = fqdn.split('.').next().unwrap_or(fqdn).to_string();
