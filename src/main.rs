@@ -8,6 +8,7 @@ mod groups;
 mod sessions;
 mod theme;
 mod tmux;
+mod wizard;
 
 fn main() {
     // Restore default SIGPIPE so that piping into `head`/`less`/etc. exits
