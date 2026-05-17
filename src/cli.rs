@@ -46,6 +46,9 @@ pub enum Cmd {
     GroupsRm { name: String },
     /// Open the groups file in $EDITOR.
     GroupsEdit,
+    /// Open the wizard / editor. First launch when no config exists,
+    /// otherwise opens edit mode with re-run-imports access.
+    Config,
 }
 
 pub fn dispatch(cli: Cli) -> Result<i32> {
@@ -96,5 +99,18 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
         }
         Cmd::GroupsRm { name } => groups::remove(&name),
         Cmd::GroupsEdit => groups::edit(),
+        Cmd::Config => crate::wizard::run_config(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_config_subcommand() {
+        let cli = Cli::try_parse_from(["tad", "config"]).expect("parse");
+        assert!(matches!(cli.cmd, Some(Cmd::Config)));
     }
 }
