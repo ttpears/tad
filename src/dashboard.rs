@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -22,6 +23,16 @@ use crate::{
     theme::{self, Theme},
     tmux,
 };
+
+/// `~/.local/state/tad/dashboard.state` — last view the user was on.
+/// Falls back to the cache dir and finally `/tmp` so we always have a path.
+fn state_path() -> PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::cache_dir)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("tad")
+        .join("dashboard.state")
+}
 
 /// Editable single-line text field with cursor + a "pristine prefill" flag.
 /// When `pristine` is set, the first edit replaces the whole value — matches
@@ -162,6 +173,35 @@ impl View {
             View::Hosts => 2,
         }
     }
+    fn slug(self) -> &'static str {
+        match self {
+            View::Sessions => "sessions",
+            View::Groups => "groups",
+            View::Hosts => "hosts",
+        }
+    }
+    fn from_slug(s: &str) -> Option<Self> {
+        match s.trim() {
+            "sessions" => Some(View::Sessions),
+            "groups" => Some(View::Groups),
+            "hosts" => Some(View::Hosts),
+            _ => None,
+        }
+    }
+}
+
+fn load_last_view() -> Option<View> {
+    std::fs::read_to_string(state_path())
+        .ok()
+        .and_then(|s| View::from_slug(&s))
+}
+
+fn save_last_view(view: View) {
+    let path = state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, view.slug());
 }
 
 struct AppData {
@@ -260,7 +300,7 @@ impl App {
         let mut h = ListState::default();
         h.select(if data.hosts.is_empty() { None } else { Some(0) });
         App {
-            view: View::Sessions,
+            view: load_last_view().unwrap_or(View::Sessions),
             data,
             list_state_sessions: s,
             list_state_groups: g,
@@ -358,6 +398,7 @@ pub fn run() -> Result<i32> {
 
 fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<App> {
     let mut app = App::new();
+    let mut last_view = app.view;
     let mut last_refresh = Instant::now();
     let refresh_every = Duration::from_millis(1500);
 
@@ -381,6 +422,10 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
                 }
             }
         }
+        if app.view != last_view {
+            save_last_view(app.view);
+            last_view = app.view;
+        }
         if app.should_quit {
             return Ok(app);
         }
@@ -389,8 +434,33 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
 
 fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let filter_before = app.filter.as_str().to_string();
     match key.code {
-        KeyCode::Enter | KeyCode::Esc => app.input_mode = InputMode::None,
+        // Navigate the (filtered) list without leaving filter mode — the whole
+        // point: see a match, arrow to it, Enter, done.
+        KeyCode::Down => move_selection(app, 1),
+        KeyCode::Up => move_selection(app, -1),
+        KeyCode::PageDown => move_selection(app, 10),
+        KeyCode::PageUp => move_selection(app, -10),
+        KeyCode::Tab => app.view = app.view.next(),
+        KeyCode::BackTab => app.view = app.view.prev(),
+        KeyCode::Enter => {
+            if let Some(name) = app.selected() {
+                app.open_after = Some(match app.view {
+                    View::Sessions => OpenTarget::AttachExisting(name),
+                    View::Groups => OpenTarget::Group(name),
+                    View::Hosts => OpenTarget::Host(name),
+                });
+                app.should_quit = true;
+            }
+        }
+        // Esc clears the filter and exits filter mode in one step.
+        KeyCode::Esc => {
+            app.filter.clear();
+            app.input_mode = InputMode::None;
+        }
+        // Backspace on an empty filter exits filter mode (mirrors fzf).
+        KeyCode::Backspace if app.filter.is_empty() => app.input_mode = InputMode::None,
         KeyCode::Backspace => app.filter.backspace(),
         KeyCode::Delete => app.filter.delete(),
         KeyCode::Left => app.filter.left(),
@@ -400,15 +470,22 @@ fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Char('u') if ctrl => app.filter.clear(),
         KeyCode::Char('a') if ctrl => app.filter.home(),
         KeyCode::Char('e') if ctrl => app.filter.end(),
+        KeyCode::Char('c') if ctrl => app.should_quit = true,
         KeyCode::Char(c) if !ctrl => app.filter.insert(c),
         _ => {}
     }
     let len = app.items().len();
+    let filter_changed = app.filter.as_str() != filter_before;
     let state = app.list_state_mut();
-    match state.selected() {
-        Some(i) if i >= len => state.select(if len == 0 { None } else { Some(len - 1) }),
-        None if len > 0 => state.select(Some(0)),
-        _ => {}
+    if filter_changed {
+        // Typing narrows the list — snap to the top match so Enter just works.
+        state.select(if len == 0 { None } else { Some(0) });
+    } else {
+        match state.selected() {
+            Some(i) if i >= len => state.select(if len == 0 { None } else { Some(len - 1) }),
+            None if len > 0 => state.select(Some(0)),
+            _ => {}
+        }
     }
 }
 
@@ -976,7 +1053,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
             }
             spans.push(Span::styled(
-                "    ←→ cursor  ^U clear  Esc/Enter exits filter",
+                "    ↑↓ nav  ↵ open  ⇥ view  ^U clear  Esc exit",
                 Style::default().fg(theme.muted),
             ));
             Line::from(spans)

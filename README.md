@@ -235,11 +235,16 @@ Keys:
                          with the highlighted item's short name; edit
                          and Enter to create)
 - `d`                    kill (sessions view only)
-- `/`                    enter filter mode (type to filter, Esc/Enter exits)
+- `/`                    enter filter mode (live — ↑↓ navigates, Enter
+                         opens, Tab cycles views with filter applied,
+                         Esc exits and clears)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
 
-Sessions/groups/hosts auto-refresh every ~1.5 seconds.
+Sessions/groups/hosts auto-refresh every ~1.5 seconds. The last view
+you were on (Sessions / Groups / Hosts) is remembered across launches
+in `$XDG_STATE_HOME/tad/dashboard.state` (typically
+`~/.local/state/tad/dashboard.state`).
 
 ## Theme
 
@@ -272,9 +277,9 @@ theme:
 ## Files
 
 ```
-~/.config/tad/groups.yaml      — your group definitions
-~/.config/tad/config.yaml      — theme + UI preferences (optional)
-/tmp/tad-dashboard-$USER.state — current dashboard view (transient)
+~/.config/tad/groups.yaml         — your group definitions
+~/.config/tad/config.yaml         — theme + UI preferences (optional)
+~/.local/state/tad/dashboard.state — last dashboard view (persisted)
 ```
 
 ## Regenerating the README screenshots
