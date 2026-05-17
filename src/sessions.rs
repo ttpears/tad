@@ -57,11 +57,14 @@ pub fn print_completions() -> Result<()> {
     sessions.sort_by(|a, b| b.activity_ts.cmp(&a.activity_ts));
     let home = std::env::var("HOME").unwrap_or_default();
     for s in &sessions {
-        let win = truncate(if s.active_window.is_empty() {
-            "—"
-        } else {
-            &s.active_window
-        }, 10);
+        let win = truncate(
+            if s.active_window.is_empty() {
+                "—"
+            } else {
+                &s.active_window
+            },
+            10,
+        );
         let mut path = s.active_path.clone();
         if !home.is_empty() && path.starts_with(&home) {
             path = format!("~{}", &path[home.len()..]);
@@ -112,13 +115,7 @@ pub fn attach_or_create_silent(name: &str, host: Option<&str>) -> Result<i32> {
 pub fn attach_or_create_remote(fqdn: &str) -> Result<i32> {
     let short = fqdn.split('.').next().unwrap_or(fqdn).to_string();
     if !tmux::has_session(&short) {
-        tmux::try_run([
-            "new-session",
-            "-d",
-            "-s",
-            &short,
-            &format!("ssh {}", fqdn),
-        ])?;
+        tmux::try_run(["new-session", "-d", "-s", &short, &format!("ssh {}", fqdn)])?;
     }
     tmux::enter(&short)
 }

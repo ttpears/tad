@@ -181,11 +181,17 @@ pub fn load() -> Theme {
                 fg: c.fg.and_then(parse_color).unwrap_or(base.fg),
                 muted: c.muted.and_then(parse_color).unwrap_or(base.muted),
                 accent: c.accent.and_then(parse_color).unwrap_or(base.accent),
-                accent_bold: c.accent_bold.and_then(parse_color).unwrap_or(base.accent_bold),
+                accent_bold: c
+                    .accent_bold
+                    .and_then(parse_color)
+                    .unwrap_or(base.accent_bold),
                 success: c.success.and_then(parse_color).unwrap_or(base.success),
                 warning: c.warning.and_then(parse_color).unwrap_or(base.warning),
                 error: c.error.and_then(parse_color).unwrap_or(base.error),
-                selection_bg: c.selection_bg.and_then(parse_color).unwrap_or(base.selection_bg),
+                selection_bg: c
+                    .selection_bg
+                    .and_then(parse_color)
+                    .unwrap_or(base.selection_bg),
                 border: c.border.and_then(parse_color).unwrap_or(base.border),
             }
         }
@@ -194,7 +200,7 @@ pub fn load() -> Theme {
 }
 
 fn tokyonight() -> Theme {
-    builtin("tokyonight").unwrap()
+    builtin("tokyonight").expect("builtin 'tokyonight' theme must exist")
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
