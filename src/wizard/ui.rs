@@ -30,21 +30,11 @@ pub enum Stage {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GroupForm {
     pub name: String,
     pub layout_idx: usize,
     pub members: BTreeSet<String>,
-}
-
-impl Default for GroupForm {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            layout_idx: 0,
-            members: BTreeSet::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -518,10 +508,6 @@ fn handle_edit_mode(state: &mut WizardState, key: crossterm::event::KeyEvent, cu
             state.sources = SourceSet::NONE;
             state.stage = Stage::Welcome;
         }
-        KeyCode::Char('n') => {
-            state.sources = SourceSet::NONE;
-            state.stage = Stage::Welcome;
-        }
         _ => {}
     }
 }
@@ -580,7 +566,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &WizardState) {
 fn draw_footer(f: &mut Frame, area: Rect, state: &WizardState, filter_mode: bool) {
     let hint = match state.stage {
         _ if filter_mode => "/filter… Enter to apply · Esc cancel".to_string(),
-        Stage::EditMode => "d delete · i re-run imports · n new group · q quit".to_string(),
+        Stage::EditMode => "d delete · i re-run imports · q quit".to_string(),
         Stage::Welcome => format!(
             "space toggle · enter next · q cancel · will scan {} local sources — no network access",
             state.sources.count()

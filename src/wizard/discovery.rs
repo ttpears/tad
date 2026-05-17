@@ -62,6 +62,8 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
                     for include in parse_ssh_config_includes(&text) {
                         let inc_path = if include.starts_with('/') {
                             std::path::PathBuf::from(&include)
+                        } else if include.starts_with("~/") {
+                            home.join(&include[2..])
                         } else {
                             home.join(".ssh").join(&include)
                         };
@@ -205,6 +207,9 @@ fn extract_ssh_host(line: &str) -> Option<String> {
         }
         if FLAGS_WITH_VALUE.contains(&tok) {
             skip_next = true;
+            continue;
+        }
+        if tok == "--" {
             continue;
         }
         if tok.starts_with('-') {
@@ -372,7 +377,8 @@ mod tests {
             vec!["foo.example.com".to_string()],
             vec!["BAR".to_string(), "baz".to_string()],
         );
-        let foo = result.iter().find(|c| c.host == "foo.example.com").unwrap();
+        let foo = result.iter().find(|c| c.host.eq_ignore_ascii_case("foo.example.com")).unwrap();
+        assert_eq!(foo.host, "Foo.Example.com"); // first-seen casing preserved
         assert!(foo.sources.shell);
         assert!(foo.sources.ssh_config);
         assert!(!foo.sources.known_hosts);
@@ -383,6 +389,14 @@ mod tests {
         assert!(bar.sources.known_hosts);
 
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn ssh_history_skips_double_dash_separator() {
+        let hosts = parse_bash_zsh_history("ssh host.example.com -- -ignored\nssh -- realdest\n");
+        assert!(hosts.contains(&"host.example.com".to_string()));
+        assert!(hosts.contains(&"realdest".to_string()));
+        assert!(!hosts.iter().any(|h| h == "--" || h == "-ignored"));
     }
 
     #[test]
@@ -417,17 +431,16 @@ pub(crate) fn aggregate(
     ssh_config: Vec<String>,
     known_hosts: Vec<String>,
 ) -> Vec<HostCandidate> {
-    let mut map: BTreeMap<String, SourceFlags> = BTreeMap::new();
-    for h in shell {
-        map.entry(h.to_lowercase()).or_default().shell = true;
-    }
-    for h in ssh_config {
-        map.entry(h.to_lowercase()).or_default().ssh_config = true;
-    }
-    for h in known_hosts {
-        map.entry(h.to_lowercase()).or_default().known_hosts = true;
-    }
+    let mut map: BTreeMap<String, (String, SourceFlags)> = BTreeMap::new();
+    let mut record = |host: String, set: fn(&mut SourceFlags)| {
+        let key = host.to_lowercase();
+        let entry = map.entry(key).or_insert((host.clone(), SourceFlags::default()));
+        set(&mut entry.1);
+    };
+    for h in shell { record(h, |f| f.shell = true); }
+    for h in ssh_config { record(h, |f| f.ssh_config = true); }
+    for h in known_hosts { record(h, |f| f.known_hosts = true); }
     map.into_iter()
-        .map(|(host, sources)| HostCandidate { host, sources })
+        .map(|(_, (display, sources))| HostCandidate { host: display, sources })
         .collect()
 }
