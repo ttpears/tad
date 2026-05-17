@@ -224,7 +224,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::time::Duration;
@@ -886,9 +886,14 @@ fn draw_body(
                     ListItem::new(Line::from(Span::styled(line, style)))
                 })
                 .collect();
-            f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title("Themes")),
+            let mut list_state = ListState::default();
+            list_state.select(Some(cursors.theme));
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title("Themes"))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 area,
+                &mut list_state,
             );
         }
         Stage::EditMode => {
@@ -908,9 +913,14 @@ fn draw_body(
                     ))
                 })
                 .collect();
-            f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title("Groups")),
+            let mut list_state = ListState::default();
+            list_state.select(Some(cursors.edit));
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title("Groups"))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 area,
+                &mut list_state,
             );
         }
         Stage::Welcome => {
@@ -935,9 +945,14 @@ fn draw_body(
                     ListItem::new(format!("{}{} {}", mark, box_, l))
                 })
                 .collect();
-            f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title("Sources")),
+            let mut list_state = ListState::default();
+            list_state.select(Some(cursors.welcome));
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title("Sources"))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 area,
+                &mut list_state,
             );
         }
         Stage::Sessions => {
@@ -974,13 +989,18 @@ fn draw_body(
                     ))
                 })
                 .collect();
-            f.render_widget(
-                List::new(items).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Tmux sessions"),
-                ),
+            let mut list_state = ListState::default();
+            list_state.select(Some(cursors.sessions));
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Tmux sessions"),
+                    )
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 area,
+                &mut list_state,
             );
         }
         Stage::Hosts => {
@@ -1035,9 +1055,16 @@ fn draw_body(
             } else {
                 Line::from(format!("Hosts (filter: {})", state.filter))
             };
-            f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+            let mut list_state = ListState::default();
+            if !visible.is_empty() {
+                list_state.select(Some(cursors.hosts.min(visible.len() - 1)));
+            }
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title(title))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 area,
+                &mut list_state,
             );
         }
         Stage::BuildGroups => {
@@ -1068,9 +1095,16 @@ fn draw_body(
             } else {
                 "Members"
             };
-            f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+            let mut list_state = ListState::default();
+            if form_field == 2 && !hosts.is_empty() {
+                list_state.select(Some(cursors.built.min(hosts.len() - 1)));
+            }
+            f.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title(title))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
                 cols[0],
+                &mut list_state,
             );
 
             let right = Layout::default()
