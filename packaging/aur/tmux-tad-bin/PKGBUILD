@@ -1,7 +1,7 @@
 # Maintainer: Tim Pearson <ttpears@gmail.com>
 pkgname=tmux-tad-bin
 _pkgname=tad
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="Tmux session and group manager with a native TUI dashboard (prebuilt binary)"
 arch=('x86_64')
@@ -26,7 +26,7 @@ source=(
 # and paste the binary, tad.bash, _tad, groups.example, config.example, LICENSE
 # hashes (in source[] order) below.
 sha256sums=(
-    '102fe2d704359f7f9a013fb8cabbe9fed64ba06eec3a41dd181856ea1be05f45'
+    'd6e814a0eb38c4ef3129ad839c12524dc73ed7b68b55224bacda45cc3cbcc35b'
     '8f8f2b70da4f3477f54f4da7d4c6867eed4dc3afe17a6fc2d12b61feaafa597c'
     'f9f4e5adb383c4263c1b0b9db5b4b20d7c97850dd3fb8d6e1c55140c84862d00'
     '5a20954483b4d58685a7206afb612f215ff95a950adeeaeae46fa0b8ae5355f3'
