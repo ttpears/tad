@@ -224,8 +224,513 @@ pub fn merge_into_doc(
     renames
 }
 
-pub fn run(_entry: Entry) -> Result<()> {
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    Frame, Terminal,
+};
+use std::time::Duration;
+
+use crate::wizard::discovery;
+
+/// RAII guard restoring the terminal even on panic.
+struct TermGuard;
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+pub fn run(entry: Entry) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    let _guard = TermGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut term = Terminal::new(backend)?;
+
+    let config_exists = config::config_path().exists();
+    let mut state = match entry {
+        Entry::FirstLaunch => WizardState::for_first_launch(),
+        Entry::Config => WizardState::for_config(config_exists),
+    };
+
+    let mut cursor_welcome = 0usize;
+    let mut cursor_hosts = 0usize;
+    let mut cursor_sessions = 0usize;
+    let mut cursor_built = 0usize;
+    let mut cursor_edit = 0usize;
+    let mut filter_mode = false;
+    let mut form_field = 0usize;
+
+    loop {
+        term.draw(|f| draw(f, &state, cursor_welcome, cursor_hosts, cursor_sessions, cursor_built, cursor_edit, filter_mode, form_field))?;
+
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        if !filter_mode
+            && !(state.stage == Stage::BuildGroups && form_field == 0)
+            && (key.code == KeyCode::Esc
+                || (key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::SHIFT)))
+        {
+            state.stage = Stage::Cancelled;
+            break;
+        }
+
+        match state.stage {
+            Stage::EditMode => handle_edit_mode(&mut state, key, &mut cursor_edit),
+            Stage::Welcome => handle_welcome(&mut state, key, &mut cursor_welcome),
+            Stage::Sessions => handle_sessions(&mut state, key, &mut cursor_sessions),
+            Stage::Hosts => handle_hosts(&mut state, key, &mut cursor_hosts, &mut filter_mode),
+            Stage::BuildGroups => handle_build_groups(&mut state, key, &mut form_field, &mut cursor_built),
+            Stage::Confirm => {
+                if let KeyCode::Char(c) = key.code {
+                    if c == 'y' || c == 'Y' {
+                        write_and_finish(&mut state)?;
+                        break;
+                    } else if c == 'n' || c == 'N' {
+                        if let Some(prev) = previous_stage(&state) {
+                            state.stage = prev;
+                        }
+                    }
+                }
+            }
+            Stage::Done | Stage::Cancelled => break,
+        }
+    }
+
     Ok(())
+}
+
+fn previous_stage(state: &WizardState) -> Option<Stage> {
+    if !state.built.is_empty() || !state.selected_hosts.is_empty() {
+        Some(Stage::BuildGroups)
+    } else if !state.selected_sessions.is_empty() {
+        Some(Stage::Sessions)
+    } else {
+        Some(Stage::Welcome)
+    }
+}
+
+fn handle_welcome(state: &mut WizardState, key: crossterm::event::KeyEvent, cursor: &mut usize) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { if *cursor < 3 { *cursor += 1; } }
+        KeyCode::Char(' ') => state.toggle_source(*cursor),
+        KeyCode::Enter => {
+            if let Err(msg) = state.can_advance(Stage::Welcome) {
+                state.status_flash = Some(msg.to_string());
+            } else {
+                if state.sources.tmux_sessions && state.session_candidates.is_empty() {
+                    state.session_candidates = discovery::scan_tmux_sessions();
+                    for s in &state.session_candidates {
+                        if s.usable {
+                            state.selected_sessions.insert(s.name.clone());
+                        }
+                    }
+                }
+                if (state.sources.shell || state.sources.ssh_config || state.sources.known_hosts)
+                    && state.host_candidates.is_empty()
+                {
+                    let (cands, errs) = discovery::scan_hosts(state.sources);
+                    state.host_candidates = cands;
+                    state.scan_errors = errs;
+                }
+                if let Some(next) = state.next_stage_from(Stage::Welcome) {
+                    state.stage = next;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_sessions(state: &mut WizardState, key: crossterm::event::KeyEvent, cursor: &mut usize) {
+    let len = state.session_candidates.len();
+    if len == 0 {
+        if key.code == KeyCode::Enter {
+            if let Some(next) = state.next_stage_from(Stage::Sessions) {
+                state.stage = next;
+            }
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { if *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Char(' ') => {
+            let name = state.session_candidates[*cursor].name.clone();
+            if !state.selected_sessions.remove(&name) {
+                state.selected_sessions.insert(name);
+            }
+        }
+        KeyCode::Char('l') => {
+            let name = state.session_candidates[*cursor].name.clone();
+            let entry = state.session_overrides.entry(name.clone())
+                .or_insert((name, 2));
+            entry.1 = (entry.1 + 1) % LAYOUTS.len();
+        }
+        KeyCode::Enter => {
+            if let Some(next) = state.next_stage_from(Stage::Sessions) {
+                state.stage = next;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn filtered_hosts(state: &WizardState) -> Vec<&HostCandidate> {
+    let f = state.filter.to_lowercase();
+    state.host_candidates.iter()
+        .filter(|c| f.is_empty() || c.host.to_lowercase().contains(&f))
+        .collect()
+}
+
+fn handle_hosts(
+    state: &mut WizardState,
+    key: crossterm::event::KeyEvent,
+    cursor: &mut usize,
+    filter_mode: &mut bool,
+) {
+    if *filter_mode {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc => *filter_mode = false,
+            KeyCode::Backspace => { state.filter.pop(); }
+            KeyCode::Char(c) => state.filter.push(c),
+            _ => {}
+        }
+        *cursor = 0;
+        return;
+    }
+    let visible: Vec<String> = filtered_hosts(state).iter().map(|c| c.host.clone()).collect();
+    let len = visible.len();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { if len > 0 && *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Char(' ') => {
+            if let Some(h) = visible.get(*cursor) {
+                state.toggle_host(h);
+            }
+        }
+        KeyCode::Char('a') => {
+            for h in &visible { state.selected_hosts.insert(h.clone()); }
+        }
+        KeyCode::Char('n') => state.selected_hosts.clear(),
+        KeyCode::Char('/') => { *filter_mode = true; state.filter.clear(); }
+        KeyCode::Enter => {
+            if let Err(msg) = state.can_advance(Stage::Hosts) {
+                state.status_flash = Some(msg.to_string());
+            } else if let Some(next) = state.next_stage_from(Stage::Hosts) {
+                state.stage = next;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_build_groups(
+    state: &mut WizardState,
+    key: crossterm::event::KeyEvent,
+    form_field: &mut usize,
+    cursor_built: &mut usize,
+) {
+    match key.code {
+        KeyCode::Tab => *form_field = (*form_field + 1) % 3,
+        KeyCode::BackTab => *form_field = (*form_field + 2) % 3,
+        KeyCode::Left => {
+            if *form_field == 1 {
+                if state.form.layout_idx == 0 {
+                    state.form.layout_idx = LAYOUTS.len() - 1;
+                } else {
+                    state.form.layout_idx -= 1;
+                }
+            }
+        }
+        KeyCode::Right => {
+            if *form_field == 1 {
+                state.form.layout_idx = (state.form.layout_idx + 1) % LAYOUTS.len();
+            }
+        }
+        KeyCode::Char(c) if *form_field == 0 => state.form.name.push(c),
+        KeyCode::Backspace if *form_field == 0 => { state.form.name.pop(); }
+        KeyCode::Char(' ') if *form_field == 2 => {
+            let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
+            if let Some(h) = hosts.get(*cursor_built) {
+                if !state.form.members.remove(h) {
+                    state.form.members.insert(h.clone());
+                }
+            }
+        }
+        KeyCode::Up if *form_field == 2 => { if *cursor_built > 0 { *cursor_built -= 1; } }
+        KeyCode::Down if *form_field == 2 => {
+            let n = state.selected_hosts.len();
+            if n > 0 && *cursor_built + 1 < n { *cursor_built += 1; }
+        }
+        KeyCode::Enter => {
+            if state.form.name.trim().is_empty() {
+                if let Some(next) = state.next_stage_from(Stage::BuildGroups) {
+                    state.stage = next;
+                }
+            } else if let Err(msg) = state.commit_form() {
+                state.status_flash = Some(msg.to_string());
+            }
+        }
+        KeyCode::Char('d') if *form_field != 0 => {
+            if !state.built.is_empty() {
+                state.built.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_edit_mode(state: &mut WizardState, key: crossterm::event::KeyEvent, cursor: &mut usize) {
+    let doc = config::load().unwrap_or_default();
+    let names: Vec<String> = doc.groups.keys().cloned().collect();
+    let len = names.len();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => { if *cursor > 0 { *cursor -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { if len > 0 && *cursor + 1 < len { *cursor += 1; } }
+        KeyCode::Char('d') => {
+            if let Some(name) = names.get(*cursor) {
+                let mut d = config::load().unwrap_or_default();
+                d.groups.shift_remove(name);
+                let _ = config::save(&d);
+            }
+        }
+        KeyCode::Char('i') => {
+            state.sources = SourceSet::NONE;
+            state.stage = Stage::Welcome;
+        }
+        KeyCode::Char('n') => {
+            state.sources = SourceSet::NONE;
+            state.stage = Stage::Welcome;
+        }
+        _ => {}
+    }
+}
+
+fn write_and_finish(state: &mut WizardState) -> Result<()> {
+    let mut doc = config::load().unwrap_or_default();
+    let incoming = state.assemble_groups();
+    let count = incoming.len();
+    let renames = merge_into_doc(&mut doc, incoming);
+    config::save(&doc)?;
+    let mut msg = format!("wrote {} groups to {}", count, config::config_path().display());
+    if !renames.is_empty() {
+        let rs: Vec<String> = renames.iter().map(|(a, b)| format!("{}→{}", a, b)).collect();
+        msg.push_str(&format!(" (renamed: {})", rs.join(", ")));
+    }
+    state.status_flash = Some(msg);
+    state.stage = Stage::Done;
+    Ok(())
+}
+
+fn draw(
+    f: &mut Frame,
+    state: &WizardState,
+    cursor_welcome: usize,
+    cursor_hosts: usize,
+    cursor_sessions: usize,
+    cursor_built: usize,
+    cursor_edit: usize,
+    filter_mode: bool,
+    form_field: usize,
+) {
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+        .split(area);
+    draw_header(f, chunks[0], state);
+    draw_body(f, chunks[1], state, cursor_welcome, cursor_hosts, cursor_sessions, cursor_built, cursor_edit, filter_mode, form_field);
+    draw_footer(f, chunks[2], state, filter_mode);
+}
+
+fn draw_header(f: &mut Frame, area: Rect, state: &WizardState) {
+    let title = match state.stage {
+        Stage::EditMode => "tad config — edit groups",
+        Stage::Welcome => "tad config — import sources (local files only, no network)",
+        Stage::Sessions => "tad config — import tmux sessions as groups",
+        Stage::Hosts => "tad config — discovered hosts",
+        Stage::BuildGroups => "tad config — build groups",
+        Stage::Confirm => "tad config — confirm",
+        Stage::Done | Stage::Cancelled => "tad config",
+    };
+    let p = Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM));
+    f.render_widget(p, area);
+}
+
+fn draw_footer(f: &mut Frame, area: Rect, state: &WizardState, filter_mode: bool) {
+    let hint = match state.stage {
+        _ if filter_mode => "/filter… Enter to apply · Esc cancel".to_string(),
+        Stage::EditMode => "d delete · i re-run imports · n new group · q quit".to_string(),
+        Stage::Welcome => format!(
+            "space toggle · enter next · q cancel · will scan {} local sources — no network access",
+            state.sources.count()
+        ),
+        Stage::Sessions => "space toggle · l layout · enter next · q cancel".to_string(),
+        Stage::Hosts => format!(
+            "space · a all · n none · / filter · enter next · q cancel · {} selected of {}",
+            state.selected_hosts.len(),
+            state.host_candidates.len()
+        ),
+        Stage::BuildGroups => "tab fields · ←/→ layout · space toggle member · enter commit · d undo · empty-name enter = done".to_string(),
+        Stage::Confirm => "y write · n back · esc cancel".to_string(),
+        Stage::Done => state.status_flash.clone().unwrap_or_default(),
+        Stage::Cancelled => "cancelled".to_string(),
+    };
+    let mut lines = vec![Line::from(hint)];
+    if let Some(flash) = &state.status_flash {
+        if state.stage != Stage::Done {
+            lines.push(Line::from(Span::styled(flash.clone(), Style::default().add_modifier(Modifier::REVERSED))));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+}
+
+fn draw_body(
+    f: &mut Frame,
+    area: Rect,
+    state: &WizardState,
+    cursor_welcome: usize,
+    cursor_hosts: usize,
+    cursor_sessions: usize,
+    cursor_built: usize,
+    cursor_edit: usize,
+    _filter_mode: bool,
+    form_field: usize,
+) {
+    match state.stage {
+        Stage::EditMode => {
+            let doc = config::load().unwrap_or_default();
+            let items: Vec<ListItem> = doc.groups.iter().enumerate().map(|(i, (n, g))| {
+                let marker = if i == cursor_edit { "→ " } else { "  " };
+                ListItem::new(format!("{}{:<20} {:<14} {} hosts", marker, n, g.layout, g.hosts.len()))
+            }).collect();
+            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Groups")), area);
+        }
+        Stage::Welcome => {
+            let labels = [
+                "Shell history       ~/.bash_history, ~/.zsh_history, fish",
+                "~/.ssh/config       Host blocks (not wildcards)",
+                "~/.ssh/known_hosts  accepted hosts (not hashed)",
+                "Tmux sessions       import existing sessions as groups",
+            ];
+            let on = [state.sources.shell, state.sources.ssh_config, state.sources.known_hosts, state.sources.tmux_sessions];
+            let items: Vec<ListItem> = labels.iter().enumerate().map(|(i, l)| {
+                let mark = if i == cursor_welcome { "→ " } else { "  " };
+                let box_ = if on[i] { "[x]" } else { "[ ]" };
+                ListItem::new(format!("{}{} {}", mark, box_, l))
+            }).collect();
+            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Sources")), area);
+        }
+        Stage::Sessions => {
+            let items: Vec<ListItem> = state.session_candidates.iter().enumerate().map(|(i, s)| {
+                let mark = if i == cursor_sessions { "→ " } else { "  " };
+                let box_ = if state.selected_sessions.contains(&s.name) { "[x]" } else { "[ ]" };
+                let (gname, layout_idx) = state.session_overrides.get(&s.name).cloned()
+                    .unwrap_or_else(|| (s.name.clone(), 2));
+                let tail = if !s.usable { "  (skipped: no host-like windows)" } else { "" };
+                ListItem::new(format!("{}{} {:<20} {} windows  group:{:<18} layout:{}{}",
+                    mark, box_, s.name, s.windows.len(), gname, LAYOUTS[layout_idx], tail))
+            }).collect();
+            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title("Tmux sessions")), area);
+        }
+        Stage::Hosts => {
+            let visible = filtered_hosts(state);
+            let items: Vec<ListItem> = visible.iter().enumerate().map(|(i, c)| {
+                let mark = if i == cursor_hosts { "→ " } else { "  " };
+                let box_ = if state.selected_hosts.contains(&c.host) { "[x]" } else { "[ ]" };
+                let mut tags = Vec::new();
+                if c.sources.shell { tags.push("shell"); }
+                if c.sources.ssh_config { tags.push("ssh-config"); }
+                if c.sources.known_hosts { tags.push("known-hosts"); }
+                ListItem::new(format!("{}{} {:<30} ({})", mark, box_, c.host, tags.join(", ")))
+            }).collect();
+            let title = if state.filter.is_empty() {
+                "Hosts".to_string()
+            } else {
+                format!("Hosts (filter: {})", state.filter)
+            };
+            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title(title)), area);
+        }
+        Stage::BuildGroups => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
+            let items: Vec<ListItem> = hosts.iter().enumerate().map(|(i, h)| {
+                let mark = if form_field == 2 && i == cursor_built { "→ " } else { "  " };
+                let box_ = if state.form.members.contains(h) { "[x]" } else { "[ ]" };
+                ListItem::new(format!("{}{} {}", mark, box_, h))
+            }).collect();
+            let title = if form_field == 2 { "Members ●" } else { "Members" };
+            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title(title)), cols[0]);
+
+            let right = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(5), Constraint::Min(0)])
+                .split(cols[1]);
+            let name_title = if form_field == 0 { "Name ●" } else { "Name" };
+            f.render_widget(
+                Paragraph::new(state.form.name.as_str())
+                    .block(Block::default().borders(Borders::ALL).title(name_title)),
+                Rect { x: right[0].x, y: right[0].y, width: right[0].width, height: 3 },
+            );
+            let layout_title = if form_field == 1 { "Layout ●" } else { "Layout" };
+            f.render_widget(
+                Paragraph::new(LAYOUTS[state.form.layout_idx])
+                    .block(Block::default().borders(Borders::ALL).title(layout_title)),
+                Rect { x: right[0].x, y: right[0].y + 3, width: right[0].width, height: 2 },
+            );
+            let built_items: Vec<ListItem> = state.built.iter().map(|(n, g)| {
+                ListItem::new(format!("{} ({}, {} hosts)", n, g.layout, g.hosts.len()))
+            }).collect();
+            f.render_widget(
+                List::new(built_items).block(Block::default().borders(Borders::ALL).title("Built so far")),
+                right[1],
+            );
+        }
+        Stage::Confirm => {
+            let incoming = state.assemble_groups();
+            let mut lines = Vec::new();
+            if state.config_exists {
+                lines.push(Line::from(Span::styled(
+                    format!("{} new groups will be merged into existing config", incoming.len()),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+            }
+            for (n, g) in &incoming {
+                lines.push(Line::from(format!("  {:<20} {:<14} hosts: {}", n, g.layout, g.hosts.join(", "))));
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Confirm")).wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        Stage::Done | Stage::Cancelled => {
+            let msg = state.status_flash.clone().unwrap_or_else(|| "done".to_string());
+            f.render_widget(Paragraph::new(msg), area);
+        }
+    }
 }
 
 #[cfg(test)]
