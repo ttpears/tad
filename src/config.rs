@@ -27,11 +27,14 @@ pub struct Doc {
     pub groups: IndexMap<String, Group>,
 }
 
-pub fn config_path() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("tad")
-        .join("groups.yaml")
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("groups.yaml")
 }
 
 pub fn load() -> Result<Doc> {
@@ -63,6 +66,19 @@ pub fn save(doc: &Doc) -> Result<()> {
     fs::write(&path, text)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_dir_is_parent_of_config_path() {
+        let dir = config_dir();
+        let path = config_path();
+        assert_eq!(path.parent().unwrap(), dir);
+        assert!(dir.ends_with("tad"));
+    }
 }
 
 fn default_meta() -> serde_yml::Value {
