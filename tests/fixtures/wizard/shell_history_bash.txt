@@ -1,0 +1,15 @@
+ls
+ssh prod-web1.example.com
+ssh -p 2222 user@db1
+ssh -i ~/.ssh/foo_ed25519 ops@bastion.example.com
+ssh -L 8080:localhost:80 jumpbox
+ssh -J jump1,jump2 final.example.com
+sshfs me@nfs:/srv /mnt/nfs
+ssh-add ~/.ssh/id_ed25519
+ssh-keygen -t ed25519
+ssh-copy-id newhost
+ssh
+ssh -
+git pull
+ssh weird/path
+ssh PROD-web1.example.com
