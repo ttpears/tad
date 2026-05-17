@@ -21,6 +21,7 @@ pub enum Entry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     EditMode,
+    ThemePicker,
     Welcome,
     Sessions,
     Hosts,
@@ -107,7 +108,7 @@ impl WizardState {
             Stage::Hosts => Some(Stage::BuildGroups),
             Stage::BuildGroups => Some(Stage::Confirm),
             Stage::Confirm => Some(Stage::Done),
-            Stage::Done | Stage::Cancelled => None,
+            Stage::Done | Stage::Cancelled | Stage::ThemePicker => None,
         }
     }
 
@@ -239,6 +240,72 @@ struct Cursors {
     sessions: usize,
     built: usize,
     edit: usize,
+    /// Byte cursor into `state.form.name` (BuildGroups name field).
+    name: usize,
+    /// Byte cursor into `state.filter` (hosts screen filter input).
+    filter: usize,
+    /// Index into `theme::BUILTIN_THEMES` on the theme picker screen.
+    theme: usize,
+}
+
+/// Cursor-aware operations on a `(String, byte-cursor)` pair. UTF-8 safe.
+mod text {
+    pub fn insert(value: &mut String, cursor: &mut usize, c: char) {
+        let pos = (*cursor).min(value.len());
+        value.insert(pos, c);
+        *cursor = pos + c.len_utf8();
+    }
+    pub fn backspace(value: &mut String, cursor: &mut usize) {
+        if *cursor == 0 {
+            return;
+        }
+        let mut prev = *cursor - 1;
+        while prev > 0 && !value.is_char_boundary(prev) {
+            prev -= 1;
+        }
+        value.replace_range(prev..*cursor, "");
+        *cursor = prev;
+    }
+    pub fn delete(value: &mut String, cursor: &mut usize) {
+        if *cursor >= value.len() {
+            return;
+        }
+        let mut next = *cursor + 1;
+        while next < value.len() && !value.is_char_boundary(next) {
+            next += 1;
+        }
+        value.replace_range(*cursor..next, "");
+    }
+    pub fn left(value: &str, cursor: &mut usize) {
+        if *cursor == 0 {
+            return;
+        }
+        let mut c = *cursor - 1;
+        while c > 0 && !value.is_char_boundary(c) {
+            c -= 1;
+        }
+        *cursor = c;
+    }
+    pub fn right(value: &str, cursor: &mut usize) {
+        if *cursor >= value.len() {
+            return;
+        }
+        let mut c = *cursor + 1;
+        while c < value.len() && !value.is_char_boundary(c) {
+            c += 1;
+        }
+        *cursor = c;
+    }
+    pub fn home(cursor: &mut usize) {
+        *cursor = 0;
+    }
+    pub fn end(value: &str, cursor: &mut usize) {
+        *cursor = value.len();
+    }
+    pub fn clear(value: &mut String, cursor: &mut usize) {
+        value.clear();
+        *cursor = 0;
+    }
 }
 
 /// RAII guard restoring the terminal even on panic.
@@ -283,21 +350,35 @@ pub fn run(entry: Entry) -> Result<()> {
         }
 
         let typing_name = state.stage == Stage::BuildGroups && form_field == 0;
+        let in_subscreen = state.stage == Stage::ThemePicker;
         let cancel_pressed = key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('q') && !key.modifiers.contains(KeyModifiers::SHIFT));
-        if !filter_mode && !typing_name && cancel_pressed {
+        if !filter_mode && !typing_name && !in_subscreen && cancel_pressed {
             state.stage = Stage::Cancelled;
             break;
         }
 
         match state.stage {
-            Stage::EditMode => handle_edit_mode(&mut state, key, &mut cursors.edit),
+            Stage::EditMode => {
+                handle_edit_mode(&mut state, key, &mut cursors.edit, &mut cursors.theme)
+            }
+            Stage::ThemePicker => handle_theme_picker(&mut state, key, &mut cursors.theme),
             Stage::Welcome => handle_welcome(&mut state, key, &mut cursors.welcome),
             Stage::Sessions => handle_sessions(&mut state, key, &mut cursors.sessions),
-            Stage::Hosts => handle_hosts(&mut state, key, &mut cursors.hosts, &mut filter_mode),
-            Stage::BuildGroups => {
-                handle_build_groups(&mut state, key, &mut form_field, &mut cursors.built)
-            }
+            Stage::Hosts => handle_hosts(
+                &mut state,
+                key,
+                &mut cursors.hosts,
+                &mut cursors.filter,
+                &mut filter_mode,
+            ),
+            Stage::BuildGroups => handle_build_groups(
+                &mut state,
+                key,
+                &mut form_field,
+                &mut cursors.built,
+                &mut cursors.name,
+            ),
             Stage::Confirm => {
                 if let KeyCode::Char(c) = key.code {
                     if c == 'y' || c == 'Y' {
@@ -425,15 +506,23 @@ fn handle_hosts(
     state: &mut WizardState,
     key: crossterm::event::KeyEvent,
     cursor: &mut usize,
+    filter_cursor: &mut usize,
     filter_mode: &mut bool,
 ) {
     if *filter_mode {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter | KeyCode::Esc => *filter_mode = false,
-            KeyCode::Backspace => {
-                state.filter.pop();
-            }
-            KeyCode::Char(c) => state.filter.push(c),
+            KeyCode::Backspace => text::backspace(&mut state.filter, filter_cursor),
+            KeyCode::Delete => text::delete(&mut state.filter, filter_cursor),
+            KeyCode::Left => text::left(&state.filter, filter_cursor),
+            KeyCode::Right => text::right(&state.filter, filter_cursor),
+            KeyCode::Home => text::home(filter_cursor),
+            KeyCode::End => text::end(&state.filter, filter_cursor),
+            KeyCode::Char('u') if ctrl => text::clear(&mut state.filter, filter_cursor),
+            KeyCode::Char('a') if ctrl => text::home(filter_cursor),
+            KeyCode::Char('e') if ctrl => text::end(&state.filter, filter_cursor),
+            KeyCode::Char(c) if !ctrl => text::insert(&mut state.filter, filter_cursor, c),
             _ => {}
         }
         *cursor = 0;
@@ -469,6 +558,7 @@ fn handle_hosts(
         KeyCode::Char('/') => {
             *filter_mode = true;
             state.filter.clear();
+            *filter_cursor = 0;
         }
         KeyCode::Enter => {
             if let Err(msg) = state.can_advance(Stage::Hosts) {
@@ -486,10 +576,24 @@ fn handle_build_groups(
     key: crossterm::event::KeyEvent,
     form_field: &mut usize,
     cursor_built: &mut usize,
+    name_cursor: &mut usize,
 ) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Tab => *form_field = (*form_field + 1) % 3,
         KeyCode::BackTab => *form_field = (*form_field + 2) % 3,
+        // Left/Right: cursor in the name field, layout cycling on layout
+        // field, ignored on members.
+        KeyCode::Left if *form_field == 0 => text::left(&state.form.name, name_cursor),
+        KeyCode::Right if *form_field == 0 => text::right(&state.form.name, name_cursor),
+        KeyCode::Home if *form_field == 0 => text::home(name_cursor),
+        KeyCode::End if *form_field == 0 => text::end(&state.form.name, name_cursor),
+        KeyCode::Delete if *form_field == 0 => text::delete(&mut state.form.name, name_cursor),
+        KeyCode::Char('u') if ctrl && *form_field == 0 => {
+            text::clear(&mut state.form.name, name_cursor)
+        }
+        KeyCode::Char('a') if ctrl && *form_field == 0 => text::home(name_cursor),
+        KeyCode::Char('e') if ctrl && *form_field == 0 => text::end(&state.form.name, name_cursor),
         KeyCode::Left => {
             if *form_field == 1 {
                 if state.form.layout_idx == 0 {
@@ -504,9 +608,11 @@ fn handle_build_groups(
                 state.form.layout_idx = (state.form.layout_idx + 1) % LAYOUTS.len();
             }
         }
-        KeyCode::Char(c) if *form_field == 0 => state.form.name.push(c),
+        KeyCode::Char(c) if *form_field == 0 && !ctrl => {
+            text::insert(&mut state.form.name, name_cursor, c)
+        }
         KeyCode::Backspace if *form_field == 0 => {
-            state.form.name.pop();
+            text::backspace(&mut state.form.name, name_cursor)
         }
         KeyCode::Char(' ') if *form_field == 2 => {
             let hosts: Vec<String> = state.selected_hosts.iter().cloned().collect();
@@ -527,6 +633,13 @@ fn handle_build_groups(
                 *cursor_built += 1;
             }
         }
+        // Up/Down cycle form fields when not editing the member list.
+        KeyCode::Up if *form_field != 2 => {
+            *form_field = (*form_field + 2) % 3;
+        }
+        KeyCode::Down if *form_field != 2 => {
+            *form_field = (*form_field + 1) % 3;
+        }
         KeyCode::Enter => {
             if state.form.name.trim().is_empty() {
                 if let Some(next) = state.next_stage_from(Stage::BuildGroups) {
@@ -534,6 +647,8 @@ fn handle_build_groups(
                 }
             } else if let Err(msg) = state.commit_form() {
                 state.status_flash = Some(msg.to_string());
+            } else {
+                *name_cursor = 0;
             }
         }
         KeyCode::Char('d') if *form_field != 0 => {
@@ -545,7 +660,12 @@ fn handle_build_groups(
     }
 }
 
-fn handle_edit_mode(state: &mut WizardState, key: crossterm::event::KeyEvent, cursor: &mut usize) {
+fn handle_edit_mode(
+    state: &mut WizardState,
+    key: crossterm::event::KeyEvent,
+    cursor: &mut usize,
+    theme_cursor: &mut usize,
+) {
     let doc = config::load().unwrap_or_default();
     let names: Vec<String> = doc.groups.keys().cloned().collect();
     let len = names.len();
@@ -571,8 +691,81 @@ fn handle_edit_mode(state: &mut WizardState, key: crossterm::event::KeyEvent, cu
             state.sources = SourceSet::NONE;
             state.stage = Stage::Welcome;
         }
+        KeyCode::Char('t') => {
+            // Position cursor on the currently-active theme (if any).
+            *theme_cursor = crate::theme::current_name()
+                .and_then(|n| crate::theme::BUILTIN_THEMES.iter().position(|&t| t == n))
+                .unwrap_or(0);
+            state.stage = Stage::ThemePicker;
+        }
         _ => {}
     }
+}
+
+fn handle_theme_picker(
+    state: &mut WizardState,
+    key: crossterm::event::KeyEvent,
+    cursor: &mut usize,
+) {
+    let len = crate::theme::BUILTIN_THEMES.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.stage = Stage::EditMode;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *cursor + 1 < len {
+                *cursor += 1;
+            }
+        }
+        KeyCode::Home | KeyCode::Char('g') => *cursor = 0,
+        KeyCode::End | KeyCode::Char('G') => *cursor = len.saturating_sub(1),
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if let Some(&name) = crate::theme::BUILTIN_THEMES.get(*cursor) {
+                match crate::theme::save_theme_name(name) {
+                    Ok(()) => {
+                        state.status_flash =
+                            Some(format!("saved theme: {} (takes effect next launch)", name));
+                        state.stage = Stage::EditMode;
+                    }
+                    Err(e) => {
+                        state.status_flash = Some(format!("failed to save theme: {:#}", e));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Render a single-line value with a visible cursor when `active`. Uses
+/// reverse video for the character under the cursor — works on any terminal
+/// regardless of theme.
+fn line_with_cursor(value: &str, cursor: usize, active: bool) -> Line<'static> {
+    if !active {
+        return Line::from(value.to_string());
+    }
+    let cur = cursor.min(value.len());
+    let (pre, post) = value.split_at(cur);
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    if post.is_empty() {
+        return Line::from(vec![
+            Span::raw(pre.to_string()),
+            Span::styled(" ".to_string(), cursor_style),
+        ]);
+    }
+    let mut chars = post.chars();
+    let c = chars.next().unwrap_or(' ');
+    let rest: String = chars.collect();
+    Line::from(vec![
+        Span::raw(pre.to_string()),
+        Span::styled(c.to_string(), cursor_style),
+        Span::raw(rest),
+    ])
 }
 
 fn write_and_finish(state: &mut WizardState) -> Result<()> {
@@ -622,6 +815,7 @@ fn draw(
 fn draw_header(f: &mut Frame, area: Rect, state: &WizardState) {
     let title = match state.stage {
         Stage::EditMode => "tad config — edit groups",
+        Stage::ThemePicker => "tad config — theme",
         Stage::Welcome => "tad config — import sources (local files only, no network)",
         Stage::Sessions => "tad config — import tmux sessions as groups",
         Stage::Hosts => "tad config — discovered hosts",
@@ -636,7 +830,8 @@ fn draw_header(f: &mut Frame, area: Rect, state: &WizardState) {
 fn draw_footer(f: &mut Frame, area: Rect, state: &WizardState, filter_mode: bool) {
     let hint = match state.stage {
         _ if filter_mode => "/filter… Enter to apply · Esc cancel".to_string(),
-        Stage::EditMode => "d delete · i re-run imports · q quit".to_string(),
+        Stage::EditMode => "d delete · t theme · i re-run imports · q quit".to_string(),
+        Stage::ThemePicker => "↑↓ pick · enter apply · esc back".to_string(),
         Stage::Welcome => format!(
             "space toggle · enter next · q cancel · will scan {} local sources — no network access",
             state.sources.count()
@@ -669,10 +864,33 @@ fn draw_body(
     area: Rect,
     state: &WizardState,
     cursors: &Cursors,
-    _filter_mode: bool,
+    filter_mode: bool,
     form_field: usize,
 ) {
     match state.stage {
+        Stage::ThemePicker => {
+            let current = crate::theme::current_name();
+            let items: Vec<ListItem> = crate::theme::BUILTIN_THEMES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let mark = if i == cursors.theme { "→ " } else { "  " };
+                    let active = current.as_deref() == Some(*name);
+                    let suffix = if active { "  (current)" } else { "" };
+                    let line = format!("{}{:<22}{}", mark, name, suffix);
+                    let style = if i == cursors.theme {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(Span::styled(line, style)))
+                })
+                .collect();
+            f.render_widget(
+                List::new(items).block(Block::default().borders(Borders::ALL).title("Themes")),
+                area,
+            );
+        }
         Stage::EditMode => {
             let doc = config::load().unwrap_or_default();
             let items: Vec<ListItem> = doc
@@ -796,10 +1014,26 @@ fn draw_body(
                     ))
                 })
                 .collect();
-            let title = if state.filter.is_empty() {
-                "Hosts".to_string()
+            let title: Line = if filter_mode {
+                let mut spans = vec![Span::raw("Hosts  /")];
+                let cur = cursors.filter.min(state.filter.len());
+                let (pre, post) = state.filter.split_at(cur);
+                let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+                spans.push(Span::raw(pre.to_string()));
+                if post.is_empty() {
+                    spans.push(Span::styled(" ", cursor_style));
+                } else {
+                    let mut chars = post.chars();
+                    let c = chars.next().unwrap_or(' ');
+                    let rest: String = chars.collect();
+                    spans.push(Span::styled(c.to_string(), cursor_style));
+                    spans.push(Span::raw(rest));
+                }
+                Line::from(spans)
+            } else if state.filter.is_empty() {
+                Line::from("Hosts")
             } else {
-                format!("Hosts (filter: {})", state.filter)
+                Line::from(format!("Hosts (filter: {})", state.filter))
             };
             f.render_widget(
                 List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
@@ -844,8 +1078,9 @@ fn draw_body(
                 .constraints([Constraint::Length(5), Constraint::Min(0)])
                 .split(cols[1]);
             let name_title = if form_field == 0 { "Name ●" } else { "Name" };
+            let name_line = line_with_cursor(&state.form.name, cursors.name, form_field == 0);
             f.render_widget(
-                Paragraph::new(state.form.name.as_str())
+                Paragraph::new(name_line)
                     .block(Block::default().borders(Borders::ALL).title(name_title)),
                 Rect {
                     x: right[0].x,

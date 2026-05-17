@@ -1,8 +1,62 @@
 //! Color themes for the dashboard. Built-in palettes by name; custom via
 //! `~/.config/tad/config.yaml`.
 
+use anyhow::{Context, Result};
 use ratatui::style::Color;
 use serde::Deserialize;
+
+/// Canonical built-in theme names, listed in the order they appear in the
+/// config picker. Aliases (e.g. "tokyo-night") aren't included.
+pub const BUILTIN_THEMES: &[&str] = &[
+    "tokyonight",
+    "tokyonight-storm",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "catppuccin",
+    "solarized-dark",
+    "onedark",
+    "terminal",
+];
+
+/// Path to `~/.config/tad/config.yaml`.
+pub fn config_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|p| p.join("tad").join("config.yaml"))
+}
+
+/// Read-modify-write the `theme:` field of `config.yaml`. Other keys are
+/// preserved exactly. Creates the file (and parent dir) if missing.
+pub fn save_theme_name(name: &str) -> Result<()> {
+    let path = config_path().context("no config dir available")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let mut root: serde_yml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_yml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        }
+        _ => serde_yml::Value::Mapping(serde_yml::Mapping::new()),
+    };
+    let map = root
+        .as_mapping_mut()
+        .context("config.yaml root must be a mapping")?;
+    map.insert("theme".into(), serde_yml::Value::String(name.to_string()));
+    let text = serde_yml::to_string(&root)?;
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Read the currently configured theme name (if it's a named built-in, not
+/// a custom inline mapping). Used to mark the active row in the picker.
+pub fn current_name() -> Option<String> {
+    let path = config_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cfg: AppConfig = serde_yml::from_str(&text).ok()?;
+    match cfg.theme {
+        ThemeSpec::Named(n) => Some(n),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
