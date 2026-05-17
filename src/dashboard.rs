@@ -99,12 +99,14 @@ fn emit_hosts() -> Result<()> {
     Ok(())
 }
 
+/// Rotate the dashboard state to the next view. Produces no stdout; data
+/// for the new view is fetched separately via `dash-source $(dash-state)`.
 pub fn cycle() -> Result<()> {
     let cur = read_state();
     let idx = VIEWS.iter().position(|v| v == &cur).unwrap_or(0);
     let next = VIEWS[(idx + 1) % VIEWS.len()];
     write_state(next);
-    source(next)
+    Ok(())
 }
 
 pub fn prompt() {
@@ -193,10 +195,12 @@ pub fn run() -> Result<i32> {
     let header_text = format!(
         "[ sessions ]    groups     hosts  \n  tab: cycle view  ·  enter: open  ·  ctrl-k: kill (sessions)  ·  ctrl-r: reload  ·  esc: quit"
     );
-    // reload-sync (fzf 0.39+) blocks until the command finishes, so the
-    // state file is written before transform-prompt/transform-header read it.
+    // Tab: rotate state (silently) → reload data for the NEW state →
+    // transforms read the same NEW state for prompt/header. The reload
+    // command resolves state via a fresh `dash-state` call so it always
+    // reflects what `dash-cycle` just wrote.
     let tab_bind = format!(
-        "tab:reload-sync({0} dash-cycle)+transform-prompt({0} dash-prompt)+transform-header({0} dash-header)",
+        "tab:execute-silent({0} dash-cycle)+reload-sync({0} dash-source $({0} dash-state))+transform-prompt({0} dash-prompt)+transform-header({0} dash-header)",
         exe_s
     );
     let reload_bind = format!(
