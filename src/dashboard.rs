@@ -23,6 +23,109 @@ use crate::{
     tmux,
 };
 
+/// Editable single-line text field with cursor + a "pristine prefill" flag.
+/// When `pristine` is set, the first edit replaces the whole value — matches
+/// browser autofill behavior so prefilled values don't get in the user's way.
+#[derive(Default, Clone)]
+struct TextInput {
+    value: String,
+    /// Byte index into `value` (UTF-8 aware).
+    cursor: usize,
+    pristine: bool,
+}
+
+impl TextInput {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn pristine(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let cursor = value.len();
+        Self {
+            value,
+            cursor,
+            pristine: true,
+        }
+    }
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+        self.pristine = false;
+    }
+    fn insert(&mut self, c: char) {
+        if self.pristine {
+            self.clear();
+        }
+        self.value.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+    fn backspace(&mut self) {
+        if self.pristine {
+            self.clear();
+            return;
+        }
+        if self.cursor == 0 {
+            return;
+        }
+        let mut prev = self.cursor - 1;
+        while prev > 0 && !self.value.is_char_boundary(prev) {
+            prev -= 1;
+        }
+        self.value.replace_range(prev..self.cursor, "");
+        self.cursor = prev;
+    }
+    fn delete(&mut self) {
+        if self.pristine {
+            self.clear();
+            return;
+        }
+        if self.cursor >= self.value.len() {
+            return;
+        }
+        let mut next = self.cursor + 1;
+        while next < self.value.len() && !self.value.is_char_boundary(next) {
+            next += 1;
+        }
+        self.value.replace_range(self.cursor..next, "");
+    }
+    fn left(&mut self) {
+        self.pristine = false;
+        if self.cursor == 0 {
+            return;
+        }
+        let mut c = self.cursor - 1;
+        while c > 0 && !self.value.is_char_boundary(c) {
+            c -= 1;
+        }
+        self.cursor = c;
+    }
+    fn right(&mut self) {
+        self.pristine = false;
+        if self.cursor >= self.value.len() {
+            return;
+        }
+        let mut c = self.cursor + 1;
+        while c < self.value.len() && !self.value.is_char_boundary(c) {
+            c += 1;
+        }
+        self.cursor = c;
+    }
+    fn home(&mut self) {
+        self.pristine = false;
+        self.cursor = 0;
+    }
+    fn end(&mut self) {
+        self.pristine = false;
+        self.cursor = self.value.len();
+    }
+    fn as_str(&self) -> &str {
+        &self.value
+    }
+    fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Sessions,
@@ -129,10 +232,10 @@ struct App {
     list_state_sessions: ListState,
     list_state_groups: ListState,
     list_state_hosts: ListState,
-    filter: String,
+    filter: TextInput,
     input_mode: InputMode,
-    new_session_name: String,
-    new_session_host: String,
+    new_session_name: TextInput,
+    new_session_host: TextInput,
     new_session_field: NewSessionField,
     should_quit: bool,
     open_after: Option<OpenTarget>,
@@ -162,10 +265,10 @@ impl App {
             list_state_sessions: s,
             list_state_groups: g,
             list_state_hosts: h,
-            filter: String::new(),
+            filter: TextInput::new(),
             input_mode: InputMode::None,
-            new_session_name: String::new(),
-            new_session_host: String::new(),
+            new_session_name: TextInput::new(),
+            new_session_host: TextInput::new(),
             new_session_field: NewSessionField::Name,
             should_quit: false,
             open_after: None,
@@ -190,7 +293,7 @@ impl App {
         if self.filter.is_empty() {
             iter.collect()
         } else {
-            let f = self.filter.to_lowercase();
+            let f = self.filter.as_str().to_lowercase();
             iter.filter(|x| x.to_lowercase().contains(&f)).collect()
         }
     }
@@ -272,8 +375,8 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
                     continue;
                 }
                 match app.input_mode {
-                    InputMode::Filter => handle_filter_key(&mut app, key.code),
-                    InputMode::NewSession => handle_new_session_key(&mut app, key.code),
+                    InputMode::Filter => handle_filter_key(&mut app, key),
+                    InputMode::NewSession => handle_new_session_key(&mut app, key),
                     InputMode::None => handle_key(&mut app, key.code, key.modifiers),
                 }
             }
@@ -284,13 +387,20 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
     }
 }
 
-fn handle_filter_key(app: &mut App, code: KeyCode) {
-    match code {
+fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
         KeyCode::Enter | KeyCode::Esc => app.input_mode = InputMode::None,
-        KeyCode::Backspace => {
-            app.filter.pop();
-        }
-        KeyCode::Char(c) => app.filter.push(c),
+        KeyCode::Backspace => app.filter.backspace(),
+        KeyCode::Delete => app.filter.delete(),
+        KeyCode::Left => app.filter.left(),
+        KeyCode::Right => app.filter.right(),
+        KeyCode::Home => app.filter.home(),
+        KeyCode::End => app.filter.end(),
+        KeyCode::Char('u') if ctrl => app.filter.clear(),
+        KeyCode::Char('a') if ctrl => app.filter.home(),
+        KeyCode::Char('e') if ctrl => app.filter.end(),
+        KeyCode::Char(c) if !ctrl => app.filter.insert(c),
         _ => {}
     }
     let len = app.items().len();
@@ -302,21 +412,23 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_new_session_key(app: &mut App, code: KeyCode) {
-    match code {
+fn handle_new_session_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::None;
             app.new_session_name.clear();
             app.new_session_host.clear();
             app.new_session_field = NewSessionField::Name;
+            return;
         }
         KeyCode::Enter => {
-            let name = app.new_session_name.trim().to_string();
+            let name = app.new_session_name.as_str().trim().to_string();
             if name.is_empty() {
                 return;
             }
             let host = {
-                let h = app.new_session_host.trim();
+                let h = app.new_session_host.as_str().trim();
                 if h.is_empty() {
                     None
                 } else {
@@ -329,31 +441,32 @@ fn handle_new_session_key(app: &mut App, code: KeyCode) {
             app.new_session_field = NewSessionField::Name;
             app.open_after = Some(OpenTarget::CreateNew { name, host });
             app.should_quit = true;
+            return;
         }
-        KeyCode::Tab | KeyCode::Down => {
+        KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
             app.new_session_field = match app.new_session_field {
                 NewSessionField::Name => NewSessionField::Host,
                 NewSessionField::Host => NewSessionField::Name,
             };
+            return;
         }
-        KeyCode::BackTab | KeyCode::Up => {
-            app.new_session_field = match app.new_session_field {
-                NewSessionField::Name => NewSessionField::Host,
-                NewSessionField::Host => NewSessionField::Name,
-            };
-        }
-        KeyCode::Backspace => match app.new_session_field {
-            NewSessionField::Name => {
-                app.new_session_name.pop();
-            }
-            NewSessionField::Host => {
-                app.new_session_host.pop();
-            }
-        },
-        KeyCode::Char(c) => match app.new_session_field {
-            NewSessionField::Name => app.new_session_name.push(c),
-            NewSessionField::Host => app.new_session_host.push(c),
-        },
+        _ => {}
+    }
+    let field = match app.new_session_field {
+        NewSessionField::Name => &mut app.new_session_name,
+        NewSessionField::Host => &mut app.new_session_host,
+    };
+    match key.code {
+        KeyCode::Left => field.left(),
+        KeyCode::Right => field.right(),
+        KeyCode::Home => field.home(),
+        KeyCode::End => field.end(),
+        KeyCode::Backspace => field.backspace(),
+        KeyCode::Delete => field.delete(),
+        KeyCode::Char('u') if ctrl => field.clear(),
+        KeyCode::Char('a') if ctrl => field.home(),
+        KeyCode::Char('e') if ctrl => field.end(),
+        KeyCode::Char(c) if !ctrl => field.insert(c),
         _ => {}
     }
 }
@@ -409,17 +522,21 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('n') => {
-            // Pre-seed name + host from the highlighted item where possible:
-            // - Sessions view: name = session name, host blank
-            // - Groups view: name = group name, host blank
-            // - Hosts view: name = short host, host = full FQDN
-            let (name, host) = match (app.view, app.selected()) {
-                (View::Hosts, Some(h)) => (short_name(&h), h),
-                (_, Some(s)) => (short_name(&s), String::new()),
-                _ => (String::new(), String::new()),
-            };
-            app.new_session_name = name;
-            app.new_session_host = host;
+            // Only the Hosts view prefills usefully (short→name, FQDN→ssh).
+            // Sessions/Groups views start blank since 'n' means a brand-new
+            // session that has nothing to do with the current selection.
+            // Prefilled values are marked pristine so the first keystroke
+            // replaces them — typing just works.
+            match (app.view, app.selected()) {
+                (View::Hosts, Some(h)) => {
+                    app.new_session_name = TextInput::pristine(short_name(&h));
+                    app.new_session_host = TextInput::pristine(h);
+                }
+                _ => {
+                    app.new_session_name = TextInput::new();
+                    app.new_session_host = TextInput::new();
+                }
+            }
             app.new_session_field = NewSessionField::Name;
             app.input_mode = InputMode::NewSession;
         }
@@ -498,33 +615,68 @@ fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
         ));
 
     let active = app.new_session_field;
-    let field_line = |label: &str, value: &str, active: bool, placeholder: &str| -> Line<'static> {
+    let theme = app.theme;
+    let field_line = move |label: &str,
+                           field: &TextInput,
+                           active: bool,
+                           placeholder: &str|
+          -> Line<'static> {
         let label_style = if active {
             Style::default()
-                .fg(app.theme.accent)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(app.theme.muted)
+            Style::default().fg(theme.muted)
         };
-        let value_style = Style::default().fg(app.theme.fg);
-        let cursor = if active {
-            Span::styled("█", Style::default().fg(app.theme.accent))
+        let mut spans = vec![Span::styled(format!("  {:<6}", label), label_style)];
+        let value = field.as_str();
+        if value.is_empty() {
+            if active {
+                spans.push(Span::styled(
+                    placeholder.to_string(),
+                    Style::default().fg(theme.muted),
+                ));
+                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+            } else {
+                spans.push(Span::styled(
+                    placeholder.to_string(),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+        } else if !active {
+            spans.push(Span::styled(value.to_string(), Style::default().fg(theme.fg)));
         } else {
-            Span::raw("")
-        };
-        let value_span = if value.is_empty() && !active {
-            Span::styled(
-                placeholder.to_string(),
-                Style::default().fg(app.theme.muted),
-            )
-        } else {
-            Span::styled(value.to_string(), value_style)
-        };
-        Line::from(vec![
-            Span::styled(format!("  {:<6}", label), label_style),
-            value_span,
-            cursor,
-        ])
+            // Active field with content. Pristine values get muted/italic so
+            // the user knows the next keystroke will replace them. Otherwise
+            // render with a block cursor at the cursor position.
+            let value_style = if field.pristine {
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            let cur = field.cursor.min(value.len());
+            let (pre, post) = value.split_at(cur);
+            if field.pristine {
+                spans.push(Span::styled(value.to_string(), value_style));
+                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+            } else if post.is_empty() {
+                spans.push(Span::styled(pre.to_string(), value_style));
+                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+            } else {
+                let mut chars = post.chars();
+                let cursor_char = chars.next().unwrap_or(' ');
+                let after_cursor: String = chars.collect();
+                spans.push(Span::styled(pre.to_string(), value_style));
+                spans.push(Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().bg(theme.accent).fg(theme.fg),
+                ));
+                spans.push(Span::styled(after_cursor, value_style));
+            }
+        }
+        Line::from(spans)
     };
 
     let lines = vec![
@@ -543,7 +695,7 @@ fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "  Tab next field   ↵ create   Esc cancel",
+            "  Tab/↑↓ field  ←→ cursor  ^U clear  ↵ create  Esc cancel",
             Style::default().fg(app.theme.muted),
         )),
     ];
@@ -577,7 +729,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
 
     let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
-        format!(" {} — /{} ", app.view.title(), app.filter)
+        format!(" {} — /{} ", app.view.title(), app.filter.as_str())
     } else {
         format!(" {} ({}) ", app.view.title(), items_strs.len())
     };
@@ -803,14 +955,32 @@ fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>>
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
     let line = match app.input_mode {
-        InputMode::Filter => Line::from(vec![
-            Span::styled("/", Style::default().fg(theme.warning)),
-            Span::styled(app.filter.clone(), Style::default().fg(theme.fg)),
-            Span::styled(
-                "    Esc/Enter exits filter",
+        InputMode::Filter => {
+            let value = app.filter.as_str();
+            let cur = app.filter.cursor.min(value.len());
+            let (pre, post) = value.split_at(cur);
+            let mut spans = vec![
+                Span::styled("/", Style::default().fg(theme.warning)),
+                Span::styled(pre.to_string(), Style::default().fg(theme.fg)),
+            ];
+            if post.is_empty() {
+                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+            } else {
+                let mut chars = post.chars();
+                let c = chars.next().unwrap_or(' ');
+                let rest: String = chars.collect();
+                spans.push(Span::styled(
+                    c.to_string(),
+                    Style::default().bg(theme.accent).fg(theme.fg),
+                ));
+                spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
+            }
+            spans.push(Span::styled(
+                "    ←→ cursor  ^U clear  Esc/Enter exits filter",
                 Style::default().fg(theme.muted),
-            ),
-        ]),
+            ));
+            Line::from(spans)
+        }
         InputMode::NewSession => Line::from(Span::styled(
             "type session name, Enter to create, Esc to cancel",
             Style::default().fg(theme.muted),
