@@ -12,6 +12,7 @@ _tad() {
          'groups-add:add a group'
          'groups-rm:remove a group'
          'groups-edit:open groups.yaml in $EDITOR'
+         'config:first-launch wizard / groups editor (TUI)'
       )
       # Also offer existing sessions as completion candidates (most common case)
       local -a attached detached state rest
@@ -21,9 +22,12 @@ _tad() {
             detached) detached+=("$rest") ;;
          esac
       done < <(tad complete 2>/dev/null)
+      local -a groups
+      groups=("${(@f)$(tad groups 2>/dev/null)}")
       _describe -t commands 'command' subs
       _describe -t attached 'attached session' attached
       _describe -t detached 'detached session' detached
+      _describe -t groups 'group' groups
       _values 'option' '-g[open a group]'
       return
    fi
@@ -50,6 +54,28 @@ _tad() {
          fi
          return
          ;;
+      groups-add)
+         # tad groups-add <name> <layout> <host>...
+         # position 3 = NAME (free-form), 4 = LAYOUT, 5+ = HOSTS.
+         if (( CURRENT == 4 )); then
+            local -a layouts
+            layouts=(
+               'panes:single window, one pane per host'
+               'synced-panes:panes with synchronize-panes default on in scripts'
+               'windows:one window per host'
+               'browse:list hosts only, no auto-open'
+            )
+            _describe -t layouts 'layout' layouts
+         elif (( CURRENT >= 5 )); then
+            local -a all_hosts g
+            for g in "${(@f)$(tad groups 2>/dev/null | cut -d: -f1)}"; do
+               [[ -n $g ]] || continue
+               all_hosts+=("${(@f)$(tad group-hosts $g 2>/dev/null)}")
+            done
+            _describe -t hosts 'known host' all_hosts
+         fi
+         return
+         ;;
    esac
 }
 
@@ -59,7 +85,7 @@ _tad_groups() {
    _describe -t groups 'group' groups
 }
 
-zstyle ':completion:*:tad:*' group-order attached detached commands
+zstyle ':completion:*:tad:*' group-order attached detached groups commands
 zstyle ':completion:*:tad:*' sort false
 
 _tad "$@"

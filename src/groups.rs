@@ -72,7 +72,7 @@ pub fn add_interactive() -> Result<i32> {
     let layout = Select::new("Layout:", LAYOUTS.iter().map(|s| s.to_string()).collect())
         .with_starting_cursor(0)
         .with_help_message(
-            "panes=tiled split, synced-panes=tiled+input-sync, windows=one per host, browse=list-only",
+            "panes=tiled split (text-sync prompt, default off in scripts), synced-panes=same (default on in scripts), windows=one per host, browse=list-only",
         )
         .prompt()?;
 
@@ -156,7 +156,17 @@ pub fn open(name: &str, host: Option<&str>) -> Result<i32> {
                 tmux::split_window(name, &format!("ssh {}", h))?;
             }
             tmux::select_layout(name, "tiled")?;
-            if g.layout == "synced-panes" {
+            // With 2+ panes, default to enabling text-sync but let the user
+            // disable it interactively. Without a tty, fall back to the
+            // stored layout's intent so scripted invocations stay deterministic.
+            let layout_default = g.layout == "synced-panes";
+            let want_sync = if g.hosts.len() > 1 {
+                sessions::confirm_tty("Enable text-sync across panes?", true)
+                    .unwrap_or(layout_default)
+            } else {
+                layout_default
+            };
+            if want_sync {
                 tmux::set_window_option(name, "synchronize-panes", "on")?;
             }
         }

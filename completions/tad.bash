@@ -3,12 +3,22 @@ function _tad_complete() {
    cur="${COMP_WORDS[COMP_CWORD]}"
    prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-   # First arg: subcommands + session names + -g
+   # All known hosts across all groups — used to suggest hosts when adding a
+   # new group, since tad doesn't otherwise track a host inventory.
+   _tad_all_hosts() {
+      local g
+      for g in $(tad groups 2>/dev/null | cut -d: -f1); do
+         tad group-hosts "$g" 2>/dev/null
+      done | sort -u
+   }
+
+   # First arg: subcommands + session names + group names + -g
    if (( COMP_CWORD == 1 )); then
-      local subs="complete groups group-hosts groups-add groups-rm groups-edit -g"
-      local sessions
+      local subs="complete groups group-hosts groups-add groups-rm groups-edit config -g"
+      local sessions groups
       sessions=$(tad complete 2>/dev/null | cut -f2 | cut -d: -f1)
-      COMPREPLY=( $(compgen -W "$subs $sessions" -- "$cur") )
+      groups=$(tad groups 2>/dev/null | cut -d: -f1)
+      COMPREPLY=( $(compgen -W "$subs $sessions $groups" -- "$cur") )
       compopt -o nosort 2>/dev/null
       return
    fi
@@ -42,6 +52,19 @@ function _tad_complete() {
    # tad groups-rm <group> <TAB> → no more args
    if (( COMP_CWORD >= 3 )) && [[ ${COMP_WORDS[COMP_CWORD-2]} == groups-rm ]]; then
       return
+   fi
+
+   # tad groups-add <name> <layout> <host>...
+   if [[ ${COMP_WORDS[1]} == groups-add ]]; then
+      # position 2 = NAME (free-form, no completion)
+      if (( COMP_CWORD == 3 )); then
+         COMPREPLY=( $(compgen -W "panes synced-panes windows browse" -- "$cur") )
+         return
+      fi
+      if (( COMP_CWORD >= 4 )); then
+         COMPREPLY=( $(compgen -W "$(_tad_all_hosts)" -- "$cur") )
+         return
+      fi
    fi
 }
 
