@@ -15,8 +15,10 @@
 A tmux session and group manager. Bare `tad` opens a native TUI dashboard
 that cycles between live sessions, named groups, and the hosts inside those
 groups, with live updates every ~1.5s. `tad <name>` attaches or creates a
-session. `tad -g <group>` opens a multi-host session whose layout you
-control per group.
+session — and if no session exists yet but a group by that name does, it
+offers to open the whole group instead. `tad -g <group>` opens a multi-host
+session whose layout you control per group; for multi-pane layouts you're
+prompted whether to enable tmux `synchronize-panes` (default: yes).
 
 ![tad dashboard demo](docs/screenshots/dashboard.gif)
 
@@ -191,7 +193,8 @@ and asks tmux to attach/create. Nothing on disk changes for tmux.
 
 ```
 tad                          TUI dashboard (sessions / groups / hosts)
-tad <session>                attach or create a tmux session by name
+tad <name>                   attach or create a session; if <name> matches a
+                             group and no session exists, offers to open it
 tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
@@ -214,11 +217,16 @@ subcommands.
 
 Layouts:
 - `panes`         — single window, one pane per host. **Default.**
-- `synced-panes`  — like panes, with tmux `synchronize-panes on` so input
-                    fans out to every pane.
+- `synced-panes`  — like panes; `synchronize-panes on` is the default when
+                    scripted/non-interactive.
 - `windows`       — one window per host. Use `Ctrl-b n/p` to switch.
 - `browse`        — don't auto-open anything. `tad -g <name> <TAB>` shows
                     hosts for individual drill-in.
+
+For both `panes` and `synced-panes`, opening 2+ panes interactively prompts
+`Enable text-sync across panes? [Y/n]` (default yes). The layout choice now
+controls only the non-interactive fallback: `synced-panes` keeps sync on
+in scripts, `panes` keeps it off.
 
 ## Dashboard
 

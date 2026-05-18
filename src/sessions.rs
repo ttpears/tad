@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
 
-use crate::tmux;
+use crate::{config, groups, tmux};
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -85,6 +85,14 @@ pub fn attach_or_create(name: &str) -> Result<i32> {
     if tmux::has_session(name) {
         return tmux::enter(name);
     }
+    // No live session — if a group by this name is defined, offer to open it.
+    if let Ok(doc) = config::load() {
+        if doc.groups.contains_key(name) {
+            if let Some(true) = confirm_tty(&format!("Open group '{}'?", name), true) {
+                return groups::open(name, None);
+            }
+        }
+    }
     if !confirm(&format!("Create new tmux session named {}?", name)) {
         return Ok(1);
     }
@@ -161,22 +169,30 @@ pub fn picker_fallback() -> Result<i32> {
 }
 
 fn confirm(prompt: &str) -> bool {
-    if let Ok(tty) = std::fs::OpenOptions::new()
+    confirm_tty(prompt, true).unwrap_or(false)
+}
+
+/// Y/N prompt against /dev/tty. Returns `None` when /dev/tty is unavailable
+/// (non-interactive context); the caller decides the fallback. `default_yes`
+/// controls the default when the user presses Enter on an empty line.
+pub(crate) fn confirm_tty(prompt: &str, default_yes: bool) -> Option<bool> {
+    let tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-    {
-        let mut writer = tty.try_clone().unwrap();
-        let _ = write!(writer, "{} [Y/n] ", prompt);
-        writer.flush().ok();
-        let mut reader = BufReader::new(tty);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_ok() {
-            let v = line.trim().to_lowercase();
-            return v.is_empty() || v.starts_with('y');
-        }
+        .ok()?;
+    let mut writer = tty.try_clone().ok()?;
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    let _ = write!(writer, "{} {} ", prompt, hint);
+    writer.flush().ok();
+    let mut reader = BufReader::new(tty);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let v = line.trim().to_lowercase();
+    if v.is_empty() {
+        return Some(default_yes);
     }
-    false
+    Some(v.starts_with('y'))
 }
 
 fn truncate(s: &str, max: usize) -> String {
