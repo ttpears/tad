@@ -45,7 +45,7 @@ to upstream. PKGBUILD sources live at `packaging/aur/tmux-tad/` and
 ### Debian / Ubuntu (.deb)
 
 ```sh
-TAD_VERSION=v0.6.0
+TAD_VERSION=v0.7.0
 curl -fLO "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.deb"
 sudo apt install "./tad-${TAD_VERSION}-x86_64.deb"   # pulls in tmux if needed
 ```
@@ -56,7 +56,7 @@ resolves the `tmux` dependency.)
 ### Fedora / RHEL (.rpm)
 
 ```sh
-TAD_VERSION=v0.6.0
+TAD_VERSION=v0.7.0
 sudo dnf install "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.rpm"
 ```
 
@@ -78,7 +78,7 @@ Each [release](https://github.com/ttpears/tad/releases) ships a static
 Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
 
 ```sh
-TAD_VERSION=v0.6.0
+TAD_VERSION=v0.7.0
 BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
 
 mkdir -p ~/.local/bin \

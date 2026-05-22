@@ -9,8 +9,8 @@
 class Tad < Formula
   desc "Tmux session and group manager with a native TUI dashboard"
   homepage "https://github.com/ttpears/tad"
-  url "https://github.com/ttpears/tad/archive/refs/tags/v0.6.0.tar.gz"
-  sha256 "88aaa413c5d6dd3a4fcfd3739affa3446638c0356dcfb2d6b95044ec7d983070"
+  url "https://github.com/ttpears/tad/archive/refs/tags/v0.7.0.tar.gz"
+  sha256 "4846861d9892d5d9b00fe982ea4903ed49dfcbaa1af2154675e7b8b1cb00993c"
   license "MIT"
   head "https://github.com/ttpears/tad.git", branch: "main"
 
