@@ -40,10 +40,7 @@ fn resolve_conf_path(override_path: Option<&Path>) -> PathBuf {
         return PathBuf::from(env);
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    for candidate in [
-        home.join(".tmux.conf.local"),
-        home.join(".tmux.local.conf"),
-    ] {
+    for candidate in [home.join(".tmux.conf.local"), home.join(".tmux.local.conf")] {
         if candidate.is_file() {
             return candidate;
         }
@@ -130,8 +127,8 @@ fn strip_block(existing: &str) -> Result<Option<String>> {
 fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let tmp = path.with_extension("tad-keybind.tmp");
     {
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut f =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(contents.as_bytes())
             .with_context(|| format!("writing {}", tmp.display()))?;
         f.sync_all().ok();
