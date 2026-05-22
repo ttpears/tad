@@ -26,6 +26,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -37,6 +38,17 @@ jobs:
           CARGO_TERM_COLOR: always
         run: cargo build --release --locked
 
+      - name: Install cargo-deb and cargo-generate-rpm
+        run: |
+          cargo install --locked cargo-deb
+          cargo install --locked cargo-generate-rpm
+
+      - name: Build .deb (Debian/Ubuntu)
+        run: cargo deb --no-build --no-strip
+
+      - name: Build .rpm (Fedora/RHEL)
+        run: cargo generate-rpm
+
       - name: Stage release assets
         run: |
           mkdir -p dist
@@ -46,6 +58,10 @@ jobs:
           cp examples/groups.yaml.example dist/groups.yaml.example
           cp examples/config.yaml.example dist/config.yaml.example
           cp LICENSE dist/LICENSE
+          # cargo-deb names .deb as <pkg>_<ver>-1_<arch>.deb under target/debian/
+          cp target/debian/tad_*_amd64.deb "dist/tad-${GITHUB_REF_NAME}-x86_64.deb"
+          # cargo-generate-rpm names .rpm as <pkg>-<ver>-1.<arch>.rpm under target/generate-rpm/
+          cp target/generate-rpm/tad-*.x86_64.rpm "dist/tad-${GITHUB_REF_NAME}-x86_64.rpm"
           (cd dist && sha256sum * > SHA256SUMS)
           ls -la dist/
 
@@ -56,10 +72,13 @@ jobs:
           body: |
             Release ${{ github.ref_name }}.
 
-            Linux x86_64 binary and shell completions attached. See README
+            Linux x86_64 binary, `.deb` (Debian/Ubuntu), `.rpm`
+            (Fedora/RHEL), and shell completions attached. See README
             for install instructions.
           files: |
             dist/tad-${{ github.ref_name }}-x86_64-linux
+            dist/tad-${{ github.ref_name }}-x86_64.deb
+            dist/tad-${{ github.ref_name }}-x86_64.rpm
             dist/_tad
             dist/tad.bash
             dist/groups.yaml.example

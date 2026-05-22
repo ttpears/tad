@@ -42,13 +42,43 @@ you prefer — `tmux-tad-bin` is faster to install, `tmux-tad` is closer
 to upstream. PKGBUILD sources live at `packaging/aur/tmux-tad/` and
 `packaging/aur/tmux-tad-bin/` in this repo.
 
+### Debian / Ubuntu (.deb)
+
+```sh
+TAD_VERSION=v0.7.0
+curl -fLO "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.deb"
+sudo apt install "./tad-${TAD_VERSION}-x86_64.deb"   # pulls in tmux if needed
+```
+
+(`apt install ./<file.deb>` is preferred over raw `dpkg -i` because apt
+resolves the `tmux` dependency.)
+
+### Fedora / RHEL (.rpm)
+
+```sh
+TAD_VERSION=v0.7.0
+sudo dnf install "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.rpm"
+```
+
+The release is unsigned, so `dnf` will prompt to accept on first
+install.
+
+### macOS / Linux (Homebrew)
+
+```sh
+brew tap ttpears/tad
+brew install tad
+```
+
+Builds from source via Homebrew's `rust` formula.
+
 ### From a release (any Linux x86_64)
 
 Each [release](https://github.com/ttpears/tad/releases) ships a static
 Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
 
 ```sh
-TAD_VERSION=v0.5.0
+TAD_VERSION=v0.7.0
 BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
 
 mkdir -p ~/.local/bin \
