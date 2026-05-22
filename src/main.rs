@@ -8,6 +8,7 @@ mod groups;
 mod sessions;
 mod theme;
 mod tmux;
+mod tmux_keybind;
 mod wizard;
 
 fn main() {

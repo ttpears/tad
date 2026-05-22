@@ -14,7 +14,7 @@ function _tad_complete() {
 
    # First arg: subcommands + session names + group names + -g
    if (( COMP_CWORD == 1 )); then
-      local subs="complete groups group-hosts groups-add groups-rm groups-edit config -g"
+      local subs="complete groups group-hosts groups-add groups-rm groups-edit config tmux-keybind -g"
       local sessions groups
       sessions=$(tad complete 2>/dev/null | cut -f2 | cut -d: -f1)
       groups=$(tad groups 2>/dev/null | cut -d: -f1)

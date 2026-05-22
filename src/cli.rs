@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{dashboard, groups, sessions};
+use crate::{dashboard, groups, sessions, tmux_keybind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,6 +49,37 @@ pub enum Cmd {
     /// Open the wizard / editor. First launch when no config exists,
     /// otherwise opens edit mode with re-run-imports access.
     Config,
+    /// Print or install a tmux popup keybinding that opens the dashboard.
+    /// Default key is `D` (uppercase — lowercase `d` is tmux detach).
+    ///
+    /// Without --conf-path, the target file is auto-detected:
+    /// ~/.tmux.conf.local, ~/.tmux.local.conf, $XDG_CONFIG_HOME/tmux/tmux.conf,
+    /// then ~/.tmux.conf (created if missing). Override with --conf-path or
+    /// the TAD_TMUX_CONF env var. Edits stay inside a marker-delimited
+    /// managed block so unrelated config is preserved.
+    TmuxKeybind {
+        /// Write the binding to the resolved tmux config (and reload tmux
+        /// if running).
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+        /// Remove the managed tad keybinding block from the resolved tmux
+        /// config.
+        #[arg(long)]
+        uninstall: bool,
+        /// Key to bind after the tmux prefix.
+        #[arg(short, long, default_value_t = 'D')]
+        key: char,
+        /// Popup width (percent or columns; passed to tmux display-popup -w).
+        #[arg(long, default_value = "80%")]
+        width: String,
+        /// Popup height (percent or rows; passed to tmux display-popup -h).
+        #[arg(long, default_value = "80%")]
+        height: String,
+        /// Explicit tmux config file to read/write. Overrides auto-detection
+        /// and $TAD_TMUX_CONF.
+        #[arg(long, value_name = "PATH")]
+        conf_path: Option<std::path::PathBuf>,
+    },
 }
 
 pub fn dispatch(cli: Cli) -> Result<i32> {
@@ -107,6 +138,24 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
         Cmd::GroupsRm { name } => groups::remove(&name),
         Cmd::GroupsEdit => groups::edit(),
         Cmd::Config => crate::wizard::run_config(),
+        Cmd::TmuxKeybind {
+            install,
+            uninstall,
+            key,
+            width,
+            height,
+            conf_path,
+        } => {
+            let conf = conf_path.as_deref();
+            if uninstall {
+                tmux_keybind::uninstall(conf)
+            } else if install {
+                tmux_keybind::install(key, &width, &height, conf)
+            } else {
+                tmux_keybind::print(key, &width, &height, conf);
+                Ok(0)
+            }
+        }
     }
 }
 
