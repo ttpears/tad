@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{agents, dashboard, groups, sessions, tmux_keybind, watch};
+use crate::{agents, dashboard, groups, install, sessions, tmux_keybind, watch};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,6 +60,38 @@ pub enum Cmd {
         /// Mtime within this many seconds = "active". Default 30s.
         #[arg(long, default_value_t = 30)]
         active_secs: u64,
+    },
+
+    /// One-shot setup: write the three tmux conf blocks tad needs
+    /// (popup keybind + `#(tad status)` status segment + `tad watch`
+    /// session-created hook) so users don't have to wire each one
+    /// individually. Each block lives behind its own marker pair and
+    /// is idempotent — re-running updates, `--uninstall` removes.
+    Install {
+        /// Skip per-block confirmation prompts.
+        #[arg(short, long)]
+        yes: bool,
+        /// Remove the tad-managed blocks instead of installing them.
+        #[arg(long, conflicts_with = "yes")]
+        uninstall: bool,
+        /// Explicit tmux config file. Default: same auto-detection as
+        /// `tad tmux-keybind` (~/.tmux.conf.local, etc.).
+        #[arg(long, value_name = "PATH")]
+        conf_path: Option<std::path::PathBuf>,
+        /// Popup keybind (default `D` — uppercase, since lowercase `d`
+        /// is tmux's built-in detach).
+        #[arg(short, long, default_value_t = 'D')]
+        key: char,
+        /// Popup width.
+        #[arg(long, default_value = "80%")]
+        width: String,
+        /// Popup height.
+        #[arg(long, default_value = "80%")]
+        height: String,
+        /// tmux status-interval (seconds). 5 keeps the segment fresh
+        /// without thrashing.
+        #[arg(long, default_value_t = 5)]
+        status_interval: u64,
     },
 
     /// Long-running watcher: poll all tmux panes for Claude Code agents
@@ -215,6 +247,28 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             Ok(0)
         }
         Cmd::Watch { interval_secs } => watch::run(interval_secs),
+        Cmd::Install {
+            yes,
+            uninstall,
+            conf_path,
+            key,
+            width,
+            height,
+            status_interval,
+        } => {
+            if uninstall {
+                install::uninstall(conf_path.as_deref())
+            } else {
+                install::run(install::InstallOpts {
+                    yes,
+                    conf_path,
+                    key,
+                    width,
+                    height,
+                    status_interval,
+                })
+            }
+        }
         Cmd::TmuxKeybind {
             install,
             uninstall,
