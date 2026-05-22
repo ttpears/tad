@@ -14,6 +14,7 @@ _tad() {
          'groups-edit:open groups.yaml in $EDITOR'
          'config:first-launch wizard / groups editor (TUI)'
          'tmux-keybind:print/install a tmux popup binding for the dashboard'
+         'status:one-line summary of running Claude Code agents (for tmux status-line)'
       )
       # Also offer existing sessions as completion candidates (most common case)
       local -a attached detached state rest

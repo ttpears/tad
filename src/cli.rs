@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{dashboard, groups, sessions, tmux_keybind};
+use crate::{agents, dashboard, groups, sessions, tmux_keybind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -49,6 +49,19 @@ pub enum Cmd {
     /// Open the wizard / editor. First launch when no config exists,
     /// otherwise opens edit mode with re-run-imports access.
     Config,
+    /// One-line tmux status-line segment summarising running Claude Code
+    /// agents across all panes. Designed for `#(tad status)` in tmux.conf
+    /// status-right. Prints nothing when no agents are running.
+    ///
+    /// Format: `claude: N` if all agents are active; `claude: A/N` if
+    /// some are idle (`A` = active, `N` = total). Override the
+    /// "active" threshold (seconds since the last transcript write) with
+    /// `--active-secs` (default: 30).
+    Status {
+        /// Mtime within this many seconds = "active". Default 30s.
+        #[arg(long, default_value_t = 30)]
+        active_secs: u64,
+    },
     /// Print or install a tmux popup keybinding that opens the dashboard.
     /// Default key is `D` (uppercase — lowercase `d` is tmux detach).
     ///
@@ -138,6 +151,10 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
         Cmd::GroupsRm { name } => groups::remove(&name),
         Cmd::GroupsEdit => groups::edit(),
         Cmd::Config => crate::wizard::run_config(),
+        Cmd::Status { active_secs } => {
+            print_status(active_secs);
+            Ok(0)
+        }
         Cmd::TmuxKeybind {
             install,
             uninstall,
@@ -156,6 +173,24 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
                 Ok(0)
             }
         }
+    }
+}
+
+/// Render the status-line segment to stdout. Empty when no agents — tmux
+/// happily renders an empty `#()` segment as nothing, so the user's
+/// status-line stays clean when no Claude Code is running.
+fn print_status(active_secs: u64) {
+    let agents = agents::scan();
+    if agents.is_empty() {
+        return;
+    }
+    let c = agents::counts(&agents, std::time::Duration::from_secs(active_secs));
+    if c.idle == 0 {
+        print!("claude: {}", c.total);
+    } else if c.active == 0 {
+        print!("claude: {} idle", c.total);
+    } else {
+        print!("claude: {}/{}", c.active, c.total);
     }
 }
 
