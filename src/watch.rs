@@ -18,6 +18,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::agents::{self, ActivityStatus, Agent};
+use crate::snooze::{self, SnoozeState};
 use crate::ui_config::{self, UiConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,10 @@ enum ActivityClass {
 struct AgentState {
     last_class: ActivityClass,
     last_popped: Option<Instant>,
+    /// Was this agent snoozed at the previous observation? Used to fire
+    /// a "snooze just expired and you're still idle" pop — the snooze
+    /// semantics are *remind me in X*, not *mute for X*.
+    was_snoozed: bool,
 }
 
 pub fn run(interval_secs: u64) -> Result<i32> {
@@ -56,12 +61,19 @@ pub fn run(interval_secs: u64) -> Result<i32> {
     let mut state: HashMap<String, AgentState> = HashMap::new();
     loop {
         let agents = agents::scan();
+        // Snoozes are user-set from the dashboard's `s` modal and live in
+        // a shared file so this process picks up changes without IPC.
+        // The file is small (one line per active snooze, pruned lazily),
+        // so re-reading every tick is fine.
+        let snoozes = snooze::load(std::time::SystemTime::now());
         process_tick(
             &mut state,
             &agents,
             ui.auto_popup_idle,
             ui.auto_popup_cooldown,
             Instant::now(),
+            &snoozes,
+            std::time::SystemTime::now(),
             &ui,
             &mut RealPopper,
         );
@@ -72,12 +84,15 @@ pub fn run(interval_secs: u64) -> Result<i32> {
 /// Pure-ish tick: caller supplies the agent list and popper so tests can
 /// drive the state machine without spawning tmux or waiting on real
 /// timestamps.
+#[allow(clippy::too_many_arguments)]
 fn process_tick<P: Popper>(
     state: &mut HashMap<String, AgentState>,
     agents: &[Agent],
     idle_threshold: Duration,
     cooldown: Duration,
     now: Instant,
+    snoozes: &SnoozeState,
+    wall_now: std::time::SystemTime,
     ui: &UiConfig,
     popper: &mut P,
 ) {
@@ -92,19 +107,32 @@ fn process_tick<P: Popper>(
             // written its first jsonl event yet" — we won't pop on that.
             _ => ActivityClass::Idle,
         };
+        let is_snoozed_now = snooze::is_snoozed(snoozes, &agent.target, wall_now);
         let entry = state.entry(agent.target.clone()).or_insert(AgentState {
             // First time we see the agent: seed its state without firing.
             // If they're already idle when we first observe them we don't
             // know whether they're awaiting input or just freshly opened.
             last_class: new_class,
             last_popped: None,
+            was_snoozed: is_snoozed_now,
         });
 
         let was = entry.last_class;
+        let was_snoozed = entry.was_snoozed;
         let just_transitioned = was == ActivityClass::Active && new_class == ActivityClass::Idle;
+        // Snooze-expiry: deadline passed and the agent is still idle →
+        // remind the user. This is the "remind me in 5m" semantics —
+        // snooze defers the popup, it doesn't permanently silence it.
+        let snooze_just_expired = was_snoozed && !is_snoozed_now;
         entry.last_class = new_class;
+        entry.was_snoozed = is_snoozed_now;
 
-        if just_transitioned && should_pop(entry.last_popped, cooldown, now) {
+        // Currently snoozed → never pop. Otherwise pop on either a fresh
+        // Active→Idle transition or a snooze-expiry-while-idle, subject
+        // to cooldown.
+        let pop_now = !is_snoozed_now
+            && (just_transitioned || (snooze_just_expired && new_class == ActivityClass::Idle));
+        if pop_now && should_pop(entry.last_popped, cooldown, now) {
             popper.pop(&agent.target, ui);
             entry.last_popped = Some(now);
         }
@@ -283,6 +311,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             Instant::now(),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -305,6 +335,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -317,6 +349,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0 + Duration::from_secs(60),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -340,6 +374,8 @@ mod tests {
             Duration::from_secs(30),
             cooldown,
             now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -350,6 +386,8 @@ mod tests {
             Duration::from_secs(30),
             cooldown,
             now0 + Duration::from_secs(60),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -360,6 +398,8 @@ mod tests {
             Duration::from_secs(30),
             cooldown,
             now0 + Duration::from_secs(120),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -383,6 +423,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -392,6 +434,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0 + Duration::from_secs(60),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -404,6 +448,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0 + Duration::from_secs(70),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -415,10 +461,143 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0 + Duration::from_secs(130),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
         assert_eq!(popper.calls.len(), 2);
+    }
+
+    /// Snooze: an agent whose target is in the snooze map shouldn't pop
+    /// on Active→Idle until the snooze deadline passes.
+    #[test]
+    fn snooze_suppresses_pop_until_deadline() {
+        let mut state = HashMap::new();
+        let mut popper = RecordingPopper::default();
+        let ui = UiConfig::default();
+        let now0 = Instant::now();
+        let wall0 = std::time::SystemTime::now();
+
+        // tick 1: active (seed state, no pop)
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0,
+            &SnoozeState::default(),
+            wall0,
+            &ui,
+            &mut popper,
+        );
+
+        // Snooze s:0.0 for 1 hour starting now.
+        let mut snoozes = SnoozeState::default();
+        snoozes.snoozes.insert(
+            "s:0.0".into(),
+            wall0
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                + 3600,
+        );
+
+        // tick 2: idle → would normally pop, but snoozed → suppressed.
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(60),
+            &snoozes,
+            wall0 + Duration::from_secs(60),
+            &ui,
+            &mut popper,
+        );
+        assert!(
+            popper.calls.is_empty(),
+            "snooze should suppress the Active→Idle pop"
+        );
+
+        // tick 3: snooze has expired, agent is still idle → "remind me"
+        // fires: a snooze-expiry-while-idle pops once.
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(7200)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(7200),
+            &SnoozeState::default(),
+            wall0 + Duration::from_secs(7200),
+            &ui,
+            &mut popper,
+        );
+        assert_eq!(
+            popper.calls,
+            vec!["s:0.0".to_string()],
+            "snooze expiry while still idle should fire a reminder pop"
+        );
+    }
+
+    /// Snooze + agent goes Active during the snooze + still idle when
+    /// snooze expires. The activity-during-snooze isn't a pop trigger
+    /// (snooze suppresses transitions), but when the snooze expires
+    /// we still want the remind-me pop.
+    #[test]
+    fn snooze_expiry_while_idle_pops_even_after_activity() {
+        let mut state = HashMap::new();
+        let mut popper = RecordingPopper::default();
+        let ui = UiConfig::default();
+        let now0 = Instant::now();
+        let wall0 = std::time::SystemTime::now();
+        let snooze_until = wall0
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + 60;
+        let mut snoozes = SnoozeState::default();
+        snoozes.snoozes.insert("s:0.0".into(), snooze_until);
+
+        // tick 1: seed as snoozed + active
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0,
+            &snoozes,
+            wall0,
+            &ui,
+            &mut popper,
+        );
+        // tick 2: still snoozed, agent now idle → suppressed
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(30),
+            &snoozes,
+            wall0 + Duration::from_secs(30),
+            &ui,
+            &mut popper,
+        );
+        assert!(popper.calls.is_empty());
+
+        // tick 3: snooze expired, agent still idle → reminder pop
+        process_tick(
+            &mut state,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(120)))],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(90),
+            &SnoozeState::default(),
+            wall0 + Duration::from_secs(90),
+            &ui,
+            &mut popper,
+        );
+        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
     }
 
     /// Agents that vanish from the scan should be evicted from state, so
@@ -436,6 +615,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );
@@ -448,6 +629,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
             now0 + Duration::from_secs(10),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
             &ui,
             &mut popper,
         );

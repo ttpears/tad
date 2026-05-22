@@ -21,8 +21,9 @@ use crate::{
     agents::{self, Agent},
     config, groups,
     sessions::{self, Session},
+    snooze,
     theme::{self, Theme},
-    tmux,
+    tmux, ui_config,
 };
 
 /// `~/.local/state/tad/dashboard.state` — last view the user was on.
@@ -272,6 +273,7 @@ enum InputMode {
     None,
     Filter,
     NewSession,
+    SnoozeSelect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -287,6 +289,12 @@ struct App {
     list_state_groups: ListState,
     list_state_hosts: ListState,
     list_state_agents: ListState,
+    /// Cursor over `ui_config().snooze_intervals` in the snooze modal.
+    snooze_cursor: usize,
+    /// Set when launched via `--select-agent` (i.e. from the auto-popup):
+    /// after the user snoozes or otherwise resolves the row, we exit the
+    /// dashboard so they're back where they were.
+    from_popup: bool,
     filter: TextInput,
     input_mode: InputMode,
     new_session_name: TextInput,
@@ -327,6 +335,8 @@ impl App {
             list_state_groups: g,
             list_state_hosts: h,
             list_state_agents: a,
+            snooze_cursor: 0,
+            from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
             new_session_name: TextInput::new(),
@@ -478,6 +488,7 @@ fn app_loop<B: ratatui::backend::Backend>(
     // first row stays selected.
     if let Some(target) = &opts.select_agent {
         app.view = View::Agents;
+        app.from_popup = true;
         if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
             app.list_state_agents.select(Some(idx));
         }
@@ -501,6 +512,7 @@ fn app_loop<B: ratatui::backend::Backend>(
                 }
                 match app.input_mode {
                     InputMode::Filter => handle_filter_key(&mut app, key),
+                    InputMode::SnoozeSelect => handle_snooze_key(&mut app, key),
                     InputMode::NewSession => handle_new_session_key(&mut app, key),
                     InputMode::None => handle_key(&mut app, key.code, key.modifiers),
                 }
@@ -571,6 +583,39 @@ fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
             None if len > 0 => state.select(Some(0)),
             _ => {}
         }
+    }
+}
+
+fn handle_snooze_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let intervals = ui_config::load().snooze_intervals;
+    match key.code {
+        KeyCode::Esc => app.input_mode = InputMode::None,
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.snooze_cursor > 0 {
+                app.snooze_cursor -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.snooze_cursor + 1 < intervals.len() {
+                app.snooze_cursor += 1;
+            }
+        }
+        KeyCode::Enter => {
+            if let (Some(target), Some(dur)) =
+                (app.selected(), intervals.get(app.snooze_cursor).copied())
+            {
+                let _ = snooze::snooze(&target, dur);
+                app.input_mode = InputMode::None;
+                // If we got here from --select-agent (the auto-popup),
+                // close the dashboard — the user's done responding to
+                // the popup and wants to go back to whatever they were
+                // doing. Otherwise just dismiss the modal and stay.
+                if app.from_popup {
+                    app.should_quit = true;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -677,6 +722,23 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
             }
         }
+        KeyCode::Char('s') => {
+            // Snooze the selected agent. Only meaningful in the Agents
+            // view — in others it's a no-op.
+            if app.view == View::Agents && app.selected().is_some() {
+                app.snooze_cursor = 0;
+                app.input_mode = InputMode::SnoozeSelect;
+            }
+        }
+        KeyCode::Char('S') => {
+            // Clear an active snooze on the selected agent. Useful if you
+            // snoozed the wrong row or changed your mind.
+            if app.view == View::Agents {
+                if let Some(target) = app.selected() {
+                    let _ = snooze::clear(&target);
+                }
+            }
+        }
         KeyCode::Char('/') => {
             app.input_mode = InputMode::Filter;
             app.filter.clear();
@@ -739,6 +801,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.input_mode == InputMode::NewSession {
         render_new_session_modal(f, area, app);
     }
+    if app.input_mode == InputMode::SnoozeSelect {
+        render_snooze_modal(f, area, app);
+    }
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
@@ -777,6 +842,49 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         );
     f.render_widget(tabs, area);
+}
+
+fn render_snooze_modal(f: &mut Frame, area: Rect, app: &App) {
+    let intervals = ui_config::load().snooze_intervals;
+    let target = app.selected().unwrap_or_default();
+    let width = 56.min(area.width.saturating_sub(4));
+    let height = (intervals.len() as u16 + 5).min(area.height.saturating_sub(2));
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+    let theme = app.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" snooze {} ", target),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let mut lines: Vec<Line> = Vec::with_capacity(intervals.len() + 4);
+    lines.push(Line::from(""));
+    for (i, dur) in intervals.iter().enumerate() {
+        let selected = i == app.snooze_cursor;
+        let marker = if selected { "▶ " } else { "  " };
+        let label_style = if selected {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", marker), label_style),
+            Span::styled(snooze::format_duration(*dur), label_style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ pick   ↵ snooze   Esc cancel".to_string(),
+        Style::default().fg(theme.muted),
+    )));
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, popup);
 }
 
 fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
@@ -1016,7 +1124,23 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
             ),
         };
     let cwd_short = cwd_for_display(&agent.cwd);
-    Line::from(vec![
+
+    // If this target has an active snooze, append a "💤 in Xm" badge so
+    // the user can see at a glance which rows the watcher is suppressing.
+    let snoozes = snooze::load(std::time::SystemTime::now());
+    let snooze_badge = snoozes.snoozes.get(target).and_then(|until| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        if *until > now {
+            Some(std::time::Duration::from_secs(*until - now))
+        } else {
+            None
+        }
+    });
+
+    let mut spans = vec![
         Span::styled(marker_text, marker_style),
         Span::styled(
             format!("{:<22}", truncate(target, 22)),
@@ -1031,7 +1155,15 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
         ),
         Span::raw(" "),
         Span::styled(status_text, status_style),
-    ])
+    ];
+    if let Some(d) = snooze_badge {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("snoozed {}", snooze::format_duration(d)),
+            Style::default().fg(theme.warning),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Shorten a cwd for display: replace $HOME prefix with `~`. The full path
@@ -1324,9 +1456,24 @@ fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<Line<'stati
             lines.push(kv("transcript", name));
         }
     }
+    // Surface an active snooze in the preview alongside the line badge,
+    // so a user previewing a row knows the watcher is suppressing it.
+    let snoozes = snooze::load(std::time::SystemTime::now());
+    if let Some(until) = snoozes.snoozes.get(target) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if *until > now_secs {
+            lines.push(kv(
+                "snoozed",
+                snooze::format_duration(std::time::Duration::from_secs(*until - now_secs)),
+            ));
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↵ jump to this pane",
+        "↵ jump to pane   s snooze   S clear snooze".to_string(),
         Style::default().fg(theme.muted),
     )));
     lines
@@ -1365,6 +1512,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             "type session name, Enter to create, Esc to cancel",
             Style::default().fg(theme.muted),
         )),
+        InputMode::SnoozeSelect => Line::from(Span::styled(
+            "↑↓ pick duration   ↵ snooze   Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
         InputMode::None => {
             let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
                 vec![
@@ -1380,6 +1531,9 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             spans.extend(bind("n", "new"));
             if app.view == View::Sessions {
                 spans.extend(bind("d", "kill"));
+            }
+            if app.view == View::Agents {
+                spans.extend(bind("s", "snooze"));
             }
             spans.extend(bind("/", "filter"));
             spans.extend(bind("r", "refresh"));

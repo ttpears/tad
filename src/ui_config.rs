@@ -30,6 +30,10 @@ pub struct UiConfig {
     /// the user has time to respond, short enough that a truly stuck
     /// agent eventually re-surfaces if they ignored it.
     pub auto_popup_cooldown: Duration,
+    /// Snooze durations offered in the dashboard's `s` modal. Default
+    /// 5m / 30m / 2h. Snoozes are honored by `tad watch` and persist
+    /// across watcher restarts (stored in $XDG_STATE_HOME/tad/snooze.yaml).
+    pub snooze_intervals: Vec<Duration>,
 }
 
 impl Default for UiConfig {
@@ -40,6 +44,11 @@ impl Default for UiConfig {
             auto_popup_width: "80%".into(),
             auto_popup_height: "80%".into(),
             auto_popup_cooldown: Duration::from_secs(5 * 60),
+            snooze_intervals: vec![
+                Duration::from_secs(5 * 60),
+                Duration::from_secs(30 * 60),
+                Duration::from_secs(2 * 3600),
+            ],
         }
     }
 }
@@ -53,6 +62,7 @@ struct UiWire {
     auto_popup_width: Option<String>,
     auto_popup_height: Option<String>,
     auto_popup_cooldown_secs: Option<u64>,
+    snooze_intervals_secs: Option<Vec<u64>>,
 }
 
 /// The top-level fragment we deserialize: just the `ui:` key. Other keys
@@ -94,6 +104,12 @@ pub fn load() -> UiConfig {
             .auto_popup_cooldown_secs
             .map(Duration::from_secs)
             .unwrap_or(defaults.auto_popup_cooldown),
+        snooze_intervals: wire
+            .ui
+            .snooze_intervals_secs
+            .map(|v| v.into_iter().map(Duration::from_secs).collect())
+            .filter(|v: &Vec<Duration>| !v.is_empty())
+            .unwrap_or(defaults.snooze_intervals),
     }
 }
 
@@ -101,34 +117,12 @@ pub fn load() -> UiConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn defaults_are_sensible() {
-        let d = UiConfig::default();
-        assert!(d.auto_popup);
-        assert_eq!(d.auto_popup_idle, Duration::from_secs(30));
-        assert_eq!(d.auto_popup_width, "80%");
-        assert_eq!(d.auto_popup_height, "80%");
-        assert_eq!(d.auto_popup_cooldown, Duration::from_secs(300));
-    }
-
-    /// Round-trip through the wire format: explicit yaml → expected values.
-    #[test]
-    fn parses_full_ui_section() {
-        let yaml = "\
-theme: dracula
-ui:
-  auto_popup: false
-  auto_popup_idle_secs: 10
-  auto_popup_width: 60%
-  auto_popup_height: 70%
-  auto_popup_cooldown_secs: 120
-groups:
-  foo:
-    hosts: [a]
-";
-        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+    /// Map a Wire onto a UiConfig the same way load() does, sharing one
+    /// place to keep the field-by-field merge in sync between prod code
+    /// and tests.
+    fn merge(wire: Wire) -> UiConfig {
         let defaults = UiConfig::default();
-        let cfg = UiConfig {
+        UiConfig {
             auto_popup: wire.ui.auto_popup.unwrap_or(defaults.auto_popup),
             auto_popup_idle: wire
                 .ui
@@ -148,12 +142,74 @@ groups:
                 .auto_popup_cooldown_secs
                 .map(Duration::from_secs)
                 .unwrap_or(defaults.auto_popup_cooldown),
-        };
+            snooze_intervals: wire
+                .ui
+                .snooze_intervals_secs
+                .map(|v| v.into_iter().map(Duration::from_secs).collect())
+                .filter(|v: &Vec<Duration>| !v.is_empty())
+                .unwrap_or(defaults.snooze_intervals),
+        }
+    }
+
+    #[test]
+    fn defaults_are_sensible() {
+        let d = UiConfig::default();
+        assert!(d.auto_popup);
+        assert_eq!(d.auto_popup_idle, Duration::from_secs(30));
+        assert_eq!(d.auto_popup_width, "80%");
+        assert_eq!(d.auto_popup_height, "80%");
+        assert_eq!(d.auto_popup_cooldown, Duration::from_secs(300));
+        assert_eq!(
+            d.snooze_intervals,
+            vec![
+                Duration::from_secs(300),
+                Duration::from_secs(1800),
+                Duration::from_secs(7200),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_full_ui_section() {
+        let yaml = "\
+theme: dracula
+ui:
+  auto_popup: false
+  auto_popup_idle_secs: 10
+  auto_popup_width: 60%
+  auto_popup_height: 70%
+  auto_popup_cooldown_secs: 120
+  snooze_intervals_secs: [60, 600, 3600]
+groups:
+  foo:
+    hosts: [a]
+";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
         assert!(!cfg.auto_popup);
         assert_eq!(cfg.auto_popup_idle, Duration::from_secs(10));
         assert_eq!(cfg.auto_popup_width, "60%");
         assert_eq!(cfg.auto_popup_height, "70%");
         assert_eq!(cfg.auto_popup_cooldown, Duration::from_secs(120));
+        assert_eq!(
+            cfg.snooze_intervals,
+            vec![
+                Duration::from_secs(60),
+                Duration::from_secs(600),
+                Duration::from_secs(3600),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_snooze_list_falls_back_to_defaults() {
+        // A user who writes `snooze_intervals_secs: []` shouldn't end up
+        // with an empty list (no snooze options in the picker == broken
+        // UX); fall back to the default set.
+        let yaml = "ui:\n  snooze_intervals_secs: []\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
+        assert_eq!(cfg.snooze_intervals.len(), 3);
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod config;
 mod dashboard;
 mod groups;
 mod sessions;
+mod snooze;
 mod theme;
 mod tmux;
 mod tmux_keybind;
