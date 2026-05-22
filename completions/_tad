@@ -10,6 +10,7 @@ _tad() {
          'config:first-launch wizard / groups editor (TUI)'
          'tmux-keybind:print/install a tmux popup binding for the dashboard'
          'status:one-line summary of running Claude Code agents (for tmux status-line)'
+         'watch:long-running poller — auto-popup the dashboard on Active→Idle'
       )
       # Sessions and group names are first-class top-level completions
       # because `tad <session>` / `tad <group>` is the common bare invocation.

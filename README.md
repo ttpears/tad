@@ -244,6 +244,12 @@ tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
 tad status                   one-line summary of running Claude Code agents
                              across all tmux panes — for `#(tad status)` in
                              your status-line
+tad watch                    long-running poller that auto-pops the dashboard
+                             when an agent goes idle (run from your shell rc
+                             / tmux startup hook / systemd-user service)
+
+tad --select-agent <target>  open the dashboard on the Agents view with the
+                             given pane preselected (used by `tad watch`)
 ```
 
 The `tad groups …` family used to live as flat subcommands
@@ -330,6 +336,50 @@ per-tick scan cost adds up — keep it at 5–15s.
 Detection is process-tree based (walks `/proc/<pane_pid>/task/*/children`
 looking for a `claude` comm), so it catches any agent regardless of how
 it was started.
+
+### `tad watch`: auto-pop the dashboard when an agent needs you
+
+The status segment is for *checking*. `tad watch` is for *being summoned*.
+It's a long-running poller that watches every claude pane for the
+Active→Idle transition (transcript stopped being written for
+`ui.auto_popup_idle_secs`) and, when one happens, runs `tmux display-popup`
+with the dashboard preselected on the agent that just went idle. Quit
+the popup and you're back where you were.
+
+Start it once per user session — any of these work:
+
+```sh
+# In ~/.zshrc / ~/.bashrc:
+pgrep -x tad >/dev/null || tad watch &
+
+# In ~/.tmux.conf (or .tmux.local.conf):
+set-hook -g session-created 'run-shell "pgrep -x tad >/dev/null || tad watch &"'
+
+# As a systemd-user service: ~/.config/systemd/user/tad-watch.service
+#   [Service] ExecStart=/usr/bin/tad watch
+#   [Install] WantedBy=default.target
+# then: systemctl --user enable --now tad-watch
+```
+
+A pidfile (`$XDG_STATE_HOME/tad/watch.pid`) guards against double-running
+— a second `tad watch` exits immediately. Per-agent cooldown
+(`ui.auto_popup_cooldown_secs`, default 300s) keeps the same idle agent
+from re-popping every tick; agent activity resets the cooldown.
+
+Tune (or disable) via `~/.config/tad/config.yaml`:
+
+```yaml
+ui:
+  auto_popup: true                # set false to fully silence the watcher
+  auto_popup_idle_secs: 30        # Active→Idle threshold
+  auto_popup_cooldown_secs: 300   # per-agent re-pop suppression
+  auto_popup_width: 80%
+  auto_popup_height: 80%
+```
+
+The popup runs `tad --select-agent <target>` — that's also a useful
+direct invocation if you want a hotkey to jump straight to a particular
+agent in the Agents view.
 
 ## Groups config
 

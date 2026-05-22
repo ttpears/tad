@@ -10,6 +10,8 @@ mod sessions;
 mod theme;
 mod tmux;
 mod tmux_keybind;
+mod ui_config;
+mod watch;
 mod wizard;
 
 fn main() {

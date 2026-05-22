@@ -395,7 +395,18 @@ impl App {
     }
 }
 
-pub fn run() -> Result<i32> {
+/// Options for launching the dashboard. Today: open on a specific agent
+/// row (used by `tad watch` when an agent goes idle and we pop a popup
+/// from the auto-popup watcher).
+#[derive(Debug, Default, Clone)]
+pub struct RunOpts {
+    /// If Some, the dashboard opens on the Agents view with the row whose
+    /// `target` matches preselected. Missing-target = no preselection
+    /// (we still open on Agents).
+    pub select_agent: Option<String>,
+}
+
+pub fn run_with(opts: RunOpts) -> Result<i32> {
     // First-launch wizard: offer it when the user has no groups defined yet
     // (file missing, file empty, or `groups:` key absent). The wizard owns
     // its own terminal; on return, fall through to the dashboard.
@@ -412,7 +423,7 @@ pub fn run() -> Result<i32> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app_loop(&mut terminal);
+    let result = app_loop(&mut terminal, opts);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -456,8 +467,21 @@ fn jump_to_pane(target: &str) -> Result<i32> {
     }
 }
 
-fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<App> {
+fn app_loop<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    opts: RunOpts,
+) -> Result<App> {
     let mut app = App::new();
+    // Honor --select-agent: jump to Agents and try to select the matching
+    // row. If the target isn't in the scan (agent vanished between the
+    // watcher noticing and us launching), we still open on Agents — the
+    // first row stays selected.
+    if let Some(target) = &opts.select_agent {
+        app.view = View::Agents;
+        if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
+            app.list_state_agents.select(Some(idx));
+        }
+    }
     let mut last_view = app.view;
     let mut last_refresh = Instant::now();
     let refresh_every = Duration::from_millis(1500);
@@ -1048,7 +1072,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
         .title(" preview ");
     let lines: Vec<Line> = match app.selected() {
         Some(name) => match app.view {
-            View::Sessions => preview_session(&name, &app.theme),
+            View::Sessions => preview_session(&app.data, &name, &app.theme),
             View::Groups => preview_group(&app.data, &name, &app.theme),
             View::Hosts => preview_host(&app.data, &name, &app.theme),
             View::Agents => preview_agent(&app.data, &name, &app.theme),
@@ -1064,13 +1088,18 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
-fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let windows = tmux::run([
-        "list-windows",
+fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
+    // Per-pane breakdown so the preview shows what's actually running where,
+    // not just a window count. We cross-reference data.agents so panes
+    // hosting a claude process get a marker — the Sessions view now hints
+    // at the Agents view rather than feeling disconnected from it.
+    let panes_raw = tmux::run([
+        "list-panes",
         "-t",
         name,
-        "-F",
-        "  #{window_index}: #{window_name}  (#{window_panes} panes)",
+        "-aF",
+        // session\twindow_idx\twindow_name\tpane_idx\tpane_current_command\tpane_current_path
+        "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}",
     ])
     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     .unwrap_or_default();
@@ -1083,6 +1112,10 @@ fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
     ])
     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     .unwrap_or_default();
+    let attached = tmux::run(["display-message", "-p", "-t", name, "#{session_attached}"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
     let mut lines = vec![Line::from(vec![
         Span::styled("session: ", Style::default().fg(theme.muted)),
         Span::styled(
@@ -1092,13 +1125,84 @@ fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    lines.push(Line::from(""));
-    for l in windows.lines() {
+
+    if attached != "0" && !attached.is_empty() {
         lines.push(Line::from(Span::styled(
-            l.to_string(),
-            Style::default().fg(theme.fg),
+            format!("  attached by {} client(s)", attached),
+            Style::default().fg(theme.success),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  detached".to_string(),
+            Style::default().fg(theme.muted),
         )));
     }
+    lines.push(Line::from(""));
+
+    // Group panes by window for a sensible visual layout.
+    let mut by_window: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> =
+        std::collections::BTreeMap::new();
+    for line in panes_raw.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 6 {
+            continue;
+        }
+        let window_key = format!("{:>3}: {}", parts[1], parts[2]);
+        by_window.entry(window_key).or_default().push((
+            parts[3].to_string(),
+            parts[4].to_string(),
+            parts[5].to_string(),
+            format!("{}:{}.{}", parts[0], parts[1], parts[3]),
+        ));
+    }
+
+    if by_window.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no panes — session probably just died)".to_string(),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    for (window_label, panes) in by_window {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} ({} pane{})",
+                window_label,
+                panes.len(),
+                if panes.len() == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (pane_idx, cmd, cwd, target) in panes {
+            let is_agent = data.agents.iter().any(|a| a.target == target);
+            // Lozenge marks claude-hosting panes so the Sessions view
+            // surfaces what the Agents view tracks, without an emoji.
+            let marker = if is_agent { "◆ " } else { "  " };
+            let marker_style = if is_agent {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            let cwd_short = cwd_for_display(std::path::Path::new(&cwd));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("    {}.", pane_idx),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::raw(" "),
+                Span::styled(marker.to_string(), marker_style),
+                Span::styled(
+                    format!("{:<14}", truncate(&cmd, 14)),
+                    Style::default().fg(theme.fg),
+                ),
+                Span::raw(" "),
+                Span::styled(cwd_short, Style::default().fg(theme.muted)),
+            ]));
+        }
+    }
+
     lines.push(Line::from(""));
     for l in meta.lines() {
         lines.push(Line::from(Span::styled(

@@ -14,7 +14,7 @@ function _tad_complete() {
 
    # ---- top-level (position 1) ----
    if (( COMP_CWORD == 1 )); then
-      local subs="groups config status tmux-keybind -g"
+      local subs="groups config status tmux-keybind watch -g"
       local sessions groups
       sessions=$(tad complete 2>/dev/null | cut -f2 | cut -d: -f1)
       groups=$(tad groups list 2>/dev/null | cut -d: -f1)

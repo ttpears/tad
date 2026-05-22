@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{agents, dashboard, groups, sessions, tmux_keybind};
+use crate::{agents, dashboard, groups, sessions, tmux_keybind, watch};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,6 +21,12 @@ pub struct Cli {
 
     /// Attach/create a session by name.
     pub session: Option<String>,
+
+    /// Open the dashboard on the Agents view with the given pane target
+    /// preselected. `tad watch` uses this to point you at the agent that
+    /// just went idle.
+    #[arg(long, value_name = "SESSION:WINDOW.PANE")]
+    pub select_agent: Option<String>,
 
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -54,6 +60,23 @@ pub enum Cmd {
         /// Mtime within this many seconds = "active". Default 30s.
         #[arg(long, default_value_t = 30)]
         active_secs: u64,
+    },
+
+    /// Long-running watcher: poll all tmux panes for Claude Code agents
+    /// and pop the dashboard (with the agent preselected) when one
+    /// transitions Active → Idle. The signal is "transcript hasn't been
+    /// written in `ui.auto_popup_idle_secs`" — i.e. agent stopped
+    /// thinking, probably awaiting your input.
+    ///
+    /// Run once per user session: drop `tad watch &` in your shell rc,
+    /// add it to a tmux startup hook, or run it as a systemd-user
+    /// service. A pidfile guard makes a second `tad watch` exit
+    /// immediately. Set `ui.auto_popup: false` in config.yaml to fully
+    /// silence the watcher without removing the startup hook.
+    Watch {
+        /// Poll interval in seconds. Default 5.
+        #[arg(long, default_value_t = 5)]
+        interval_secs: u64,
     },
 
     /// Print or install a tmux popup keybinding that opens the dashboard.
@@ -162,9 +185,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(name) = cli.session {
         return sessions::attach_or_create(&name);
     }
-    // No args → TUI dashboard. Fall back to a numbered picker if the
-    // terminal can't be controlled (non-TTY, weird env, etc.).
-    match dashboard::run() {
+    // No subcommand → TUI dashboard. `--select-agent <target>` opens the
+    // Agents view with that row preselected (used by `tad watch`).
+    let opts = dashboard::RunOpts {
+        select_agent: cli.select_agent,
+    };
+    match dashboard::run_with(opts) {
         Ok(rc) => Ok(rc),
         Err(e) => {
             eprintln!(
@@ -188,6 +214,7 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             print_status(active_secs);
             Ok(0)
         }
+        Cmd::Watch { interval_secs } => watch::run(interval_secs),
         Cmd::TmuxKeybind {
             install,
             uninstall,
