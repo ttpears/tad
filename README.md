@@ -236,8 +236,43 @@ tad groups-add <name> <layout> <host>...
 tad groups-rm <name>         remove a group
 tad groups-edit              open the groups file in $EDITOR
 
+tad tmux-keybind             print a tmux popup binding for the dashboard
+tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
+
 tad complete                 emit completion source (used by shell)
 ```
+
+## Jumping back to the dashboard from inside tmux
+
+Once you've attached into a tmux session, you usually want to flip back
+to the dashboard without leaving — open another group, switch sessions,
+kill a stale one. `tad tmux-keybind --install` writes a `display-popup`
+binding so you can:
+
+```
+prefix + D     # opens tad in a tmux popup; quit tad and you're back
+```
+
+The binding lives in a marker-delimited managed block, so re-running the
+command updates in place and any other config in the file is preserved.
+`tad tmux-keybind` (no flags) prints the snippet to stdout if you'd
+rather paste it yourself; `tad tmux-keybind --uninstall` removes it.
+
+**Where it writes.** To avoid clobbering Oh-My-Tmux / framework-managed
+`~/.tmux.conf` files, the target is auto-detected in this order:
+
+1. `--conf-path PATH` if given
+2. `$TAD_TMUX_CONF` env var
+3. `~/.tmux.conf.local`  (Oh-My-Tmux / gpakosz convention)
+4. `~/.tmux.local.conf`  (alternate spelling)
+5. `$XDG_CONFIG_HOME/tmux/tmux.conf` if present
+6. `~/.tmux.conf` (created if needed)
+
+Running `tad tmux-keybind` without `--install` always prints the
+resolved target path, so you can see where it would write before doing
+anything. Override key/dimensions with `--key`, `--width`, `--height`.
+
+Requires tmux 3.2+ for `display-popup`.
 
 ## Groups config
 
