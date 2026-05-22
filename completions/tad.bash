@@ -1,5 +1,5 @@
 function _tad_complete() {
-   local cur prev opts
+   local cur prev
    cur="${COMP_WORDS[COMP_CWORD]}"
    prev="${COMP_WORDS[COMP_CWORD-1]}"
 
@@ -7,17 +7,17 @@ function _tad_complete() {
    # new group, since tad doesn't otherwise track a host inventory.
    _tad_all_hosts() {
       local g
-      for g in $(tad groups 2>/dev/null | cut -d: -f1); do
-         tad group-hosts "$g" 2>/dev/null
+      for g in $(tad groups list 2>/dev/null | cut -d: -f1); do
+         tad groups hosts "$g" 2>/dev/null
       done | sort -u
    }
 
-   # First arg: subcommands + session names + group names + -g
+   # ---- top-level (position 1) ----
    if (( COMP_CWORD == 1 )); then
-      local subs="complete groups group-hosts groups-add groups-rm groups-edit config tmux-keybind status -g"
+      local subs="groups config status tmux-keybind -g"
       local sessions groups
       sessions=$(tad complete 2>/dev/null | cut -f2 | cut -d: -f1)
-      groups=$(tad groups 2>/dev/null | cut -d: -f1)
+      groups=$(tad groups list 2>/dev/null | cut -d: -f1)
       COMPREPLY=( $(compgen -W "$subs $sessions $groups" -- "$cur") )
       compopt -o nosort 2>/dev/null
       return
@@ -26,45 +26,43 @@ function _tad_complete() {
    # tad -g <group> [<host>]
    if [[ ${COMP_WORDS[1]} == -g ]]; then
       if (( COMP_CWORD == 2 )); then
-         opts=$(tad groups 2>/dev/null | cut -d: -f1)
-         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+         COMPREPLY=( $(compgen -W "$(tad groups list 2>/dev/null | cut -d: -f1)" -- "$cur") )
       elif (( COMP_CWORD == 3 )); then
-         opts=$(tad group-hosts "${COMP_WORDS[2]}" 2>/dev/null)
-         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+         COMPREPLY=( $(compgen -W "$(tad groups hosts "${COMP_WORDS[2]}" 2>/dev/null)" -- "$cur") )
       fi
       return
    fi
 
-   # tad group-hosts <group> | tad groups-rm <group>
-   if [[ $prev == group-hosts || $prev == groups-rm ]]; then
-      opts=$(tad groups 2>/dev/null | cut -d: -f1)
-      COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
-      return
-   fi
-
-   # tad group-hosts <group> <TAB> → show hosts informationally
-   if (( COMP_CWORD >= 3 )) && [[ ${COMP_WORDS[COMP_CWORD-2]} == group-hosts ]]; then
-      opts=$(tad group-hosts "${COMP_WORDS[COMP_CWORD-1]}" 2>/dev/null)
-      COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
-      return
-   fi
-
-   # tad groups-rm <group> <TAB> → no more args
-   if (( COMP_CWORD >= 3 )) && [[ ${COMP_WORDS[COMP_CWORD-2]} == groups-rm ]]; then
-      return
-   fi
-
-   # tad groups-add <name> <layout> <host>...
-   if [[ ${COMP_WORDS[1]} == groups-add ]]; then
-      # position 2 = NAME (free-form, no completion)
-      if (( COMP_CWORD == 3 )); then
-         COMPREPLY=( $(compgen -W "panes synced-panes windows browse" -- "$cur") )
+   # ---- tad groups <sub> [args] ----
+   if [[ ${COMP_WORDS[1]} == groups ]]; then
+      # position 2 = subcommand
+      if (( COMP_CWORD == 2 )); then
+         COMPREPLY=( $(compgen -W "list hosts add rm edit" -- "$cur") )
          return
       fi
-      if (( COMP_CWORD >= 4 )); then
-         COMPREPLY=( $(compgen -W "$(_tad_all_hosts)" -- "$cur") )
-         return
-      fi
+      case ${COMP_WORDS[2]} in
+         hosts|rm)
+            if (( COMP_CWORD == 3 )); then
+               COMPREPLY=( $(compgen -W "$(tad groups list 2>/dev/null | cut -d: -f1)" -- "$cur") )
+            elif (( COMP_CWORD == 4 )) && [[ ${COMP_WORDS[2]} == hosts ]]; then
+               # Informational: show hosts in the chosen group
+               COMPREPLY=( $(compgen -W "$(tad groups hosts "${COMP_WORDS[3]}" 2>/dev/null)" -- "$cur") )
+            fi
+            return
+            ;;
+         add)
+            # tad groups add <name> <layout> <host>...
+            # position 3 = NAME (free-form, no completion)
+            if (( COMP_CWORD == 4 )); then
+               COMPREPLY=( $(compgen -W "panes synced-panes windows browse" -- "$cur") )
+               return
+            fi
+            if (( COMP_CWORD >= 5 )); then
+               COMPREPLY=( $(compgen -W "$(_tad_all_hosts)" -- "$cur") )
+               return
+            fi
+            ;;
+      esac
    fi
 }
 

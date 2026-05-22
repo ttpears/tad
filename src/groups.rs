@@ -35,7 +35,10 @@ pub fn add(name: &str, layout: &str, hosts: &[String]) -> Result<i32> {
     }
     let mut doc = config::load()?;
     if doc.groups.contains_key(name) {
-        bail!("group {} exists (use groups-edit or groups-rm first)", name);
+        bail!(
+            "group {} exists (use `tad groups edit` or `tad groups rm` first)",
+            name
+        );
     }
     doc.groups.insert(
         name.to_string(),

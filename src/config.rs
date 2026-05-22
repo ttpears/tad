@@ -69,7 +69,7 @@ fn default_meta() -> serde_yml::Value {
     let mut m = serde_yml::Mapping::new();
     m.insert(
         "description".into(),
-        "Groups for `tad -g <name>`. Edit directly or via tad groups-{add,rm,edit}.".into(),
+        "Groups for `tad -g <name>`. Edit directly or via `tad groups <add|rm|edit>`.".into(),
     );
     m.insert(
         "schema".into(),

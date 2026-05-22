@@ -204,14 +204,14 @@ function tad() {
    would conflict.
 4. **Define your groups**. Either let the first-launch wizard /
    `tad config` mine them from your shell history and `~/.ssh/config`,
-   or open `tad groups-edit` and hand-edit, or run `tad groups-add`
+   or open `tad groups edit` and hand-edit, or run `tad groups add`
    for a single-group interactive prompt. The config lives at
    `~/.config/tad/groups.yaml`. The old function knew nothing about
    groups; everything else is a strict superset of the old behavior so
    existing muscle memory still works:
    - `tad <name>` — attach or create (same as old)
    - `tad` — opens the dashboard (was: list sessions)
-   - new: `tad -g <group>`, `tad groups`, `tad config`, `tad complete`, etc.
+   - new: `tad -g <group>`, `tad groups`, `tad config`, etc.
 5. **Optional: pick a theme**. Drop `theme: tokyonight` into
    `~/.config/tad/config.yaml` (or any of the built-ins; see Theme
    section).
@@ -229,12 +229,14 @@ tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
 tad config                   first-launch wizard / groups editor (TUI)
-tad groups                   list known groups
-tad group-hosts <group>      list hosts in a group
-tad groups-add <name> <layout> <host>...
+
+tad groups [list]            list known groups (default subcommand)
+tad groups hosts <group>     list hosts in a group
+tad groups add <name> <layout> <host>...
                              add a group (layout: panes|synced-panes|windows|browse)
-tad groups-rm <name>         remove a group
-tad groups-edit              open the groups file in $EDITOR
+                             — with no args, launches an interactive prompt
+tad groups rm <name>         remove a group
+tad groups edit              open the groups file in $EDITOR
 
 tad tmux-keybind             print a tmux popup binding for the dashboard
 tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
@@ -242,9 +244,11 @@ tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
 tad status                   one-line summary of running Claude Code agents
                              across all tmux panes — for `#(tad status)` in
                              your status-line
-
-tad complete                 emit completion source (used by shell)
 ```
+
+The `tad groups …` family used to live as flat subcommands
+(`tad groups-add`, `tad group-hosts`, etc.). Those still parse but error
+with a one-line hint pointing to the new form — update any scripts.
 
 ## Jumping back to the dashboard from inside tmux
 
