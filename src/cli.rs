@@ -280,11 +280,22 @@ fn print_status(active_secs: u64) {
         return;
     }
     let c = agents::counts(&agents, std::time::Duration::from_secs(active_secs));
-    // Awaiting-input is the headline number when any agent is waiting on
-    // you — the whole point of the cockpit is to surface that.
+    // "Waiting" only counts AwaitingInput agents whose transcript was
+    // written recently — claude sessions that have been sitting idle at
+    // the prompt for hours/days are technically "AwaitingInput" but the
+    // user clearly walked away, and lighting up the status bar over them
+    // teaches the user to ignore the signal.
+    let ui = crate::ui_config::load();
+    let now = std::time::SystemTime::now();
     let awaiting = agents
         .iter()
-        .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
+        .filter(|a| {
+            a.attention == crate::transcript::Attention::AwaitingInput
+                && a.last_activity
+                    .and_then(|t| now.duration_since(t).ok())
+                    .map(|age| age <= ui.awaiting_freshness)
+                    .unwrap_or(false)
+        })
         .count();
     let base = if c.idle == 0 {
         format!("claude: {}", c.total)

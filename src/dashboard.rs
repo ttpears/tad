@@ -1106,14 +1106,36 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
     // the "is this agent actually waiting for me right now" answer,
     // independent of mtime. Fall back to mtime otherwise.
     let (marker_text, marker_style, status_text, status_style) = match agent.attention {
-        crate::transcript::Attention::AwaitingInput => (
-            "! ",
-            Style::default().fg(theme.warning),
-            "awaiting input".to_string(),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ),
+        crate::transcript::Attention::AwaitingInput => {
+            // Distinguish fresh-waiting (the loud signal: agent finished
+            // just now, you should respond) from stale-waiting (the
+            // muted signal: agent ended hours ago, you walked away).
+            let freshness = ui_config::load().awaiting_freshness;
+            let age = agent
+                .last_activity
+                .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
+            let is_fresh = age.map(|a| a <= freshness).unwrap_or(false);
+            let age_label = age
+                .map(|a| format!(" · {}", agents::format_elapsed(a)))
+                .unwrap_or_default();
+            if is_fresh {
+                (
+                    "! ",
+                    Style::default().fg(theme.warning),
+                    format!("awaiting input{age_label}"),
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    "· ",
+                    Style::default().fg(theme.muted),
+                    format!("awaiting (stale){age_label}"),
+                    Style::default().fg(theme.muted),
+                )
+            }
+        }
         crate::transcript::Attention::Working => (
             "● ",
             Style::default().fg(theme.success),

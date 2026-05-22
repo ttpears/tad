@@ -34,6 +34,14 @@ pub struct UiConfig {
     /// 5m / 30m / 2h. Snoozes are honored by `tad watch` and persist
     /// across watcher restarts (stored in $XDG_STATE_HOME/tad/snooze.yaml).
     pub snooze_intervals: Vec<Duration>,
+    /// How recent the transcript mtime must be for an AwaitingInput
+    /// agent to count toward the "N waiting" tail in `tad status`.
+    /// Default 10 minutes — long enough to span a brief
+    /// coffee-break, short enough that day-old sessions the user has
+    /// clearly walked away from don't keep the status bar alarming.
+    /// The dashboard's Agents view still surfaces stale AwaitingInput
+    /// rows (with their age) so abandoned work isn't invisible.
+    pub awaiting_freshness: Duration,
 }
 
 impl Default for UiConfig {
@@ -49,6 +57,7 @@ impl Default for UiConfig {
                 Duration::from_secs(30 * 60),
                 Duration::from_secs(2 * 3600),
             ],
+            awaiting_freshness: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -63,6 +72,7 @@ struct UiWire {
     auto_popup_height: Option<String>,
     auto_popup_cooldown_secs: Option<u64>,
     snooze_intervals_secs: Option<Vec<u64>>,
+    awaiting_freshness_secs: Option<u64>,
 }
 
 /// The top-level fragment we deserialize: just the `ui:` key. Other keys
@@ -110,6 +120,11 @@ pub fn load() -> UiConfig {
             .map(|v| v.into_iter().map(Duration::from_secs).collect())
             .filter(|v: &Vec<Duration>| !v.is_empty())
             .unwrap_or(defaults.snooze_intervals),
+        awaiting_freshness: wire
+            .ui
+            .awaiting_freshness_secs
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.awaiting_freshness),
     }
 }
 
@@ -148,6 +163,11 @@ mod tests {
                 .map(|v| v.into_iter().map(Duration::from_secs).collect())
                 .filter(|v: &Vec<Duration>| !v.is_empty())
                 .unwrap_or(defaults.snooze_intervals),
+            awaiting_freshness: wire
+                .ui
+                .awaiting_freshness_secs
+                .map(Duration::from_secs)
+                .unwrap_or(defaults.awaiting_freshness),
         }
     }
 
