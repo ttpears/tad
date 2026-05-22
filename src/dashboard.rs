@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::{
+    agents::{self, Agent},
     config, groups,
     sessions::{self, Session},
     theme::{self, Theme},
@@ -142,6 +143,7 @@ enum View {
     Sessions,
     Groups,
     Hosts,
+    Agents,
 }
 
 impl View {
@@ -149,14 +151,16 @@ impl View {
         match self {
             View::Sessions => View::Groups,
             View::Groups => View::Hosts,
-            View::Hosts => View::Sessions,
+            View::Hosts => View::Agents,
+            View::Agents => View::Sessions,
         }
     }
     fn prev(self) -> Self {
         match self {
-            View::Sessions => View::Hosts,
+            View::Sessions => View::Agents,
             View::Groups => View::Sessions,
             View::Hosts => View::Groups,
+            View::Agents => View::Hosts,
         }
     }
     fn title(self) -> &'static str {
@@ -164,6 +168,7 @@ impl View {
             View::Sessions => "Sessions",
             View::Groups => "Groups",
             View::Hosts => "Hosts",
+            View::Agents => "Agents",
         }
     }
     fn index(self) -> usize {
@@ -171,6 +176,7 @@ impl View {
             View::Sessions => 0,
             View::Groups => 1,
             View::Hosts => 2,
+            View::Agents => 3,
         }
     }
     fn slug(self) -> &'static str {
@@ -178,6 +184,7 @@ impl View {
             View::Sessions => "sessions",
             View::Groups => "groups",
             View::Hosts => "hosts",
+            View::Agents => "agents",
         }
     }
     fn from_slug(s: &str) -> Option<Self> {
@@ -185,6 +192,7 @@ impl View {
             "sessions" => Some(View::Sessions),
             "groups" => Some(View::Groups),
             "hosts" => Some(View::Hosts),
+            "agents" => Some(View::Agents),
             _ => None,
         }
     }
@@ -209,6 +217,8 @@ struct AppData {
     groups: Vec<(String, config::Group)>,
     /// host → list of groups it belongs to
     hosts: Vec<(String, Vec<String>)>,
+    /// Claude Code agents discovered across tmux panes.
+    agents: Vec<Agent>,
 }
 
 impl AppData {
@@ -233,10 +243,12 @@ impl AppData {
             gs.sort();
         }
         let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
+        let agents = agents::scan();
         Self {
             sessions,
             groups,
             hosts,
+            agents,
         }
     }
 }
@@ -251,6 +263,8 @@ enum OpenTarget {
     },
     Group(String),
     Host(String),
+    /// Jump to a specific tmux pane by `session:window.pane` target.
+    JumpToPane(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -272,6 +286,7 @@ struct App {
     list_state_sessions: ListState,
     list_state_groups: ListState,
     list_state_hosts: ListState,
+    list_state_agents: ListState,
     filter: TextInput,
     input_mode: InputMode,
     new_session_name: TextInput,
@@ -299,12 +314,19 @@ impl App {
         });
         let mut h = ListState::default();
         h.select(if data.hosts.is_empty() { None } else { Some(0) });
+        let mut a = ListState::default();
+        a.select(if data.agents.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
         App {
             view: load_last_view().unwrap_or(View::Sessions),
             data,
             list_state_sessions: s,
             list_state_groups: g,
             list_state_hosts: h,
+            list_state_agents: a,
             filter: TextInput::new(),
             input_mode: InputMode::None,
             new_session_name: TextInput::new(),
@@ -321,14 +343,19 @@ impl App {
             View::Sessions => &mut self.list_state_sessions,
             View::Groups => &mut self.list_state_groups,
             View::Hosts => &mut self.list_state_hosts,
+            View::Agents => &mut self.list_state_agents,
         }
     }
 
     fn items(&self) -> Vec<String> {
+        // For Agents we key items by the unique target (session:window.pane)
+        // so selection survives across refreshes even when window names
+        // collide. Lookups go back through `data.agents`.
         let iter: Box<dyn Iterator<Item = String>> = match self.view {
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
+            View::Agents => Box::new(self.data.agents.iter().map(|a| a.target.clone())),
         };
         if self.filter.is_empty() {
             iter.collect()
@@ -343,6 +370,7 @@ impl App {
             View::Sessions => &self.list_state_sessions,
             View::Groups => &self.list_state_groups,
             View::Hosts => &self.list_state_hosts,
+            View::Agents => &self.list_state_agents,
         };
         let idx = state.selected()?;
         self.items().get(idx).cloned()
@@ -355,6 +383,7 @@ impl App {
             (&mut self.list_state_sessions, self.data.sessions.len()),
             (&mut self.list_state_groups, self.data.groups.len()),
             (&mut self.list_state_hosts, self.data.hosts.len()),
+            (&mut self.list_state_agents, self.data.agents.len()),
         ] {
             match (state.selected(), len) {
                 (_, 0) => state.select(None),
@@ -392,7 +421,33 @@ pub fn run() -> Result<i32> {
         }
         Some(OpenTarget::Group(name)) => groups::open(&name, None),
         Some(OpenTarget::Host(name)) => sessions::attach_or_create_remote(&name),
+        Some(OpenTarget::JumpToPane(target)) => jump_to_pane(&target),
         None => Ok(1),
+    }
+}
+
+/// Jump to a tmux pane. When tad is invoked from inside a tmux client
+/// (the common case via the popup keybind), `switch-client` flips us there
+/// and the popup closes. Outside tmux, fall back to `attach -t` which
+/// brings up the session containing the pane.
+fn jump_to_pane(target: &str) -> Result<i32> {
+    let inside_tmux = std::env::var_os("TMUX").is_some();
+    if inside_tmux {
+        let status = std::process::Command::new("tmux")
+            .args(["switch-client", "-t", target])
+            .status();
+        if matches!(&status, Ok(s) if s.success()) {
+            return Ok(0);
+        }
+    }
+    // Outside tmux: split target on ':' to get the session name and attach.
+    let session = target.split(':').next().unwrap_or(target);
+    let attach = std::process::Command::new("tmux")
+        .args(["attach", "-t", session])
+        .status();
+    match attach {
+        Ok(s) if s.success() => Ok(0),
+        _ => Ok(1),
     }
 }
 
@@ -450,6 +505,7 @@ fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
                     View::Sessions => OpenTarget::AttachExisting(name),
                     View::Groups => OpenTarget::Group(name),
                     View::Hosts => OpenTarget::Host(name),
+                    View::Agents => OpenTarget::JumpToPane(name),
                 });
                 app.should_quit = true;
             }
@@ -556,6 +612,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('1') => app.view = View::Sessions,
         KeyCode::Char('2') => app.view = View::Groups,
         KeyCode::Char('3') => app.view = View::Hosts,
+        KeyCode::Char('4') => app.view = View::Agents,
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
@@ -578,6 +635,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                     View::Sessions => OpenTarget::AttachExisting(name),
                     View::Groups => OpenTarget::Group(name),
                     View::Hosts => OpenTarget::Host(name),
+                    View::Agents => OpenTarget::JumpToPane(name),
                 });
                 app.should_quit = true;
             }
@@ -655,10 +713,26 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = [View::Sessions, View::Groups, View::Hosts]
-        .iter()
-        .map(|v| Line::from(v.title()))
-        .collect();
+    // Agents tab is annotated with live counts so you don't have to switch
+    // into the view to know what's going on.
+    let agents_title = if app.data.agents.is_empty() {
+        "Agents".to_string()
+    } else {
+        let c = agents::counts(&app.data.agents, std::time::Duration::from_secs(30));
+        if c.idle == 0 {
+            format!("Agents ({})", c.total)
+        } else if c.active == 0 {
+            format!("Agents ({} idle)", c.total)
+        } else {
+            format!("Agents ({}/{})", c.active, c.total)
+        }
+    };
+    let titles: Vec<Line> = vec![
+        Line::from(View::Sessions.title()),
+        Line::from(View::Groups.title()),
+        Line::from(View::Hosts.title()),
+        Line::from(agents_title),
+    ];
     let tabs = Tabs::new(titles)
         .block(
             Block::default()
@@ -800,6 +874,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
                 View::Sessions => format_session_line(&app.data, name, theme),
                 View::Groups => format_group_line(&app.data, name, theme),
                 View::Hosts => format_host_line(&app.data, name, theme),
+                View::Agents => format_agent_line(&app.data, name, theme),
             };
             ListItem::new(line)
         })
@@ -829,6 +904,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         View::Sessions => &mut app.list_state_sessions,
         View::Groups => &mut app.list_state_groups,
         View::Hosts => &mut app.list_state_hosts,
+        View::Agents => &mut app.list_state_agents,
     };
     f.render_stateful_widget(list, area, state);
 }
@@ -884,6 +960,65 @@ fn format_group_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static>
     ])
 }
 
+fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
+    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
+        return Line::from(target.to_string());
+    };
+    let active_window = std::time::Duration::from_secs(30);
+    let (marker_text, marker_style, status_text, status_style) =
+        match agent.activity_status(active_window) {
+            agents::ActivityStatus::Active(d) => (
+                "● ",
+                Style::default().fg(theme.success),
+                format!("active · {}", agents::format_elapsed(d)),
+                Style::default().fg(theme.success),
+            ),
+            agents::ActivityStatus::Idle(d) => (
+                "○ ",
+                Style::default().fg(theme.muted),
+                format!("idle {}", agents::format_elapsed(d)),
+                Style::default().fg(theme.muted),
+            ),
+            agents::ActivityStatus::NoTranscript => (
+                "? ",
+                Style::default().fg(theme.warning),
+                "no transcript".to_string(),
+                Style::default().fg(theme.warning),
+            ),
+        };
+    let cwd_short = cwd_for_display(&agent.cwd);
+    Line::from(vec![
+        Span::styled(marker_text, marker_style),
+        Span::styled(
+            format!("{:<22}", truncate(target, 22)),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<28}", truncate(&cwd_short, 28)),
+            Style::default().fg(theme.fg),
+        ),
+        Span::raw(" "),
+        Span::styled(status_text, status_style),
+    ])
+}
+
+/// Shorten a cwd for display: replace $HOME prefix with `~`. The full path
+/// is still shown in the preview pane.
+fn cwd_for_display(p: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = p.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    p.display().to_string()
+}
+
 fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     let in_groups = data
         .hosts
@@ -911,6 +1046,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
             View::Sessions => preview_session(&name, &app.theme),
             View::Groups => preview_group(&app.data, &name, &app.theme),
             View::Hosts => preview_host(&app.data, &name, &app.theme),
+            View::Agents => preview_agent(&app.data, &name, &app.theme),
         },
         None => vec![Line::from(Span::styled(
             "no selection",
@@ -1029,6 +1165,64 @@ fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>>
     lines
 }
 
+fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
+        return vec![Line::from(Span::styled(
+            "agent gone — refresh",
+            Style::default().fg(theme.muted),
+        ))];
+    };
+    let active_window = std::time::Duration::from_secs(30);
+    let status = match agent.activity_status(active_window) {
+        agents::ActivityStatus::Active(d) => {
+            format!("● active ({})", agents::format_elapsed(d))
+        }
+        agents::ActivityStatus::Idle(d) => {
+            format!("○ idle for {}", agents::format_elapsed(d))
+        }
+        agents::ActivityStatus::NoTranscript => "? no transcript on disk".to_string(),
+    };
+    let kv = |k: &str, v: String| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
+            Span::styled(v, Style::default().fg(theme.fg)),
+        ])
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("agent: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                target.to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        kv("status", status),
+        kv("session", agent.session.clone()),
+        kv(
+            "window",
+            format!("{} ({})", agent.window_name, agent.window_index),
+        ),
+        kv("pane", agent.pane_index.clone()),
+        kv("cwd", agent.cwd.display().to_string()),
+        kv("pid", agent.claude_pid.to_string()),
+    ];
+    if let Some(tp) = &agent.transcript_path {
+        let short = tp.file_name().map(|s| s.to_string_lossy().into_owned());
+        if let Some(name) = short {
+            lines.push(kv("transcript", name));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↵ jump to this pane",
+        Style::default().fg(theme.muted),
+    )));
+    lines
+}
+
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
     let line = match app.input_mode {
@@ -1072,7 +1266,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             let mut spans = Vec::new();
             spans.extend(bind("↑↓/jk", "nav"));
             spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3", "jump"));
+            spans.extend(bind("1/2/3/4", "jump"));
             spans.extend(bind("↵", "open"));
             spans.extend(bind("n", "new"));
             if app.view == View::Sessions {

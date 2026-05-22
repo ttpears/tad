@@ -239,6 +239,10 @@ tad groups-edit              open the groups file in $EDITOR
 tad tmux-keybind             print a tmux popup binding for the dashboard
 tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
 
+tad status                   one-line summary of running Claude Code agents
+                             across all tmux panes — for `#(tad status)` in
+                             your status-line
+
 tad complete                 emit completion source (used by shell)
 ```
 
@@ -273,6 +277,55 @@ resolved target path, so you can see where it would write before doing
 anything. Override key/dimensions with `--key`, `--width`, `--height`.
 
 Requires tmux 3.2+ for `display-popup`.
+
+## Claude Code cockpit: Agents view + status-line segment
+
+If you run multiple Claude Code agents across multiple tmux panes — one per
+repo, one per worktree, parallel investigations — tad has a view for that.
+
+**The Agents tab** (the 4th dashboard tab, jump with `4`) lists every tmux
+pane on this server whose process tree contains a `claude` process,
+showing `<session>:<window>.<pane>  <cwd>  <status>` per row. Status comes
+from the mtime of the most recent transcript jsonl under
+`~/.claude/projects/<encoded-cwd>/`:
+
+```
+●  active · 2s        currently working
+○  idle 4m            transcript hasn't been written in a while
+?  no transcript      can't find a transcript on disk
+```
+
+`Enter` runs `tmux switch-client` to jump straight to that pane. If
+you've installed the popup keybind, the loop is:
+
+```
+prefix + D  →  4  (Agents tab)  →  ↑↓ to the blocked one  →  ↵  →  reply
+```
+
+**The status-line segment** so you never have to look first. Add this to
+your tmux config (auto-detected location — `~/.tmux.conf.local`,
+`~/.tmux.local.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf`, or
+`~/.tmux.conf`):
+
+```
+set -g status-interval 5
+set -g status-right '#(tad status) | %H:%M '
+```
+
+You'll see `claude: 3/12` (3 currently active, 12 total) in your status
+line. Format compacts to `claude: N` if all are active, or
+`claude: N idle` if none are active. Prints nothing when no agents are
+running, so when you're not using Claude Code your status line stays
+clean.
+
+The "active" threshold is the last 30s of transcript-write activity by
+default. Tune with `tad status --active-secs N`. tad does no caching, so
+if your status interval is low (1s) and you have hundreds of panes, the
+per-tick scan cost adds up — keep it at 5–15s.
+
+Detection is process-tree based (walks `/proc/<pane_pid>/task/*/children`
+looking for a `claude` comm), so it catches any agent regardless of how
+it was started.
 
 ## Groups config
 

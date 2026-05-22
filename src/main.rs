@@ -1,6 +1,7 @@
 use clap::Parser;
 use owo_colors::OwoColorize;
 
+mod agents;
 mod cli;
 mod config;
 mod dashboard;
