@@ -1,12 +1,12 @@
 //! Discovery layer for Claude Code agents running across tmux panes.
 //!
-//! The killer-loop dashboard view ("Agents") and the tmux status-line segment
-//! (`tad status`) both read from this module. Detection is process-tree based:
-//! enumerate every tmux pane, walk the descendant pids of each pane shell, and
-//! match a process named `claude`. Activity comes from the mtime of the most
-//! recent `.jsonl` transcript file under `~/.claude/projects/<encoded-cwd>/`
-//! — that's the SDK's standard session-transcript format, so it's the most
-//! stable signal we can read without hooks.
+//! The "Agents" dashboard view and the tmux status-line segment (`tad status`)
+//! both read from this module. Detection is process-tree based: enumerate
+//! every tmux pane, walk the descendant pids of each pane shell, and match a
+//! process named `claude`. Activity comes from the mtime of the most recent
+//! `.jsonl` transcript file under `~/.claude/projects/<encoded-cwd>/` — that's
+//! the SDK's standard session-transcript format, so it's the most stable
+//! signal we can read without hooks.
 //!
 //! Linux-only: process-tree walking reads `/proc/<pid>/task/<tid>/children`.
 //! tad's release artifacts are Linux x86_64, so this is in line with the
