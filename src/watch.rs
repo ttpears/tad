@@ -19,22 +19,59 @@ use std::time::{Duration, Instant};
 
 use crate::agents::{self, ActivityStatus, Agent};
 use crate::snooze::{self, SnoozeState};
+use crate::transcript::Attention;
 use crate::ui_config::{self, UiConfig};
 
+/// Unified agent state combining the precise transcript signal (when
+/// parseable) with the mtime-based fallback. Pop triggers are defined
+/// against transitions in this state, not in either raw input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActivityClass {
-    Active,
+enum Status {
+    /// Claude finished its turn and is sitting at the prompt expecting
+    /// you to reply. This is the precise "needs attention" signal.
+    AwaitingInput,
+    /// Either currently processing (Attention::Working) or, when the
+    /// transcript can't be classified, the mtime-based "wrote recently"
+    /// signal.
+    Busy,
+    /// Mtime stale and we don't have a precise signal. Fallback bucket
+    /// for "nothing seems to be happening."
     Idle,
 }
 
 #[derive(Debug)]
 struct AgentState {
-    last_class: ActivityClass,
+    last_status: Status,
     last_popped: Option<Instant>,
     /// Was this agent snoozed at the previous observation? Used to fire
     /// a "snooze just expired and you're still idle" pop — the snooze
     /// semantics are *remind me in X*, not *mute for X*.
     was_snoozed: bool,
+}
+
+fn classify(agent: &Agent, mtime_idle_threshold: Duration) -> Status {
+    match agent.attention {
+        Attention::AwaitingInput => Status::AwaitingInput,
+        Attention::Working => Status::Busy,
+        Attention::Unknown => match agent.activity_status(mtime_idle_threshold) {
+            ActivityStatus::Active(_) => Status::Busy,
+            // No transcript / stale transcript both fall into Idle when
+            // the precise signal isn't available.
+            _ => Status::Idle,
+        },
+    }
+}
+
+/// Decide whether a status transition deserves a popup. The precise
+/// signal (anything → AwaitingInput) is preferred; the mtime fallback
+/// (Busy → Idle) is the legacy heuristic for agents whose transcripts
+/// we can't parse.
+fn is_pop_transition(prev: Status, curr: Status) -> bool {
+    match (prev, curr) {
+        (_, Status::AwaitingInput) if prev != Status::AwaitingInput => true,
+        (Status::Busy, Status::Idle) => true,
+        _ => false,
+    }
 }
 
 pub fn run(interval_secs: u64) -> Result<i32> {
@@ -100,47 +137,40 @@ fn process_tick<P: Popper>(
     state.retain(|target, _| alive.contains(target.as_str()));
 
     for agent in agents {
-        let new_class = match agent.activity_status(idle_threshold) {
-            ActivityStatus::Active(_) => ActivityClass::Active,
-            // Both Idle(_) and NoTranscript count as "not currently working."
-            // NoTranscript usually means "agent just started and hasn't
-            // written its first jsonl event yet" — we won't pop on that.
-            _ => ActivityClass::Idle,
-        };
+        let new_status = classify(agent, idle_threshold);
         let is_snoozed_now = snooze::is_snoozed(snoozes, &agent.target, wall_now);
         let entry = state.entry(agent.target.clone()).or_insert(AgentState {
             // First time we see the agent: seed its state without firing.
-            // If they're already idle when we first observe them we don't
-            // know whether they're awaiting input or just freshly opened.
-            last_class: new_class,
+            // If they're already AwaitingInput at first sight we don't
+            // know whether they need us or they're a stale-leftover
+            // session the user already replied to.
+            last_status: new_status,
             last_popped: None,
             was_snoozed: is_snoozed_now,
         });
 
-        let was = entry.last_class;
+        let was = entry.last_status;
         let was_snoozed = entry.was_snoozed;
-        let just_transitioned = was == ActivityClass::Active && new_class == ActivityClass::Idle;
-        // Snooze-expiry: deadline passed and the agent is still idle →
-        // remind the user. This is the "remind me in 5m" semantics —
-        // snooze defers the popup, it doesn't permanently silence it.
-        let snooze_just_expired = was_snoozed && !is_snoozed_now;
-        entry.last_class = new_class;
+        let just_transitioned = is_pop_transition(was, new_status);
+        // Snooze-expiry: deadline passed and the agent is still in a
+        // pop-worthy state → remind the user. "remind me in 5m"
+        // semantics, not "mute for 5m".
+        let snooze_just_expired = was_snoozed
+            && !is_snoozed_now
+            && matches!(new_status, Status::AwaitingInput | Status::Idle);
+        entry.last_status = new_status;
         entry.was_snoozed = is_snoozed_now;
 
-        // Currently snoozed → never pop. Otherwise pop on either a fresh
-        // Active→Idle transition or a snooze-expiry-while-idle, subject
-        // to cooldown.
-        let pop_now = !is_snoozed_now
-            && (just_transitioned || (snooze_just_expired && new_class == ActivityClass::Idle));
+        let pop_now = !is_snoozed_now && (just_transitioned || snooze_just_expired);
         if pop_now && should_pop(entry.last_popped, cooldown, now) {
             popper.pop(&agent.target, ui);
             entry.last_popped = Some(now);
         }
 
-        // Re-arm cooldown when work resumes — if the user replies and the
-        // agent starts writing again, the next idle transition should
+        // Re-arm cooldown when work resumes — if the user replies and
+        // the agent starts writing again, the next AwaitingInput should
         // pop immediately rather than wait out the leftover cooldown.
-        if new_class == ActivityClass::Active {
+        if new_status == Status::Busy {
             entry.last_popped = None;
         }
     }
@@ -284,6 +314,14 @@ mod tests {
     use std::time::SystemTime;
 
     fn mk_agent(target: &str, last_activity_age: Option<Duration>) -> Agent {
+        mk_agent_with_attention(target, last_activity_age, Attention::Unknown)
+    }
+
+    fn mk_agent_with_attention(
+        target: &str,
+        last_activity_age: Option<Duration>,
+        attention: Attention,
+    ) -> Agent {
         Agent {
             target: target.into(),
             session: "s".into(),
@@ -294,6 +332,7 @@ mod tests {
             claude_pid: 1,
             last_activity: last_activity_age.map(|age| SystemTime::now() - age),
             transcript_path: None,
+            attention,
         }
     }
 
@@ -598,6 +637,98 @@ mod tests {
             &mut popper,
         );
         assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
+    }
+
+    /// The precise transcript signal: agent was Working (transcript
+    /// classifier said so), now AwaitingInput → pop. This fires even
+    /// if the mtime is still fresh, because the assistant's last
+    /// stop_reason is end_turn.
+    #[test]
+    fn precise_signal_pops_on_busy_to_awaiting_input() {
+        let mut state = HashMap::new();
+        let mut popper = RecordingPopper::default();
+        let ui = UiConfig::default();
+        let now0 = Instant::now();
+
+        // tick 1: classifier says Working — seed state, no pop
+        process_tick(
+            &mut state,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(1)),
+                Attention::Working,
+            )],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
+            &ui,
+            &mut popper,
+        );
+        assert!(popper.calls.is_empty());
+
+        // tick 2: classifier flips to AwaitingInput (claude finished a
+        // turn) — pop *immediately*, no idle-threshold wait required.
+        process_tick(
+            &mut state,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(2)),
+                Attention::AwaitingInput,
+            )],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(5),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
+            &ui,
+            &mut popper,
+        );
+        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
+    }
+
+    /// Mixed: precise signal Unknown on tick 1, becomes Working on tick
+    /// 2 (parseable now), AwaitingInput on tick 3 → pop.
+    /// Sanity-checks that Unknown→Working isn't mistaken for a transition.
+    #[test]
+    fn unknown_to_working_does_not_pop() {
+        let mut state = HashMap::new();
+        let mut popper = RecordingPopper::default();
+        let ui = UiConfig::default();
+        let now0 = Instant::now();
+
+        process_tick(
+            &mut state,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(1)),
+                Attention::Unknown,
+            )],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0,
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
+            &ui,
+            &mut popper,
+        );
+        process_tick(
+            &mut state,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(2)),
+                Attention::Working,
+            )],
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            now0 + Duration::from_secs(5),
+            &SnoozeState::default(),
+            std::time::SystemTime::now(),
+            &ui,
+            &mut popper,
+        );
+        assert!(popper.calls.is_empty(), "Unknown→Busy should not pop");
     }
 
     /// Agents that vanish from the scan should be evicted from state, so

@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::transcript;
+
 #[derive(Debug, Clone)]
 pub struct Agent {
     /// `session:window.pane` — pass directly to `tmux switch-client -t` /
@@ -32,6 +34,12 @@ pub struct Agent {
     /// encoded-cwd directory under `~/.claude/projects/`.
     pub last_activity: Option<SystemTime>,
     pub transcript_path: Option<PathBuf>,
+    /// Best-effort "is this agent waiting for me right now" derived from
+    /// the tail of the transcript jsonl (looks at the most recent
+    /// assistant message's stop_reason). Unknown when there's no
+    /// transcript or the format is unfamiliar — callers should fall
+    /// back to the mtime-based `activity_status` heuristic.
+    pub attention: transcript::Attention,
 }
 
 impl Agent {
@@ -83,6 +91,10 @@ pub fn scan() -> Vec<Agent> {
             .as_deref()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
+        let attention = transcript_path
+            .as_deref()
+            .map(transcript::classify_file)
+            .unwrap_or(transcript::Attention::Unknown);
         out.push(Agent {
             target: format!("{}:{}.{}", parts[0], parts[1], parts[3]),
             session: parts[0].to_string(),
@@ -93,6 +105,7 @@ pub fn scan() -> Vec<Agent> {
             claude_pid,
             last_activity,
             transcript_path,
+            attention,
         });
     }
     // Most recently active first, no-transcript last.
@@ -285,6 +298,7 @@ mod tests {
             claude_pid: 1,
             last_activity: t,
             transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
         };
         let agents = vec![
             mk(Some(now)),                           // active
@@ -309,6 +323,7 @@ mod tests {
             claude_pid: 1,
             last_activity: Some(SystemTime::now() - Duration::from_secs(5)),
             transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
         };
         assert!(matches!(
             agent.activity_status(Duration::from_secs(30)),

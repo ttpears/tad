@@ -1102,8 +1102,25 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
         return Line::from(target.to_string());
     };
     let active_window = std::time::Duration::from_secs(30);
-    let (marker_text, marker_style, status_text, status_style) =
-        match agent.activity_status(active_window) {
+    // Prefer the precise transcript signal when we have one — that's
+    // the "is this agent actually waiting for me right now" answer,
+    // independent of mtime. Fall back to mtime otherwise.
+    let (marker_text, marker_style, status_text, status_style) = match agent.attention {
+        crate::transcript::Attention::AwaitingInput => (
+            "! ",
+            Style::default().fg(theme.warning),
+            "awaiting input".to_string(),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        crate::transcript::Attention::Working => (
+            "● ",
+            Style::default().fg(theme.success),
+            "working".to_string(),
+            Style::default().fg(theme.success),
+        ),
+        crate::transcript::Attention::Unknown => match agent.activity_status(active_window) {
             agents::ActivityStatus::Active(d) => (
                 "● ",
                 Style::default().fg(theme.success),
@@ -1122,7 +1139,8 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
                 "no transcript".to_string(),
                 Style::default().fg(theme.warning),
             ),
-        };
+        },
+    };
     let cwd_short = cwd_for_display(&agent.cwd);
 
     // If this target has an active snooze, append a "💤 in Xm" badge so

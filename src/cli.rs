@@ -280,12 +280,23 @@ fn print_status(active_secs: u64) {
         return;
     }
     let c = agents::counts(&agents, std::time::Duration::from_secs(active_secs));
-    if c.idle == 0 {
-        print!("claude: {}", c.total);
+    // Awaiting-input is the headline number when any agent is waiting on
+    // you — the whole point of the cockpit is to surface that.
+    let awaiting = agents
+        .iter()
+        .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
+        .count();
+    let base = if c.idle == 0 {
+        format!("claude: {}", c.total)
     } else if c.active == 0 {
-        print!("claude: {} idle", c.total);
+        format!("claude: {} idle", c.total)
     } else {
-        print!("claude: {}/{}", c.active, c.total);
+        format!("claude: {}/{}", c.active, c.total)
+    };
+    if awaiting > 0 {
+        print!("{base} · {awaiting} waiting");
+    } else {
+        print!("{base}");
     }
 }
 

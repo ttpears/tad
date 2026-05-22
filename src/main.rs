@@ -11,6 +11,7 @@ mod snooze;
 mod theme;
 mod tmux;
 mod tmux_keybind;
+mod transcript;
 mod ui_config;
 mod watch;
 mod wizard;
