@@ -396,9 +396,14 @@ impl App {
 }
 
 pub fn run() -> Result<i32> {
-    // First-launch wizard: if no groups.yaml, offer the import wizard. The
-    // wizard owns its own terminal; on return, fall through to the dashboard.
-    if !crate::config::config_path().exists() {
+    // First-launch wizard: offer it when the user has no groups defined yet
+    // (file missing, file empty, or `groups:` key absent). The wizard owns
+    // its own terminal; on return, fall through to the dashboard.
+    let needs_wizard = match crate::config::load() {
+        Ok(doc) => doc.groups.is_empty(),
+        Err(_) => true,
+    };
+    if needs_wizard {
         let _ = crate::wizard::run_first_launch();
     }
     enable_raw_mode()?;

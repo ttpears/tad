@@ -134,7 +134,7 @@ autoload -Uz compinit && compinit
 
 ## First-launch wizard / `tad config`
 
-The first time you run bare `tad` with no `~/.config/tad/groups.yaml`,
+The first time you run bare `tad` with no groups configured,
 a TUI wizard offers to import SSH hosts from sources you already have
 on disk and shape them into groups. You can also launch it any time
 with `tad config` — when a config already exists, that opens an edit
@@ -206,7 +206,7 @@ function tad() {
    `tad config` mine them from your shell history and `~/.ssh/config`,
    or open `tad groups edit` and hand-edit, or run `tad groups add`
    for a single-group interactive prompt. The config lives at
-   `~/.config/tad/groups.yaml`. The old function knew nothing about
+   `~/.config/tad/config.yaml` under the `groups:` key. The old function knew nothing about
    groups; everything else is a strict superset of the old behavior so
    existing muscle memory still works:
    - `tad <name>` — attach or create (same as old)
@@ -333,9 +333,14 @@ it was started.
 
 ## Groups config
 
-Lives at `~/.config/tad/groups.yaml`. See `examples/groups.yaml.example` for
-the schema. Edit by hand, via `tad config`, or via the `groups-*`
-subcommands.
+Lives in `~/.config/tad/config.yaml` under the `groups:` key (alongside
+`theme:` and `ui:`). See `examples/groups.yaml.example` for the group
+schema. Edit by hand, via `tad config`, or via `tad groups <add|rm|edit>`.
+
+Pre-v0.10 layouts used a separate `~/.config/tad/groups.yaml`. On first
+launch tad auto-migrates it: groups move into `config.yaml` and the old
+file is renamed to `groups.yaml.migrated` so the migration is one-shot
+and reversible.
 
 Layouts:
 - `panes`         — single window, one pane per host. **Default.**
@@ -411,9 +416,9 @@ theme:
 ## Files
 
 ```
-~/.config/tad/groups.yaml         — your group definitions
-~/.config/tad/config.yaml         — theme + UI preferences (optional)
+~/.config/tad/config.yaml         — unified config: theme, ui, groups
 ~/.local/state/tad/dashboard.state — last dashboard view (persisted)
+~/.config/tad/groups.yaml.migrated — pre-v0.10 leftover after auto-migration
 ```
 
 ## Regenerating the README screenshots

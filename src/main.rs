@@ -20,6 +20,10 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    // Pre-v0.10 layouts kept groups in ~/.config/tad/groups.yaml. Fold
+    // them into the unified config.yaml on first startup; idempotent.
+    config::migrate_if_needed();
+
     let cli = cli::Cli::parse();
     let rc = match cli::dispatch(cli) {
         Ok(c) => c,
