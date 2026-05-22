@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::{agents, dashboard, groups, install, sessions, tmux_keybind, watch};
+use crate::{agents, dashboard, doctor, groups, install, sessions, tmux_keybind, watch};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +61,13 @@ pub enum Cmd {
         #[arg(long, default_value_t = 30)]
         active_secs: u64,
     },
+
+    /// Diagnose the half-installed / silently-broken states the cockpit
+    /// can land in: missing tools, wrong tmux version, stale pidfile,
+    /// missing tmux conf blocks, ui.auto_popup mismatch with the watch
+    /// hook, leftover pre-v0.10 migrated files, etc. Pure-diagnose for
+    /// now — prints findings + suggested fixes.
+    Doctor,
 
     /// One-shot setup: write the three tmux conf blocks tad needs
     /// (popup keybind + `#(tad status)` status segment + `tad watch`
@@ -247,6 +254,7 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             Ok(0)
         }
         Cmd::Watch { interval_secs } => watch::run(interval_secs),
+        Cmd::Doctor => doctor::run(),
         Cmd::Install {
             yes,
             uninstall,
