@@ -79,9 +79,7 @@ fn merge_block(existing: &str, new_block: &str) -> Result<String> {
              please fix it by hand"
         ),
         (None, None) => {
-            let sep = if existing.is_empty() {
-                ""
-            } else if existing.ends_with("\n\n") {
+            let sep = if existing.is_empty() || existing.ends_with("\n\n") {
                 ""
             } else if existing.ends_with('\n') {
                 "\n"
