@@ -281,6 +281,14 @@ enum OpenTarget {
     Host(String),
     /// Jump to a specific tmux pane by `session:window.pane` target.
     JumpToPane(String),
+    /// Spawn a new `claude` agent inside a project. Resolves the
+    /// project root from a fresh `projects::scan()` at dispatch time
+    /// (which also picks up the live tmux session list, so we can
+    /// add to an existing session or create a new one).
+    SpawnAgent {
+        project_name: String,
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,6 +297,10 @@ enum InputMode {
     Filter,
     NewSession,
     SnoozeSelect,
+    /// `n` on a Projects row: one-field modal collecting an optional
+    /// initial prompt, then spawning `claude` in a new tmux window in
+    /// the project's root.
+    NewAgent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -307,6 +319,12 @@ struct App {
     list_state_agents: ListState,
     /// Cursor over `ui_config().snooze_intervals` in the snooze modal.
     snooze_cursor: usize,
+    /// Initial prompt text input for the new-agent modal. Optional —
+    /// empty just spawns `claude` with no preset prompt.
+    new_agent_prompt: TextInput,
+    /// Project the new-agent modal is targeting (captured when the
+    /// modal opens, so a mid-modal refresh doesn't drift the target).
+    new_agent_project: Option<String>,
     /// Set when launched via `--select-agent` (i.e. from the auto-popup):
     /// after the user snoozes or otherwise resolves the row, we exit the
     /// dashboard so they're back where they were.
@@ -362,6 +380,8 @@ impl App {
             list_state_hosts: h,
             list_state_agents: a,
             snooze_cursor: 0,
+            new_agent_prompt: TextInput::new(),
+            new_agent_project: None,
             from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
@@ -479,8 +499,123 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
         Some(OpenTarget::Group(name)) => groups::open(&name, None),
         Some(OpenTarget::Host(name)) => sessions::attach_or_create_remote(&name),
         Some(OpenTarget::JumpToPane(target)) => jump_to_pane(&target),
+        Some(OpenTarget::SpawnAgent {
+            project_name,
+            prompt,
+        }) => spawn_agent_in_project(&project_name, prompt.as_deref()),
         None => Ok(1),
     }
+}
+
+/// Spawn `claude` in a new tmux window inside `project_name`'s root.
+///
+///   * if the project already has at least one tmux session, add a new
+///     window to it (uses the alphabetically-first session for stability)
+///   * otherwise create a new detached session named after the project
+///   * either way, switch the current client to the new window (if
+///     we're inside tmux) or attach (if not)
+///
+/// `prompt` is passed as a single positional arg to `claude`, properly
+/// shell-quoted so prompts with spaces / quotes / dollar signs don't
+/// get mangled.
+fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -> Result<i32> {
+    let projects = projects::scan();
+    let p = projects
+        .iter()
+        .find(|p| p.name == project_name)
+        .ok_or_else(|| anyhow::anyhow!("project {} no longer exists", project_name))?;
+    let root_str = p.root.to_string_lossy().into_owned();
+    let cmd = match prompt {
+        Some(t) if !t.trim().is_empty() => format!("claude {}", shell_quote(t)),
+        _ => "claude".to_string(),
+    };
+
+    let (session_name, window_target) = if let Some(s) = p.sessions.first() {
+        let out = tmux::run([
+            "new-window",
+            "-t",
+            &s.name,
+            "-c",
+            &root_str,
+            "-n",
+            project_name,
+            "-P",
+            "-F",
+            "#{session_name}:#{window_index}",
+            &cmd,
+        ])?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "tmux new-window failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (s.name.clone(), target)
+    } else {
+        let out = tmux::run([
+            "new-session",
+            "-d",
+            "-s",
+            project_name,
+            "-c",
+            &root_str,
+            "-n",
+            project_name,
+            &cmd,
+        ])?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "tmux new-session failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        (project_name.to_string(), format!("{project_name}:0"))
+    };
+
+    let inside_tmux = std::env::var_os("TMUX").is_some();
+    if inside_tmux {
+        let _ = tmux::run(["switch-client", "-t", &window_target]);
+    } else {
+        let _ = tmux::run(["attach", "-t", &session_name]);
+    }
+    Ok(0)
+}
+
+/// POSIX-safe single-quote wrapping: `it's a "test"` →
+/// `'it'\''s a "test"'`. We use this rather than serde_json or
+/// shell-escape because it's 8 lines, has no dependency, and the
+/// edge cases are well-understood.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Find the longest-prefix project of $PWD in the scanned list. Returns
+/// the row index for preselection. None when PWD isn't under any known
+/// project (e.g. `tad` was launched from /tmp or `cd` to a brand-new
+/// dir that doesn't show up in any pane / transcript yet).
+fn current_project_index(projects: &[Project]) -> Option<usize> {
+    let pwd = std::env::current_dir().ok()?;
+    let mut best: Option<(usize, usize)> = None;
+    for (i, p) in projects.iter().enumerate() {
+        if pwd.starts_with(&p.root) {
+            let len = p.root.as_os_str().len();
+            if best.map(|(_, l)| len > l).unwrap_or(true) {
+                best = Some((i, len));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// Project Enter: prefer attaching to the project's most-recently-active
@@ -541,6 +676,14 @@ fn app_loop<B: ratatui::backend::Backend>(
         if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
             app.list_state_agents.select(Some(idx));
         }
+    } else if app.view == View::Projects {
+        // Cwd-aware preselection: if the user launched tad from inside a
+        // known project, drop them on that project's row. Turns the
+        // dashboard from "browser of all projects" into "default to where
+        // I already am, browse when I want."
+        if let Some(idx) = current_project_index(&app.data.projects) {
+            app.list_state_projects.select(Some(idx));
+        }
     }
     let mut last_view = app.view;
     let mut last_refresh = Instant::now();
@@ -562,6 +705,7 @@ fn app_loop<B: ratatui::backend::Backend>(
                 match app.input_mode {
                     InputMode::Filter => handle_filter_key(&mut app, key),
                     InputMode::SnoozeSelect => handle_snooze_key(&mut app, key),
+                    InputMode::NewAgent => handle_new_agent_key(&mut app, key),
                     InputMode::NewSession => handle_new_session_key(&mut app, key),
                     InputMode::None => handle_key(&mut app, key.code, key.modifiers),
                 }
@@ -636,6 +780,44 @@ fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
             None if len > 0 => state.select(Some(0)),
             _ => {}
         }
+    }
+}
+
+fn handle_new_agent_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::None;
+            app.new_agent_prompt.clear();
+            app.new_agent_project = None;
+        }
+        KeyCode::Enter => {
+            if let Some(project) = app.new_agent_project.take() {
+                let prompt = app.new_agent_prompt.as_str().trim().to_string();
+                app.new_agent_prompt.clear();
+                app.open_after = Some(OpenTarget::SpawnAgent {
+                    project_name: project,
+                    prompt: if prompt.is_empty() {
+                        None
+                    } else {
+                        Some(prompt)
+                    },
+                });
+                app.input_mode = InputMode::None;
+                app.should_quit = true;
+            }
+        }
+        KeyCode::Backspace => app.new_agent_prompt.backspace(),
+        KeyCode::Delete => app.new_agent_prompt.delete(),
+        KeyCode::Left => app.new_agent_prompt.left(),
+        KeyCode::Right => app.new_agent_prompt.right(),
+        KeyCode::Home => app.new_agent_prompt.home(),
+        KeyCode::End => app.new_agent_prompt.end(),
+        KeyCode::Char('u') if ctrl => app.new_agent_prompt.clear(),
+        KeyCode::Char('a') if ctrl => app.new_agent_prompt.home(),
+        KeyCode::Char('e') if ctrl => app.new_agent_prompt.end(),
+        KeyCode::Char(c) if !ctrl => app.new_agent_prompt.insert(c),
+        _ => {}
     }
 }
 
@@ -806,23 +988,31 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('n') => {
-            // Only the Hosts view prefills usefully (short→name, FQDN→ssh).
-            // Sessions/Groups views start blank since 'n' means a brand-new
-            // session that has nothing to do with the current selection.
-            // Prefilled values are marked pristine so the first keystroke
-            // replaces them — typing just works.
+            // `n` semantics depend on which view you're in:
+            //   * Projects → spawn a new claude agent inside the selected
+            //     project (optional initial prompt modal)
+            //   * Hosts    → new tmux session prefilled with the host as
+            //     the SSH target
+            //   * others   → blank new tmux session
             match (app.view, app.selected()) {
+                (View::Projects, Some(name)) => {
+                    app.new_agent_project = Some(name);
+                    app.new_agent_prompt = TextInput::new();
+                    app.input_mode = InputMode::NewAgent;
+                }
                 (View::Hosts, Some(h)) => {
                     app.new_session_name = TextInput::pristine(short_name(&h));
                     app.new_session_host = TextInput::pristine(h);
+                    app.new_session_field = NewSessionField::Name;
+                    app.input_mode = InputMode::NewSession;
                 }
                 _ => {
                     app.new_session_name = TextInput::new();
                     app.new_session_host = TextInput::new();
+                    app.new_session_field = NewSessionField::Name;
+                    app.input_mode = InputMode::NewSession;
                 }
             }
-            app.new_session_field = NewSessionField::Name;
-            app.input_mode = InputMode::NewSession;
         }
         KeyCode::Char('r') => app.refresh(),
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
@@ -861,6 +1051,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
     if app.input_mode == InputMode::SnoozeSelect {
         render_snooze_modal(f, area, app);
+    }
+    if app.input_mode == InputMode::NewAgent {
+        render_new_agent_modal(f, area, app);
     }
 }
 
@@ -906,6 +1099,68 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         );
     f.render_widget(tabs, area);
+}
+
+fn render_new_agent_modal(f: &mut Frame, area: Rect, app: &App) {
+    let project = app.new_agent_project.clone().unwrap_or_default();
+    let width = 78.min(area.width.saturating_sub(4));
+    let height = 7;
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+    let theme = app.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" new agent in {project} "),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ));
+    // Render the prompt as a single field. Empty = "just spawn claude
+    // with no prompt"; non-empty = "spawn claude with this as the
+    // initial message."
+    let value = app.new_agent_prompt.as_str();
+    let cur = app.new_agent_prompt.cursor.min(value.len());
+    let (pre, post) = value.split_at(cur);
+    let mut field_spans = vec![Span::styled(
+        format!("  {:<8}", "prompt:"),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if value.is_empty() {
+        field_spans.push(Span::styled(
+            "(empty — just spawn claude)".to_string(),
+            Style::default().fg(theme.muted),
+        ));
+        field_spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+    } else if post.is_empty() {
+        field_spans.push(Span::styled(pre.to_string(), Style::default().fg(theme.fg)));
+        field_spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+    } else {
+        let mut chars = post.chars();
+        let cursor_char = chars.next().unwrap_or(' ');
+        let after: String = chars.collect();
+        field_spans.push(Span::styled(pre.to_string(), Style::default().fg(theme.fg)));
+        field_spans.push(Span::styled(
+            cursor_char.to_string(),
+            Style::default().bg(theme.accent).fg(theme.fg),
+        ));
+        field_spans.push(Span::styled(after, Style::default().fg(theme.fg)));
+    }
+    let lines = vec![
+        Line::from(""),
+        Line::from(field_spans),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ↵ spawn   Esc cancel   (claude opens in a new window in the project's root)"
+                .to_string(),
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, popup);
 }
 
 fn render_snooze_modal(f: &mut Frame, area: Rect, app: &App) {
@@ -1769,6 +2024,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ pick duration   ↵ snooze   Esc cancel",
             Style::default().fg(theme.muted),
         )),
+        InputMode::NewAgent => Line::from(Span::styled(
+            "type initial prompt (optional)   ↵ spawn   Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
         InputMode::None => {
             let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
                 vec![
@@ -1818,5 +2077,120 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         y,
         width: width.min(area.width),
         height: height.min(area.height),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_wraps_in_single_quotes() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+        assert_eq!(shell_quote("with spaces"), "'with spaces'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        // POSIX-canonical: close the single-quote string, escape a
+        // literal single quote, reopen. `it's` → `'it'\''s'`.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("'"), "''\\'''");
+    }
+
+    #[test]
+    fn shell_quote_leaves_dollar_and_backslash_alone_inside_single_quotes() {
+        // sh's single quotes are literal — no expansion inside — so
+        // $VAR / `cmd` / \n pass through verbatim and the prompt
+        // arrives at claude exactly as the user typed it.
+        assert_eq!(shell_quote("$PATH"), "'$PATH'");
+        assert_eq!(shell_quote("a\\nb"), "'a\\nb'");
+        assert_eq!(shell_quote("`whoami`"), "'`whoami`'");
+    }
+
+    /// Project Enter dispatch picks the most-recently-active session,
+    /// falls back to the most-recently-active agent, returns None when
+    /// neither exists.
+    #[test]
+    fn project_enter_falls_back_through_session_agent_none() {
+        use crate::agents::Agent;
+        use std::path::PathBuf;
+        use std::time::{Duration, SystemTime};
+
+        let now = SystemTime::now();
+        let agent = Agent {
+            target: "s:0.0".into(),
+            session: "s".into(),
+            window_index: "0".into(),
+            window_name: "w".into(),
+            pane_index: "0".into(),
+            cwd: PathBuf::from("/repo"),
+            claude_pid: 1,
+            last_activity: Some(now),
+            transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
+        };
+        let session = Session {
+            name: "s".into(),
+            windows: 1,
+            attached: false,
+            active_window: "w".into(),
+            active_path: "/repo".into(),
+            created_ts: 0,
+            activity_ts: 100,
+            activity_str: "1m".into(),
+        };
+
+        let data_empty = AppData {
+            sessions: vec![],
+            groups: vec![],
+            hosts: vec![],
+            agents: vec![],
+            projects: vec![Project {
+                root: PathBuf::from("/repo"),
+                name: "repo".into(),
+                sessions: vec![],
+                agents: vec![],
+                last_activity: None,
+            }],
+        };
+        assert!(project_enter_target(&data_empty, "repo").is_none());
+
+        let data_agent_only = AppData {
+            sessions: vec![],
+            groups: vec![],
+            hosts: vec![],
+            agents: vec![agent.clone()],
+            projects: vec![Project {
+                root: PathBuf::from("/repo"),
+                name: "repo".into(),
+                sessions: vec![],
+                agents: vec![agent.clone()],
+                last_activity: Some(now),
+            }],
+        };
+        assert!(matches!(
+            project_enter_target(&data_agent_only, "repo"),
+            Some(OpenTarget::JumpToPane(t)) if t == "s:0.0"
+        ));
+
+        let data_session_wins = AppData {
+            sessions: vec![session.clone()],
+            groups: vec![],
+            hosts: vec![],
+            agents: vec![agent.clone()],
+            projects: vec![Project {
+                root: PathBuf::from("/repo"),
+                name: "repo".into(),
+                sessions: vec![session.clone()],
+                agents: vec![agent.clone()],
+                last_activity: Some(now - Duration::from_secs(60)),
+            }],
+        };
+        assert!(matches!(
+            project_enter_target(&data_session_wins, "repo"),
+            Some(OpenTarget::AttachExisting(n)) if n == "s"
+        ));
     }
 }

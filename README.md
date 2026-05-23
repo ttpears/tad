@@ -431,9 +431,16 @@ gitlab-mcp                1 sess   0 agt                · 1d
 
 Enter on a project attaches to its most-recently-active session — or
 jumps to its most-recently-active agent pane if there are no sessions.
-The preview pane shows root path, git branch + dirty count, and
-nested lists of sessions and agents (with the same `! awaiting · 2s`
-markers from the Agents view). It's the cockpit, not just an index.
+`n` on a project spawns a fresh `claude` agent in that project's root
+(an optional initial prompt is sent to claude as its first message);
+it adds a window to the project's existing session or starts a new
+one named after the project. The preview pane shows root path, git
+branch + dirty count, and nested lists of sessions and agents (with
+the same `! awaiting · 2s` markers from the Agents view).
+
+Launching `tad` from inside a project directory preselects that
+project's row automatically, so the dashboard opens with the right
+context whether you wanted to browse or just resume where you are.
 
 ### Other views
 
@@ -445,9 +452,15 @@ Keys (any view):
 - `1` / `2` / `3` / `4` / `5`   jump to Projects / Sessions / Groups / Hosts / Agents
 - `g` / `G`              first / last item
 - `Enter`                open the highlighted item
-- `n`                    new session — opens a name prompt (preseeded
-                         with the highlighted item's short name; edit
-                         and Enter to create)
+- `n`                    new — context-sensitive:
+                         * Projects view → spawn a fresh `claude` agent
+                           in the selected project's root (optional
+                           initial prompt); adds a window to the project's
+                           existing session or starts a new one named
+                           after the project
+                         * Hosts view → new tmux session with the host
+                           prefilled as the SSH target
+                         * other views → blank new tmux session prompt
 - `d`                    kill (sessions view only)
 - `s` / `S`              snooze / clear snooze (agents view only)
 - `/`                    enter filter mode (live — ↑↓ navigates, Enter
