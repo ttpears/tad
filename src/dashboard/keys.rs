@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{snooze, tmux};
 
-use super::dispatch::{project_enter_target, OpenTarget};
+use super::dispatch::{kill_agent, project_enter_target, rename_agent_window, OpenTarget};
 use super::format::short_name;
 use super::{App, InputMode, NewSessionField, TextInput, View};
 
@@ -70,6 +70,40 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
             None if len > 0 => state.select(Some(0)),
             _ => {}
         }
+    }
+}
+
+pub(super) fn handle_rename_agent_key(app: &mut App, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::None;
+            app.rename_agent_text.clear();
+            app.rename_agent_target = None;
+        }
+        KeyCode::Enter => {
+            let new_name = app.rename_agent_text.as_str().trim().to_string();
+            let target = app.rename_agent_target.take();
+            app.rename_agent_text.clear();
+            app.input_mode = InputMode::None;
+            if let Some(t) = target {
+                if !new_name.is_empty() {
+                    let _ = rename_agent_window(&t, &new_name);
+                    app.refresh();
+                }
+            }
+        }
+        KeyCode::Backspace => app.rename_agent_text.backspace(),
+        KeyCode::Delete => app.rename_agent_text.delete(),
+        KeyCode::Left => app.rename_agent_text.left(),
+        KeyCode::Right => app.rename_agent_text.right(),
+        KeyCode::Home => app.rename_agent_text.home(),
+        KeyCode::End => app.rename_agent_text.end(),
+        KeyCode::Char('u') if ctrl => app.rename_agent_text.clear(),
+        KeyCode::Char('a') if ctrl => app.rename_agent_text.home(),
+        KeyCode::Char('e') if ctrl => app.rename_agent_text.end(),
+        KeyCode::Char(c) if !ctrl => app.rename_agent_text.insert(c),
+        _ => {}
     }
 }
 
@@ -247,10 +281,41 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('d') => {
-            if app.view == View::Sessions {
-                if let Some(name) = app.selected() {
+            // `d` semantics depend on view:
+            //   * Sessions → tmux kill-session (heavy: drops every pane
+            //     in the session)
+            //   * Agents   → SIGINT to the agent's claude PID (gentle:
+            //     claude flushes its transcript, pane stays open with
+            //     its shell so you can verify what happened)
+            match (app.view, app.selected()) {
+                (View::Sessions, Some(name)) => {
                     tmux::kill_session(&name);
                     app.refresh();
+                }
+                (View::Agents, Some(target)) => {
+                    if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
+                        let _ = kill_agent(agent.claude_pid);
+                        app.refresh();
+                    }
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Char('R') => {
+            // Rename the tmux window containing the selected agent.
+            // Only meaningful in the Agents view; in others it's a
+            // no-op. Uppercase R so it doesn't collide with `r`
+            // (manual refresh).
+            if app.view == View::Agents {
+                if let Some(target) = app.selected() {
+                    if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
+                        app.rename_agent_target = Some(target.clone());
+                        // Prefill with the current window name (pristine
+                        // so the first keystroke replaces it cleanly,
+                        // same UX as Hosts-view's `n`-prefilled SSH).
+                        app.rename_agent_text = TextInput::pristine(agent.window_name.clone());
+                        app.input_mode = InputMode::RenameAgent;
+                    }
                 }
             }
         }

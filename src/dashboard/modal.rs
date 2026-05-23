@@ -12,6 +12,82 @@ use crate::snooze;
 
 use super::{App, NewSessionField, TextInput};
 
+pub(super) fn render_rename_agent_modal(f: &mut Frame, area: Rect, app: &App) {
+    let target = app.rename_agent_target.clone().unwrap_or_default();
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = 7;
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+    let theme = app.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" rename window for {target} "),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let field = &app.rename_agent_text;
+    let value = field.as_str();
+    let mut spans = vec![Span::styled(
+        format!("  {:<6}", "name:"),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if value.is_empty() {
+        spans.push(Span::styled(
+            "(required)".to_string(),
+            Style::default().fg(theme.muted),
+        ));
+        spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+    } else {
+        // Pristine values (prefilled current name) get muted/italic so
+        // the user knows the first keystroke replaces them — same as
+        // the Hosts-view new-session prefill.
+        let value_style = if field.pristine {
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        let cur = field.cursor.min(value.len());
+        let (pre, post) = value.split_at(cur);
+        if field.pristine {
+            spans.push(Span::styled(value.to_string(), value_style));
+            spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+        } else if post.is_empty() {
+            spans.push(Span::styled(pre.to_string(), value_style));
+            spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+        } else {
+            let mut chars = post.chars();
+            let cursor_char = chars.next().unwrap_or(' ');
+            let after: String = chars.collect();
+            spans.push(Span::styled(pre.to_string(), value_style));
+            spans.push(Span::styled(
+                cursor_char.to_string(),
+                Style::default().bg(theme.accent).fg(theme.fg),
+            ));
+            spans.push(Span::styled(after, value_style));
+        }
+    }
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(spans),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ↵ rename   Esc cancel   (renames the tmux window, not the session)",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, popup);
+}
+
 pub(super) fn render_new_agent_modal(f: &mut Frame, area: Rect, app: &App) {
     let project = app.new_agent_project.clone().unwrap_or_default();
     let width = 78.min(area.width.saturating_sub(4));

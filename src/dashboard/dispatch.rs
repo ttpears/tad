@@ -207,6 +207,40 @@ pub(super) fn project_enter_target(data: &AppData, name: &str) -> Option<OpenTar
 #[allow(dead_code)]
 fn _path_use(_p: &Path) {}
 
+/// Kill a Claude Code agent by sending SIGINT to its `claude` PID.
+/// Gentle on purpose: SIGINT lets claude flush its transcript and any
+/// in-flight tool calls before exiting. The pane stays open with its
+/// shell — the next dashboard refresh sees the agent's gone and drops
+/// the row. Returns true iff we successfully signalled the process.
+pub(super) fn kill_agent(claude_pid: u32) -> bool {
+    if claude_pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(claude_pid as i32, libc::SIGINT) };
+    rc == 0
+}
+
+/// Rename the tmux window containing an agent. `target` is the
+/// pane target (`session:window.pane`); we strip the `.pane` suffix
+/// because `rename-window` operates on windows. Returns true iff the
+/// tmux command succeeded.
+pub(super) fn rename_agent_window(target: &str, new_name: &str) -> bool {
+    let window_target = window_target_of(target);
+    let out = crate::tmux::run(["rename-window", "-t", &window_target, new_name]);
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Strip the `.pane` suffix from a `session:window.pane` target to
+/// produce the `session:window` form tmux's `rename-window` /
+/// `select-window` / etc. accept. Split out so the parse can be
+/// unit-tested without a tmux subprocess.
+fn window_target_of(target: &str) -> String {
+    match target.rfind('.') {
+        Some(dot) => target[..dot].to_string(),
+        None => target.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::AppData;
@@ -215,6 +249,20 @@ mod tests {
     use crate::sessions::Session;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn window_target_strips_pane_suffix() {
+        // canonical form
+        assert_eq!(window_target_of("my-session:3.0"), "my-session:3");
+        // sessions with dots in their names — the .pane suffix is the
+        // *last* dot, so we use rfind
+        assert_eq!(
+            window_target_of("session.with.dots:7.2"),
+            "session.with.dots:7"
+        );
+        // no pane suffix → pass through unchanged
+        assert_eq!(window_target_of("session:0"), "session:0");
+    }
 
     #[test]
     fn shell_quote_wraps_in_single_quotes() {

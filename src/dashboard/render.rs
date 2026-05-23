@@ -14,7 +14,10 @@ use super::format::{
     format_agent_line, format_group_line, format_host_line, format_project_line,
     format_session_line,
 };
-use super::modal::{render_new_agent_modal, render_new_session_modal, render_snooze_modal};
+use super::modal::{
+    render_new_agent_modal, render_new_session_modal, render_rename_agent_modal,
+    render_snooze_modal,
+};
 use super::preview::{
     preview_agent, preview_group, preview_host, preview_project, preview_session,
 };
@@ -43,6 +46,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     }
     if app.input_mode == InputMode::NewAgent {
         render_new_agent_modal(f, area, app);
+    }
+    if app.input_mode == InputMode::RenameAgent {
+        render_rename_agent_modal(f, area, app);
     }
 }
 
@@ -211,6 +217,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             "type initial prompt (optional)   ↵ spawn   Esc cancel",
             Style::default().fg(theme.muted),
         )),
+        InputMode::RenameAgent => Line::from(Span::styled(
+            "type new window name   ↵ rename   Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
         InputMode::None => {
             let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
                 vec![
@@ -228,6 +238,8 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 spans.extend(bind("d", "kill"));
             }
             if app.view == View::Agents {
+                spans.extend(bind("d", "kill"));
+                spans.extend(bind("R", "rename"));
                 spans.extend(bind("s", "snooze"));
             }
             spans.extend(bind("/", "filter"));

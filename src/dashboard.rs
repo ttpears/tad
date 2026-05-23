@@ -310,6 +310,10 @@ pub(super) enum InputMode {
     /// initial prompt, then spawning `claude` in a new tmux window in
     /// the project's root.
     NewAgent,
+    /// `R` on an Agents row: one-field modal prefilled with the
+    /// agent's current window name. Enter renames the window in place
+    /// (no dashboard exit; the next refresh shows the new name).
+    RenameAgent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,6 +338,11 @@ pub(super) struct App {
     /// Project the new-agent modal is targeting (captured when the
     /// modal opens, so a mid-modal refresh doesn't drift the target).
     pub(super) new_agent_project: Option<String>,
+    /// New window name being typed in the rename-agent modal.
+    pub(super) rename_agent_text: TextInput,
+    /// `session:window.pane` of the agent being renamed (captured at
+    /// modal-open time for the same reason as `new_agent_project`).
+    pub(super) rename_agent_target: Option<String>,
     /// Set when launched via `--select-agent` (i.e. from the auto-popup):
     /// after the user snoozes or otherwise resolves the row, we exit the
     /// dashboard so they're back where they were.
@@ -391,6 +400,8 @@ impl App {
             snooze_cursor: 0,
             new_agent_prompt: TextInput::new(),
             new_agent_project: None,
+            rename_agent_text: TextInput::new(),
+            rename_agent_target: None,
             from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
@@ -562,6 +573,7 @@ fn app_loop<B: ratatui::backend::Backend>(
                     InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
                     InputMode::NewAgent => keys::handle_new_agent_key(&mut app, key),
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
+                    InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
                 }
             }
