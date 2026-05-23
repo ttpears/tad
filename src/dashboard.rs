@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crate::{
     agents::{self, Agent},
     config, groups,
+    projects::{self, Project},
     sessions::{self, Session},
     snooze,
     theme::{self, Theme},
@@ -141,6 +142,7 @@ impl TextInput {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Projects,
     Sessions,
     Groups,
     Hosts,
@@ -150,15 +152,17 @@ enum View {
 impl View {
     fn next(self) -> Self {
         match self {
+            View::Projects => View::Sessions,
             View::Sessions => View::Groups,
             View::Groups => View::Hosts,
             View::Hosts => View::Agents,
-            View::Agents => View::Sessions,
+            View::Agents => View::Projects,
         }
     }
     fn prev(self) -> Self {
         match self {
-            View::Sessions => View::Agents,
+            View::Projects => View::Agents,
+            View::Sessions => View::Projects,
             View::Groups => View::Sessions,
             View::Hosts => View::Groups,
             View::Agents => View::Hosts,
@@ -166,6 +170,7 @@ impl View {
     }
     fn title(self) -> &'static str {
         match self {
+            View::Projects => "Projects",
             View::Sessions => "Sessions",
             View::Groups => "Groups",
             View::Hosts => "Hosts",
@@ -174,14 +179,16 @@ impl View {
     }
     fn index(self) -> usize {
         match self {
-            View::Sessions => 0,
-            View::Groups => 1,
-            View::Hosts => 2,
-            View::Agents => 3,
+            View::Projects => 0,
+            View::Sessions => 1,
+            View::Groups => 2,
+            View::Hosts => 3,
+            View::Agents => 4,
         }
     }
     fn slug(self) -> &'static str {
         match self {
+            View::Projects => "projects",
             View::Sessions => "sessions",
             View::Groups => "groups",
             View::Hosts => "hosts",
@@ -190,6 +197,7 @@ impl View {
     }
     fn from_slug(s: &str) -> Option<Self> {
         match s.trim() {
+            "projects" => Some(View::Projects),
             "sessions" => Some(View::Sessions),
             "groups" => Some(View::Groups),
             "hosts" => Some(View::Hosts),
@@ -220,6 +228,9 @@ struct AppData {
     hosts: Vec<(String, Vec<String>)>,
     /// Claude Code agents discovered across tmux panes.
     agents: Vec<Agent>,
+    /// Project (typically git repo) frame around everything else.
+    /// Derived from session/agent cwds — the primary noun.
+    projects: Vec<Project>,
 }
 
 impl AppData {
@@ -245,11 +256,15 @@ impl AppData {
         }
         let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
         let agents = agents::scan();
+        // Projects derived after agents/sessions exist — they're a
+        // pure aggregation, not an additional source.
+        let project_list = projects::scan();
         Self {
             sessions,
             groups,
             hosts,
             agents,
+            projects: project_list,
         }
     }
 }
@@ -285,6 +300,7 @@ enum NewSessionField {
 struct App {
     view: View,
     data: AppData,
+    list_state_projects: ListState,
     list_state_sessions: ListState,
     list_state_groups: ListState,
     list_state_hosts: ListState,
@@ -328,9 +344,19 @@ impl App {
         } else {
             Some(0)
         });
+        let mut p = ListState::default();
+        p.select(if data.projects.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
         App {
-            view: load_last_view().unwrap_or(View::Sessions),
+            // Default to Projects — the user-facing primary noun for
+            // the cockpit. Old `dashboard.state` still wins when present
+            // so power users who lived on Sessions stay there.
+            view: load_last_view().unwrap_or(View::Projects),
             data,
+            list_state_projects: p,
             list_state_sessions: s,
             list_state_groups: g,
             list_state_hosts: h,
@@ -350,6 +376,7 @@ impl App {
 
     fn list_state_mut(&mut self) -> &mut ListState {
         match self.view {
+            View::Projects => &mut self.list_state_projects,
             View::Sessions => &mut self.list_state_sessions,
             View::Groups => &mut self.list_state_groups,
             View::Hosts => &mut self.list_state_hosts,
@@ -358,10 +385,12 @@ impl App {
     }
 
     fn items(&self) -> Vec<String> {
-        // For Agents we key items by the unique target (session:window.pane)
-        // so selection survives across refreshes even when window names
-        // collide. Lookups go back through `data.agents`.
+        // Projects are keyed by their `name` (basename of root); when
+        // two roots collide on name the latter shadows the former in
+        // the list, which is acceptable for a v1 (caller can rename
+        // its directory or we can disambiguate with the parent later).
         let iter: Box<dyn Iterator<Item = String>> = match self.view {
+            View::Projects => Box::new(self.data.projects.iter().map(|p| p.name.clone())),
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
@@ -377,6 +406,7 @@ impl App {
 
     fn selected(&self) -> Option<String> {
         let state = match self.view {
+            View::Projects => &self.list_state_projects,
             View::Sessions => &self.list_state_sessions,
             View::Groups => &self.list_state_groups,
             View::Hosts => &self.list_state_hosts,
@@ -390,6 +420,7 @@ impl App {
         self.data = AppData::load();
         // Clamp selections to new list sizes
         for (state, len) in [
+            (&mut self.list_state_projects, self.data.projects.len()),
             (&mut self.list_state_sessions, self.data.sessions.len()),
             (&mut self.list_state_groups, self.data.groups.len()),
             (&mut self.list_state_hosts, self.data.hosts.len()),
@@ -450,6 +481,24 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
         Some(OpenTarget::JumpToPane(target)) => jump_to_pane(&target),
         None => Ok(1),
     }
+}
+
+/// Project Enter: prefer attaching to the project's most-recently-active
+/// session; fall back to jumping to its most-recently-active agent's
+/// pane; if the project has neither, do nothing.
+fn project_enter_target(data: &AppData, name: &str) -> Option<OpenTarget> {
+    let p = data.projects.iter().find(|p| p.name == name)?;
+    if let Some(s) = p.sessions.iter().max_by_key(|s| s.activity_ts) {
+        return Some(OpenTarget::AttachExisting(s.name.clone()));
+    }
+    if let Some(a) = p
+        .agents
+        .iter()
+        .max_by_key(|a| a.last_activity.unwrap_or(std::time::SystemTime::UNIX_EPOCH))
+    {
+        return Some(OpenTarget::JumpToPane(a.target.clone()));
+    }
+    None
 }
 
 /// Jump to a tmux pane. When tad is invoked from inside a tmux client
@@ -542,13 +591,17 @@ fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::BackTab => app.view = app.view.prev(),
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
-                app.open_after = Some(match app.view {
-                    View::Sessions => OpenTarget::AttachExisting(name),
-                    View::Groups => OpenTarget::Group(name),
-                    View::Hosts => OpenTarget::Host(name),
-                    View::Agents => OpenTarget::JumpToPane(name),
-                });
-                app.should_quit = true;
+                let target = match app.view {
+                    View::Projects => project_enter_target(&app.data, &name),
+                    View::Sessions => Some(OpenTarget::AttachExisting(name)),
+                    View::Groups => Some(OpenTarget::Group(name)),
+                    View::Hosts => Some(OpenTarget::Host(name)),
+                    View::Agents => Some(OpenTarget::JumpToPane(name)),
+                };
+                if let Some(t) = target {
+                    app.open_after = Some(t);
+                    app.should_quit = true;
+                }
             }
         }
         // Esc clears the filter and exits filter mode in one step.
@@ -683,10 +736,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Tab => app.view = app.view.next(),
         KeyCode::BackTab => app.view = app.view.prev(),
-        KeyCode::Char('1') => app.view = View::Sessions,
-        KeyCode::Char('2') => app.view = View::Groups,
-        KeyCode::Char('3') => app.view = View::Hosts,
-        KeyCode::Char('4') => app.view = View::Agents,
+        KeyCode::Char('1') => app.view = View::Projects,
+        KeyCode::Char('2') => app.view = View::Sessions,
+        KeyCode::Char('3') => app.view = View::Groups,
+        KeyCode::Char('4') => app.view = View::Hosts,
+        KeyCode::Char('5') => app.view = View::Agents,
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
@@ -705,13 +759,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
-                app.open_after = Some(match app.view {
-                    View::Sessions => OpenTarget::AttachExisting(name),
-                    View::Groups => OpenTarget::Group(name),
-                    View::Hosts => OpenTarget::Host(name),
-                    View::Agents => OpenTarget::JumpToPane(name),
-                });
-                app.should_quit = true;
+                let target = match app.view {
+                    View::Projects => project_enter_target(&app.data, &name),
+                    View::Sessions => Some(OpenTarget::AttachExisting(name)),
+                    View::Groups => Some(OpenTarget::Group(name)),
+                    View::Hosts => Some(OpenTarget::Host(name)),
+                    View::Agents => Some(OpenTarget::JumpToPane(name)),
+                };
+                if let Some(t) = target {
+                    app.open_after = Some(t);
+                    app.should_quit = true;
+                }
             }
         }
         KeyCode::Char('d') => {
@@ -807,8 +865,13 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    // Agents tab is annotated with live counts so you don't have to switch
-    // into the view to know what's going on.
+    // Projects + Agents tabs are annotated with live counts so you can
+    // see the cockpit's state from any view without switching.
+    let projects_title = if app.data.projects.is_empty() {
+        "Projects".to_string()
+    } else {
+        format!("Projects ({})", app.data.projects.len())
+    };
     let agents_title = if app.data.agents.is_empty() {
         "Agents".to_string()
     } else {
@@ -822,6 +885,7 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     let titles: Vec<Line> = vec![
+        Line::from(projects_title),
         Line::from(View::Sessions.title()),
         Line::from(View::Groups.title()),
         Line::from(View::Hosts.title()),
@@ -1008,6 +1072,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|name| {
             let line = match app.view {
+                View::Projects => format_project_line(&app.data, name, theme),
                 View::Sessions => format_session_line(&app.data, name, theme),
                 View::Groups => format_group_line(&app.data, name, theme),
                 View::Hosts => format_host_line(&app.data, name, theme),
@@ -1038,12 +1103,159 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_symbol("▶ ");
 
     let state = match app.view {
+        View::Projects => &mut app.list_state_projects,
         View::Sessions => &mut app.list_state_sessions,
         View::Groups => &mut app.list_state_groups,
         View::Hosts => &mut app.list_state_hosts,
         View::Agents => &mut app.list_state_agents,
     };
     f.render_stateful_widget(list, area, state);
+}
+
+fn format_project_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
+    let Some(p) = data.projects.iter().find(|p| p.name == name) else {
+        return Line::from(name.to_string());
+    };
+    let awaiting = p
+        .agents
+        .iter()
+        .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
+        .count();
+    let working = p
+        .agents
+        .iter()
+        .filter(|a| a.attention == crate::transcript::Attention::Working)
+        .count();
+    let activity = p
+        .last_activity
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| format!(" · {}", agents::format_elapsed(d)))
+        .unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<28}", truncate(name, 28)),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>2} sess  ", p.sessions.len()),
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(
+            format!("{:>2} agt  ", p.agents.len()),
+            Style::default().fg(theme.muted),
+        ),
+    ];
+    if awaiting > 0 {
+        spans.push(Span::styled(
+            format!("{awaiting} waiting  "),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if working > 0 {
+        spans.push(Span::styled(
+            format!("{working} working  "),
+            Style::default().fg(theme.success),
+        ));
+    }
+    spans.push(Span::styled(activity, Style::default().fg(theme.muted)));
+    Line::from(spans)
+}
+
+fn preview_project(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(p) = data.projects.iter().find(|pr| pr.name == name) else {
+        return vec![Line::from(Span::styled(
+            "project gone — refresh",
+            Style::default().fg(theme.muted),
+        ))];
+    };
+    let kv = |k: &str, v: String| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
+            Span::styled(v, Style::default().fg(theme.fg)),
+        ])
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("project: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                name.to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        kv("root", p.root.display().to_string()),
+    ];
+    // Branch + dirty count: lazy subprocess, fine for the preview pane.
+    if let Some(status) = crate::projects::git_status(&p.root) {
+        let dirty = if status.dirty == 0 {
+            "clean".to_string()
+        } else {
+            format!("{} dirty", status.dirty)
+        };
+        lines.push(kv("branch", format!("{} · {}", status.branch, dirty)));
+    }
+    if !p.sessions.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("sessions ({})", p.sessions.len()),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for s in &p.sessions {
+            let marker = if s.attached { "● " } else { "  " };
+            let marker_style = if s.attached {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(marker, marker_style),
+                Span::styled(s.name.clone(), Style::default().fg(theme.fg)),
+                Span::raw("  "),
+                Span::styled(s.activity_str.clone(), Style::default().fg(theme.muted)),
+            ]));
+        }
+    }
+    if !p.agents.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("agents ({})", p.agents.len()),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for a in &p.agents {
+            let (marker, marker_style) = match a.attention {
+                crate::transcript::Attention::AwaitingInput => (
+                    "! ",
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                crate::transcript::Attention::Working => ("● ", Style::default().fg(theme.success)),
+                crate::transcript::Attention::Unknown => ("· ", Style::default().fg(theme.muted)),
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(marker, marker_style),
+                Span::styled(a.target.clone(), Style::default().fg(theme.fg)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↵ attach to most-recent session  (or jump to most-recent agent pane)",
+        Style::default().fg(theme.muted),
+    )));
+    lines
 }
 
 fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
@@ -1244,6 +1456,7 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
         .title(" preview ");
     let lines: Vec<Line> = match app.selected() {
         Some(name) => match app.view {
+            View::Projects => preview_project(&app.data, &name, &app.theme),
             View::Sessions => preview_session(&app.data, &name, &app.theme),
             View::Groups => preview_group(&app.data, &name, &app.theme),
             View::Hosts => preview_host(&app.data, &name, &app.theme),
@@ -1566,7 +1779,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             let mut spans = Vec::new();
             spans.extend(bind("↑↓/jk", "nav"));
             spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3/4", "jump"));
+            spans.extend(bind("1/2/3/4/5", "jump"));
             spans.extend(bind("↵", "open"));
             spans.extend(bind("n", "new"));
             if app.view == View::Sessions {

@@ -407,33 +407,59 @@ in scripts, `panes` keeps it off.
 
 ## Dashboard
 
-Bare `tad` opens a TUI with three views — Sessions, Groups, Hosts — that
-you cycle through with `Tab` (or jump to with `1`/`2`/`3`):
+Bare `tad` opens a TUI with five views — **Projects** (the lead view),
+Sessions, Groups, Hosts, Agents — that you cycle through with `Tab`
+(or jump to with `1` / `2` / `3` / `4` / `5`):
 
-| Sessions | Groups | Hosts |
-| --- | --- | --- |
-| ![sessions](docs/screenshots/dashboard-sessions.png) | ![groups](docs/screenshots/dashboard-groups.png) | ![hosts](docs/screenshots/dashboard-hosts.png) |
+| Projects | Sessions | Groups | Hosts | Agents |
+| --- | --- | --- | --- | --- |
+| (cockpit per repo) | (raw tmux sessions) | (multi-host configs) | (one row per host) | (one row per claude pane) |
 
-Keys:
+### Projects (1)
+
+The dashboard's lead view. A **project** = a git repo root (or any
+directory with a `.tad/` marker) that tad has seen via a tmux pane cwd
+or a Claude transcript. Each row aggregates: number of tmux sessions
+in this project, number of claude agents running in it, how many of
+those are awaiting input, and the most recent transcript activity.
+
+```
+tad-github                3 sess   2 agt   1 waiting   · 4s
+salt-masters              1 sess   1 agt                · 2h
+gitlab-mcp                1 sess   0 agt                · 1d
+```
+
+Enter on a project attaches to its most-recently-active session — or
+jumps to its most-recently-active agent pane if there are no sessions.
+The preview pane shows root path, git branch + dirty count, and
+nested lists of sessions and agents (with the same `! awaiting · 2s`
+markers from the Agents view). It's the cockpit, not just an index.
+
+### Other views
+
+Same shapes as before, with the keystroke shifted:
+
+Keys (any view):
 - `↑/↓` or `j/k`         move selection
 - `Tab` / `Shift-Tab`    cycle views forward/back
-- `1`, `2`, `3`          jump to Sessions / Groups / Hosts
+- `1` / `2` / `3` / `4` / `5`   jump to Projects / Sessions / Groups / Hosts / Agents
 - `g` / `G`              first / last item
 - `Enter`                open the highlighted item
 - `n`                    new session — opens a name prompt (preseeded
                          with the highlighted item's short name; edit
                          and Enter to create)
 - `d`                    kill (sessions view only)
+- `s` / `S`              snooze / clear snooze (agents view only)
 - `/`                    enter filter mode (live — ↑↓ navigates, Enter
                          opens, Tab cycles views with filter applied,
                          Esc exits and clears)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
 
-Sessions/groups/hosts auto-refresh every ~1.5 seconds. The last view
-you were on (Sessions / Groups / Hosts) is remembered across launches
-in `$XDG_STATE_HOME/tad/dashboard.state` (typically
-`~/.local/state/tad/dashboard.state`).
+All views auto-refresh every ~1.5 seconds. The last view you were on
+is remembered across launches in `$XDG_STATE_HOME/tad/dashboard.state`
+(typically `~/.local/state/tad/dashboard.state`); first launch defaults
+to Projects.
 
 ## Theme
 

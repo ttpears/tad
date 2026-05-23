@@ -8,6 +8,7 @@ mod dashboard;
 mod doctor;
 mod groups;
 mod install;
+mod projects;
 mod sessions;
 mod snooze;
 mod theme;
