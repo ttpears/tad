@@ -20,8 +20,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::agents::{self, Agent};
-use crate::sessions::{self, Session};
+use crate::agents::Agent;
+use crate::sessions::Session;
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -42,18 +42,21 @@ pub struct Project {
     pub last_activity: Option<SystemTime>,
 }
 
-pub fn scan() -> Vec<Project> {
-    let sessions = sessions::list().unwrap_or_default();
-    let agents = agents::scan();
-
+/// Aggregate the already-scanned sessions and agents into Projects.
+///
+/// Earlier versions of this function ran their own `sessions::list()` +
+/// `agents::scan()` internally — which meant every dashboard tick
+/// triggered those (tmux subprocess + /proc walk + transcript reads)
+/// *twice*. Callers now do the scan once and hand the slices in.
+pub fn from_scanned(sessions: &[Session], agents: &[Agent]) -> Vec<Project> {
     // 1. Collect every cwd we can plausibly attribute to a project.
     let mut cwds: BTreeSet<PathBuf> = BTreeSet::new();
-    for s in &sessions {
+    for s in sessions {
         if !s.active_path.is_empty() {
             cwds.insert(PathBuf::from(&s.active_path));
         }
     }
-    for a in &agents {
+    for a in agents {
         cwds.insert(a.cwd.clone());
     }
 
@@ -73,7 +76,7 @@ pub fn scan() -> Vec<Project> {
     }
 
     // 3. Bucket each session and agent into the project containing its cwd.
-    for s in &sessions {
+    for s in sessions {
         if s.active_path.is_empty() {
             continue;
         }
@@ -82,7 +85,7 @@ pub fn scan() -> Vec<Project> {
             p.sessions.push(s.clone());
         }
     }
-    for a in &agents {
+    for a in agents {
         if let Some(p) = match_project(&mut by_root, &a.cwd) {
             p.agents.push(a.clone());
         }

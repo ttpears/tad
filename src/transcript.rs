@@ -23,8 +23,11 @@
 //! "Unknown" rather than panicking.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 /// What we infer about an agent from its transcript tail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +44,26 @@ pub enum Attention {
     Unknown,
 }
 
+/// Cache: each transcript file is read at most once per mtime.
+///
+/// Without this, every `agents::scan()` (every 1.5s in the dashboard,
+/// every 5s in `tad watch`) re-reads up to 256KB per claude pane —
+/// against my live setup that's ~2.5MB/s of disk traffic for content
+/// that didn't change. The cache reduces steady-state cost to one
+/// `fs::metadata` call per transcript (just to see if mtime moved).
+///
+/// Unbounded: one entry per *ever-seen* transcript file, which is
+/// small (one per claude session in your project history). If that
+/// ever becomes large enough to matter (thousands of transcripts in a
+/// single tad process) we'd need an LRU; for v1 the simple Mutex
+/// over a HashMap is the right shape.
+static CLASSIFY_CACHE: LazyLock<Mutex<HashMap<PathBuf, (SystemTime, Attention)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Read the last ~`tail_bytes` of the transcript and classify the agent's
-/// current state. None on read error. A safe default tail size (256KB) is
-/// large enough to span dozens of events on real transcripts.
+/// current state. A safe default tail size (256KB) is large enough to
+/// span dozens of events on real transcripts. Cached by (path, mtime):
+/// a repeat call with no change-on-disk is one `stat` and a map lookup.
 pub fn classify_file(path: &Path) -> Attention {
     classify_file_with(path, 256 * 1024)
 }
@@ -52,12 +72,30 @@ fn classify_file_with(path: &Path, tail_bytes: u64) -> Attention {
     let Ok(meta) = fs::metadata(path) else {
         return Attention::Unknown;
     };
+    let mtime = meta.modified().ok();
+
+    // Fast path: same mtime as last classification → same verdict.
+    if let Some(mt) = mtime {
+        let cache = CLASSIFY_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((cached_mt, cached_verdict)) = cache.get(path) {
+            if *cached_mt == mt {
+                return *cached_verdict;
+            }
+        }
+    }
+
     let len = meta.len();
     let start = len.saturating_sub(tail_bytes);
     let Ok(bytes) = read_tail(path, start) else {
         return Attention::Unknown;
     };
-    classify(&bytes)
+    let verdict = classify(&bytes);
+
+    if let Some(mt) = mtime {
+        let mut cache = CLASSIFY_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        cache.insert(path.to_path_buf(), (mt, verdict));
+    }
+    verdict
 }
 
 fn read_tail(path: &Path, start: u64) -> std::io::Result<Vec<u8>> {

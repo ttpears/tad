@@ -188,7 +188,7 @@ fn push_children(pid: u32, out: &mut Vec<u32>) {
 /// where the encoding is "every `/` becomes `-`". So `/home/me/repo` becomes
 /// `-home-me-repo`. Returns the path even if it doesn't exist on disk; use
 /// `latest_transcript` to get the actually-present jsonl.
-pub fn transcript_dir(cwd: &Path) -> PathBuf {
+fn transcript_dir(cwd: &Path) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/"))
         .join(".claude")
@@ -202,7 +202,7 @@ fn encoded_cwd(cwd: &Path) -> String {
 
 /// Most recently-modified `.jsonl` in the encoded-cwd dir, or `None` if the
 /// dir is missing or has no jsonl files.
-pub fn latest_transcript(cwd: &Path) -> Option<PathBuf> {
+fn latest_transcript(cwd: &Path) -> Option<PathBuf> {
     let dir = transcript_dir(cwd);
     let entries = std::fs::read_dir(&dir).ok()?;
     let mut latest: Option<(PathBuf, SystemTime)> = None;

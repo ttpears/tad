@@ -231,6 +231,15 @@ struct AppData {
     /// Project (typically git repo) frame around everything else.
     /// Derived from session/agent cwds — the primary noun.
     projects: Vec<Project>,
+    /// Snooze map loaded once per refresh (~1.5s) so the per-row
+    /// formatters don't each re-open the snooze file. Cheap to load
+    /// (one small YAML), but multiplied by every visible Agents row
+    /// and every preview render it was a real waste.
+    snoozes: crate::snooze::SnoozeState,
+    /// User UI prefs cached per refresh for the same reason as
+    /// `snoozes` — format_agent_line previously read `config.yaml`
+    /// once per row per render.
+    ui: crate::ui_config::UiConfig,
 }
 
 impl AppData {
@@ -256,15 +265,20 @@ impl AppData {
         }
         let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
         let agents = agents::scan();
-        // Projects derived after agents/sessions exist — they're a
-        // pure aggregation, not an additional source.
-        let project_list = projects::scan();
+        // Projects are a pure aggregation over the same sessions+agents
+        // — pass the slices in so we don't re-run the tmux subprocess
+        // and /proc walk a second time per refresh.
+        let project_list = projects::from_scanned(&sessions, &agents);
+        let snoozes = crate::snooze::load(std::time::SystemTime::now());
+        let ui = crate::ui_config::load();
         Self {
             sessions,
             groups,
             hosts,
             agents,
             projects: project_list,
+            snoozes,
+            ui,
         }
     }
 }
@@ -519,7 +533,13 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
 /// shell-quoted so prompts with spaces / quotes / dollar signs don't
 /// get mangled.
 fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -> Result<i32> {
-    let projects = projects::scan();
+    // Fresh post-dashboard scan so we see any session/agent the user
+    // might have spawned in another window between opening the modal
+    // and confirming. Pays one round of tmux + /proc + transcript
+    // reads, which is fine since dispatch is one-shot.
+    let sessions = sessions::list().unwrap_or_default();
+    let agents = agents::scan();
+    let projects = projects::from_scanned(&sessions, &agents);
     let p = projects
         .iter()
         .find(|p| p.name == project_name)
@@ -1577,7 +1597,7 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
             // Distinguish fresh-waiting (the loud signal: agent finished
             // just now, you should respond) from stale-waiting (the
             // muted signal: agent ended hours ago, you walked away).
-            let freshness = ui_config::load().awaiting_freshness;
+            let freshness = data.ui.awaiting_freshness;
             let age = agent
                 .last_activity
                 .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
@@ -1632,10 +1652,11 @@ fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'stati
     };
     let cwd_short = cwd_for_display(&agent.cwd);
 
-    // If this target has an active snooze, append a "💤 in Xm" badge so
-    // the user can see at a glance which rows the watcher is suppressing.
-    let snoozes = snooze::load(std::time::SystemTime::now());
-    let snooze_badge = snoozes.snoozes.get(target).and_then(|until| {
+    // If this target has an active snooze, append a "snoozed in Xm" badge
+    // so the user can see at a glance which rows the watcher is
+    // suppressing. Snoozes come from `data.snoozes` — loaded once per
+    // refresh by AppData, not re-opened per visible row.
+    let snooze_badge = data.snoozes.snoozes.get(target).and_then(|until| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
@@ -1966,8 +1987,8 @@ fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<Line<'stati
     }
     // Surface an active snooze in the preview alongside the line badge,
     // so a user previewing a row knows the watcher is suppressing it.
-    let snoozes = snooze::load(std::time::SystemTime::now());
-    if let Some(until) = snoozes.snoozes.get(target) {
+    // Read from the per-refresh AppData cache, not the on-disk file.
+    if let Some(until) = data.snoozes.snoozes.get(target) {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2147,6 +2168,8 @@ mod tests {
             groups: vec![],
             hosts: vec![],
             agents: vec![],
+            snoozes: crate::snooze::SnoozeState::default(),
+            ui: crate::ui_config::UiConfig::default(),
             projects: vec![Project {
                 root: PathBuf::from("/repo"),
                 name: "repo".into(),
@@ -2162,6 +2185,8 @@ mod tests {
             groups: vec![],
             hosts: vec![],
             agents: vec![agent.clone()],
+            snoozes: crate::snooze::SnoozeState::default(),
+            ui: crate::ui_config::UiConfig::default(),
             projects: vec![Project {
                 root: PathBuf::from("/repo"),
                 name: "repo".into(),
@@ -2180,6 +2205,8 @@ mod tests {
             groups: vec![],
             hosts: vec![],
             agents: vec![agent.clone()],
+            snoozes: crate::snooze::SnoozeState::default(),
+            ui: crate::ui_config::UiConfig::default(),
             projects: vec![Project {
                 root: PathBuf::from("/repo"),
                 name: "repo".into(),

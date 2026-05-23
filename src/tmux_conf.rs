@@ -43,7 +43,7 @@ pub fn resolve_path(override_path: Option<&Path>) -> PathBuf {
     home.join(".tmux.conf")
 }
 
-pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let tmp = path.with_extension("tad.tmp");
     {
         let mut f =
