@@ -192,31 +192,63 @@ fn check_marker_blocks(r: &mut Report) {
     let path = tmux_conf::resolve_path(None);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
 
+    // (label, begin marker, end marker). Checking both ends matters:
+    // a hand-edit that deletes only the closing marker would make
+    // `tad install` (and any other tad-conf operation on this file)
+    // bail with "markers malformed" — that's a `Fail`, not a `Warn`,
+    // because tad's own tooling can't unblock the user there.
     let cases = [
         (
             "popup keybind block in tmux conf",
             "# >>> tad tmux-keybind >>>",
+            "# <<< tad tmux-keybind <<<",
         ),
         (
             "#(tad status) segment block in tmux conf",
             "# >>> tad status segment >>>",
+            "# <<< tad status segment <<<",
         ),
         (
             "tad watch startup hook in tmux conf",
             "# >>> tad watch startup >>>",
+            "# <<< tad watch startup <<<",
         ),
     ];
-    for (label, marker) in cases {
-        if text.contains(marker) {
-            r.add(label, Verdict::Pass(path.display().to_string()));
-        } else {
-            r.add(
-                label,
-                Verdict::Warn {
-                    msg: format!("not installed in {}", path.display()),
-                    fix: Some("run `tad install`".into()),
-                },
-            );
+    for (label, begin, end) in cases {
+        let has_begin = text.contains(begin);
+        let has_end = text.contains(end);
+        match (has_begin, has_end) {
+            (true, true) => {
+                r.add(label, Verdict::Pass(path.display().to_string()));
+            }
+            (false, false) => {
+                r.add(
+                    label,
+                    Verdict::Warn {
+                        msg: format!("not installed in {}", path.display()),
+                        fix: Some("run `tad install`".into()),
+                    },
+                );
+            }
+            (true, false) | (false, true) => {
+                let which = if has_begin { "begin" } else { "end" };
+                r.add(
+                    label,
+                    Verdict::Fail {
+                        msg: format!(
+                            "{} has only the {which} marker; `tad install` and \
+                             `--uninstall` will refuse to touch the file until \
+                             this is fixed",
+                            path.display()
+                        ),
+                        fix: Some(format!(
+                            "open {} and either restore the missing marker or \
+                             delete the block by hand",
+                            path.display()
+                        )),
+                    },
+                );
+            }
         }
     }
 }
@@ -247,7 +279,7 @@ fn check_watch_pidfile(r: &mut Report) {
             return;
         }
     };
-    let alive = pid_is_alive(pid);
+    let alive = crate::proc_util::pid_is_alive(pid);
     if alive {
         r.add(
             "tad watch pidfile",
@@ -265,14 +297,6 @@ fn check_watch_pidfile(r: &mut Report) {
             },
         );
     }
-}
-
-fn pid_is_alive(pid: i32) -> bool {
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn check_auto_popup_consistency(r: &mut Report) {

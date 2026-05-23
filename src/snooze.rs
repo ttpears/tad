@@ -55,7 +55,23 @@ pub fn save(state: &SnoozeState) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let text = serde_yml::to_string(state)?;
-    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    // Write atomically — `tad watch` reads this file on every tick.
+    // A non-atomic `fs::write` could surface a truncated YAML to the
+    // watcher's `from_str`, falling back to an empty state, treating
+    // every snooze as expired and firing a spurious popup. Temp + rename
+    // is atomic at the filesystem level on POSIX so the watcher only
+    // ever sees the previous full file or the new full file.
+    use std::io::Write;
+    let tmp = path.with_extension("yaml.tmp");
+    {
+        let mut f =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        f.write_all(text.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        f.sync_all().ok();
+    }
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("renaming {} → {}", tmp.display(), path.display()))?;
     Ok(())
 }
 

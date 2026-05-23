@@ -195,6 +195,12 @@ impl Popper for RealPopper {
         // good enough for the single-user case. If no client is attached
         // (user not currently viewing tmux), display-popup fails silently
         // and we'll try again on the next Active→Idle transition.
+        //
+        // The target is shell-quoted because tmux's display-popup passes
+        // its final argument to `sh -c`, and tmux session names can
+        // contain spaces / quotes / shell metacharacters. An unquoted
+        // `tad --select-agent my work:0.0` would split on the space and
+        // launch with a garbage target.
         let _ = Command::new("tmux")
             .args([
                 "display-popup",
@@ -203,7 +209,7 @@ impl Popper for RealPopper {
                 &ui.auto_popup_width,
                 "-h",
                 &ui.auto_popup_height,
-                &format!("tad --select-agent {target}"),
+                &format!("tad --select-agent {}", crate::shell::quote(target)),
             ])
             .status();
     }
@@ -222,7 +228,7 @@ fn pid_path() -> PathBuf {
 fn enforce_singleton(path: &std::path::Path) -> Result<()> {
     if let Ok(text) = fs::read_to_string(path) {
         if let Ok(pid) = text.trim().parse::<i32>() {
-            if pid_is_alive(pid) {
+            if crate::proc_util::pid_is_alive(pid) {
                 bail!(
                     "tad watch already running as pid {pid} (delete {} to override)",
                     path.display()
@@ -236,18 +242,6 @@ fn enforce_singleton(path: &std::path::Path) -> Result<()> {
     let me = std::process::id();
     fs::write(path, me.to_string()).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
-}
-
-fn pid_is_alive(pid: i32) -> bool {
-    // kill(pid, 0) returns 0 if the process exists and we have permission
-    // to signal it. ESRCH (no such process) → false; EPERM (exists but
-    // not signal-able) → true (still alive, just not ours).
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    err.raw_os_error() == Some(libc::EPERM)
 }
 
 struct PidFileGuard(PathBuf);
@@ -294,20 +288,8 @@ mod tests {
         assert!(should_pop(Some(stale), Duration::from_secs(60), now));
     }
 
-    #[test]
-    fn pidfile_detects_alive_self() {
-        let me = std::process::id() as i32;
-        assert!(pid_is_alive(me));
-    }
-
-    #[test]
-    fn pidfile_detects_dead_pid() {
-        // PID 1 always exists on a real system. To test a definitely-not-
-        // alive PID we use a deliberately wild number. There's a small
-        // chance an unlucky pid roll picks this, so we accept either
-        // outcome but verify the call doesn't panic.
-        let _ = pid_is_alive(2_147_483_640);
-    }
+    // pid_is_alive lives in `crate::proc_util` now and is tested there;
+    // the duplicate tests that used to live here are gone.
 
     use crate::agents::Agent;
     use std::path::PathBuf;

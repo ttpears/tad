@@ -132,11 +132,8 @@ fn install_keybind(path: &Path, opts: &InstallOpts) -> Result<bool> {
 }
 
 fn install_status(path: &Path, opts: &InstallOpts) -> Result<bool> {
-    // status-interval also goes in here, with `set -gF` so it doesn't
-    // overwrite a user-set value (set -gF only writes if the format
-    // evaluates differently... actually that's not what -F does). Just
-    // use `set -g status-interval` — last write wins, and this block
-    // runs last because it's appended.
+    // `set -g` last-write-wins; acceptable here because this is a
+    // managed block and re-running tad install overwrites itself.
     let body = format!(
         "# Managed by `tad install`. Re-run to update; remove with\n\
          # `tad install --uninstall`.\n\

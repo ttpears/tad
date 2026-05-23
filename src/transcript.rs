@@ -150,10 +150,20 @@ fn decide(ev: &Event) -> Option<Attention> {
         "assistant" => {
             let stop = ev.message.as_ref()?.stop_reason.as_deref();
             match stop {
-                Some("end_turn") | Some("stop_sequence") | Some("max_tokens") => {
-                    Some(Attention::AwaitingInput)
-                }
+                // The assistant intentionally finished its response.
+                // The next event should come from the user, so we're
+                // awaiting input.
+                Some("end_turn") | Some("stop_sequence") => Some(Attention::AwaitingInput),
+                // The assistant requested a tool — claude is still
+                // thinking, will continue when the tool_result event
+                // arrives.
                 Some("tool_use") => Some(Attention::Working),
+                // max_tokens means the response was truncated mid-stream
+                // because it hit the output-token cap. Claude did *not*
+                // finish its turn — popping the dashboard here would
+                // summon the user for a response that's still being
+                // produced. Treat as Working.
+                Some("max_tokens") => Some(Attention::Working),
                 _ => None,
             }
         }
@@ -258,6 +268,17 @@ this is not json at all
     #[test]
     fn empty_input_is_unknown() {
         assert_eq!(classify(b""), Attention::Unknown);
+    }
+
+    /// `max_tokens` means the response was *truncated*, not finished.
+    /// Classifying it as AwaitingInput would summon the user during a
+    /// still-being-produced long response.
+    #[test]
+    fn max_tokens_is_working_not_awaiting() {
+        let lines = "\
+{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"max_tokens\"}}
+";
+        assert_eq!(classify(lines.as_bytes()), Attention::Working);
     }
 
     /// stop_reason we don't recognise on the most recent assistant event →

@@ -5,7 +5,6 @@
 //! happen here after the alternate-screen has been torn down.
 
 use anyhow::Result;
-use std::path::Path;
 
 use crate::agents;
 use crate::projects::{self, Project};
@@ -94,7 +93,7 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
         .ok_or_else(|| anyhow::anyhow!("project {} no longer exists", project_name))?;
     let root_str = p.root.to_string_lossy().into_owned();
     let cmd = match prompt {
-        Some(t) if !t.trim().is_empty() => format!("claude {}", shell_quote(t)),
+        Some(t) if !t.trim().is_empty() => format!("claude {}", crate::shell::quote(t)),
         _ => "claude".to_string(),
     };
 
@@ -121,6 +120,13 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
         let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (s.name.clone(), target)
     } else {
+        // Ask tmux for the actual created target via `-P -F` rather than
+        // assuming `{project_name}:0`. If the requested session name was
+        // already taken (race with another spawn / external tmux work)
+        // tmux may pick a different name, and the window index isn't
+        // always 0 for new-session either if the user has window-base-
+        // index set. Reading the real target avoids switching to a
+        // window that doesn't exist.
         let out = tmux::run([
             "new-session",
             "-d",
@@ -130,6 +136,9 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
             &root_str,
             "-n",
             project_name,
+            "-P",
+            "-F",
+            "#{session_name}:#{window_index}",
             &cmd,
         ])?;
         if !out.status.success() {
@@ -138,7 +147,16 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        (project_name.to_string(), format!("{project_name}:0"))
+        let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Pull the session name back out of the target for the
+        // attach-fallback branch below; if anything's malformed, fall
+        // back to the project name as a best guess.
+        let session = target
+            .split(':')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| project_name.to_string());
+        (session, target)
     };
 
     let inside_tmux = std::env::var_os("TMUX").is_some();
@@ -148,24 +166,6 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
         let _ = tmux::run(["attach", "-t", &session_name]);
     }
     Ok(0)
-}
-
-/// POSIX-safe single-quote wrapping: `it's a "test"` →
-/// `'it'\''s a "test"'`. Used by `spawn_agent_in_project` to pass
-/// arbitrary prompts to `claude` through `tmux new-window` without
-/// shell interpretation.
-pub(super) fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// Find the longest-prefix project of `$PWD` in the scanned list.
@@ -202,10 +202,6 @@ pub(super) fn project_enter_target(data: &AppData, name: &str) -> Option<OpenTar
     }
     None
 }
-
-// The Path import is used by the tests below for assertion plumbing.
-#[allow(dead_code)]
-fn _path_use(_p: &Path) {}
 
 /// Kill a Claude Code agent by sending SIGINT to its `claude` PID.
 /// Gentle on purpose: SIGINT lets claude flush its transcript and any
@@ -264,30 +260,7 @@ mod tests {
         assert_eq!(window_target_of("session:0"), "session:0");
     }
 
-    #[test]
-    fn shell_quote_wraps_in_single_quotes() {
-        assert_eq!(shell_quote("hello"), "'hello'");
-        assert_eq!(shell_quote("with spaces"), "'with spaces'");
-        assert_eq!(shell_quote(""), "''");
-    }
-
-    #[test]
-    fn shell_quote_escapes_embedded_single_quotes() {
-        // POSIX-canonical: close the single-quote string, escape a
-        // literal single quote, reopen. `it's` → `'it'\''s'`.
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-        assert_eq!(shell_quote("'"), "''\\'''");
-    }
-
-    #[test]
-    fn shell_quote_leaves_dollar_and_backslash_alone_inside_single_quotes() {
-        // sh's single quotes are literal — no expansion inside — so
-        // $VAR / `cmd` / \n pass through verbatim and the prompt
-        // arrives at claude exactly as the user typed it.
-        assert_eq!(shell_quote("$PATH"), "'$PATH'");
-        assert_eq!(shell_quote("a\\nb"), "'a\\nb'");
-        assert_eq!(shell_quote("`whoami`"), "'`whoami`'");
-    }
+    // shell_quote moved to `crate::shell::quote`; coverage is in shell.rs.
 
     /// Project Enter dispatch picks the most-recently-active session,
     /// falls back to the most-recently-active agent, returns None when
