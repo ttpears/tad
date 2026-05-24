@@ -1,20 +1,27 @@
-//! Discovery layer for Claude Code agents running across tmux panes.
+//! Discovery layer for AI coding agents running across tmux panes.
 //!
-//! The "Agents" dashboard view and the tmux status-line segment (`tad status`)
-//! both read from this module. Detection is process-tree based: enumerate
-//! every tmux pane, walk the descendant pids of each pane shell, and match a
-//! process named `claude`. Activity comes from the mtime of the most recent
-//! `.jsonl` transcript file under `~/.claude/projects/<encoded-cwd>/` — that's
-//! the SDK's standard session-transcript format, so it's the most stable
-//! signal we can read without hooks.
+//! The "Agents" dashboard view and the tmux status-line segment (`tad
+//! status`) both read from this module. Detection is process-tree
+//! based: enumerate every tmux pane, walk the descendant pids of each
+//! pane shell, and ask each registered [`crate::provider::Provider`]
+//! whether the process matches. Activity comes from the mtime of the
+//! provider's session-transcript file for the agent's cwd.
+//!
+//! Provider-agnostic by design — today there's exactly one provider
+//! (Claude Code), but everything that varies between agent tools
+//! (process name, transcript location, attention parsing, spawn
+//! command) lives behind the trait, not here.
 //!
 //! Linux-only: process-tree walking reads `/proc/<pid>/task/<tid>/children`.
-//! tad's release artifacts are Linux x86_64, so this is in line with the
-//! rest of the project.
+//! tad's release artifacts are Linux x86_64, so this is in line with
+//! the rest of the project.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
+
+use crate::provider::{self, Provider};
+use crate::transcript;
 
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -26,17 +33,28 @@ pub struct Agent {
     pub window_name: String,
     pub pane_index: String,
     pub cwd: PathBuf,
-    /// PID of the `claude` process inside the pane (not the pane shell).
-    pub claude_pid: u32,
-    /// Mtime of the most recent transcript jsonl, if one exists in the
-    /// encoded-cwd directory under `~/.claude/projects/`.
+    /// PID of the agent process inside the pane (not the pane shell).
+    pub agent_pid: u32,
+    /// Id of the [`Provider`] that matched this process (e.g.
+    /// `"claude"`). Use [`crate::provider::by_id`] to look up the
+    /// provider impl for spawn / classify / transcript-path operations
+    /// you want to do later — the registry may have changed between
+    /// scan time and lookup, so handle `None`.
+    pub provider_id: &'static str,
+    /// Mtime of the most recent transcript file (provider-specific
+    /// location), if one exists.
     pub last_activity: Option<SystemTime>,
     pub transcript_path: Option<PathBuf>,
+    /// Best-effort "is this agent waiting for me right now" derived
+    /// from the tail of the provider's transcript. Unknown when
+    /// there's no transcript or the format is unfamiliar — callers
+    /// should fall back to the mtime-based `activity_status` heuristic.
+    pub attention: transcript::Attention,
 }
 
 impl Agent {
-    /// "Working" if the transcript mtime is within `active_window`, else
-    /// "idle". `None` if we couldn't find any transcript at all.
+    /// "Working" if the transcript mtime is within `active_window`,
+    /// else "idle". `NoTranscript` if we couldn't find any transcript.
     pub fn activity_status(&self, active_window: Duration) -> ActivityStatus {
         let Some(t) = self.last_activity else {
             return ActivityStatus::NoTranscript;
@@ -57,13 +75,15 @@ pub enum ActivityStatus {
     NoTranscript,
 }
 
-/// Scan every tmux pane on the running server, return one Agent per pane
-/// whose process tree contains a `claude` process. Empty Vec if tmux isn't
-/// running or no agents found.
+/// Scan every tmux pane on the running server, return one Agent per
+/// pane whose process tree contains a process matched by some
+/// registered provider. Empty Vec if tmux isn't running or no agents
+/// found.
 pub fn scan() -> Vec<Agent> {
     let Some(output) = list_panes() else {
         return Vec::new();
     };
+    let providers = provider::providers();
     let mut out = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split('\x1f').collect();
@@ -74,15 +94,19 @@ pub fn scan() -> Vec<Agent> {
             Ok(n) => n,
             Err(_) => continue,
         };
-        let Some(claude_pid) = find_claude_pid(pane_pid) else {
+        let Some((agent_pid, prov)) = find_agent_pid(pane_pid, providers) else {
             continue;
         };
         let cwd = PathBuf::from(parts[5]);
-        let transcript_path = latest_transcript(&cwd);
+        let transcript_path = prov.latest_transcript(&cwd);
         let last_activity = transcript_path
             .as_deref()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
+        let attention = transcript_path
+            .as_deref()
+            .map(|p| prov.classify_attention(p))
+            .unwrap_or(transcript::Attention::Unknown);
         out.push(Agent {
             target: format!("{}:{}.{}", parts[0], parts[1], parts[3]),
             session: parts[0].to_string(),
@@ -90,9 +114,11 @@ pub fn scan() -> Vec<Agent> {
             window_name: parts[2].to_string(),
             pane_index: parts[3].to_string(),
             cwd,
-            claude_pid,
+            agent_pid,
+            provider_id: prov.id(),
             last_activity,
             transcript_path,
+            attention,
         });
     }
     // Most recently active first, no-transcript last.
@@ -122,9 +148,16 @@ fn list_panes() -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// BFS the descendant process tree rooted at `root_pid`, returning the first
-/// pid we find whose `comm` matches `claude`. Stops as soon as one is found.
-fn find_claude_pid(root_pid: u32) -> Option<u32> {
+/// BFS the descendant process tree rooted at `root_pid` looking for a
+/// process matched by any registered provider. Stops as soon as one is
+/// found and returns the matched PID and the provider that claimed it.
+/// First-provider-wins: providers earlier in the [`provider::providers`]
+/// slice take precedence when both match the same comm (shouldn't
+/// happen if `matches_comm` predicates are well-designed).
+fn find_agent_pid(
+    root_pid: u32,
+    providers: &[&'static dyn Provider],
+) -> Option<(u32, &'static dyn Provider)> {
     let mut stack = vec![root_pid];
     // Cheap loop guard against pathological /proc states.
     let mut visited = 0usize;
@@ -133,24 +166,22 @@ fn find_claude_pid(root_pid: u32) -> Option<u32> {
         if visited > 4096 {
             return None;
         }
-        if is_claude(pid) {
-            return Some(pid);
+        if let Some(comm) = process_comm(pid) {
+            for p in providers {
+                if p.matches_comm(&comm) {
+                    return Some((pid, *p));
+                }
+            }
         }
         push_children(pid, &mut stack);
     }
     None
 }
 
-/// Match either the bare `claude` binary or `claude-*` wrapper variants
-/// (some users symlink under names like `claude-code`). 15-byte `comm` is
-/// truncated by the kernel, so anything longer than that won't match here —
-/// but `claude` itself fits comfortably.
-fn is_claude(pid: u32) -> bool {
-    let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
-        return false;
-    };
-    let comm = comm.trim();
-    comm == "claude" || comm.starts_with("claude-") || comm.starts_with("claude ")
+fn process_comm(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 fn push_children(pid: u32, out: &mut Vec<u32>) {
@@ -169,44 +200,6 @@ fn push_children(pid: u32, out: &mut Vec<u32>) {
             }
         }
     }
-}
-
-/// Claude Code stores transcripts under `~/.claude/projects/<encoded-cwd>/`
-/// where the encoding is "every `/` becomes `-`". So `/home/me/repo` becomes
-/// `-home-me-repo`. Returns the path even if it doesn't exist on disk; use
-/// `latest_transcript` to get the actually-present jsonl.
-pub fn transcript_dir(cwd: &Path) -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".claude")
-        .join("projects")
-        .join(encoded_cwd(cwd))
-}
-
-fn encoded_cwd(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace('/', "-")
-}
-
-/// Most recently-modified `.jsonl` in the encoded-cwd dir, or `None` if the
-/// dir is missing or has no jsonl files.
-pub fn latest_transcript(cwd: &Path) -> Option<PathBuf> {
-    let dir = transcript_dir(cwd);
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut latest: Option<(PathBuf, SystemTime)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        match &latest {
-            Some((_, t)) if *t >= mtime => {}
-            _ => latest = Some((path, mtime)),
-        }
-    }
-    latest.map(|(p, _)| p)
 }
 
 /// Aggregate counts for the status-line segment.
@@ -229,8 +222,8 @@ pub fn counts(agents: &[Agent], active_window: Duration) -> StatusCounts {
     }
 }
 
-/// Human-friendly "Xs/Xm/Xh ago" formatter shared by the dashboard preview
-/// and the agents-view line formatter.
+/// Human-friendly "Xs/Xm/Xh ago" formatter shared by the dashboard
+/// preview and the agents-view line formatter.
 pub fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -247,22 +240,7 @@ pub fn format_elapsed(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encoded_cwd_replaces_slashes_with_dashes() {
-        assert_eq!(
-            encoded_cwd(Path::new("/home/me/git/tad-github")),
-            "-home-me-git-tad-github"
-        );
-        assert_eq!(encoded_cwd(Path::new("/")), "-");
-    }
-
-    #[test]
-    fn transcript_dir_lives_under_dot_claude_projects() {
-        let p = transcript_dir(Path::new("/home/me/repo"));
-        let s = p.to_string_lossy();
-        assert!(s.contains("/.claude/projects/-home-me-repo"));
-    }
+    use std::path::PathBuf;
 
     #[test]
     fn format_elapsed_uses_appropriate_unit() {
@@ -282,9 +260,11 @@ mod tests {
             window_name: "w".into(),
             pane_index: "0".into(),
             cwd: PathBuf::from("/tmp"),
-            claude_pid: 1,
+            agent_pid: 1,
+            provider_id: "claude",
             last_activity: t,
             transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
         };
         let agents = vec![
             mk(Some(now)),                           // active
@@ -306,9 +286,11 @@ mod tests {
             window_name: "w".into(),
             pane_index: "0".into(),
             cwd: PathBuf::from("/tmp"),
-            claude_pid: 1,
+            agent_pid: 1,
+            provider_id: "claude",
             last_activity: Some(SystemTime::now() - Duration::from_secs(5)),
             transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
         };
         assert!(matches!(
             agent.activity_status(Duration::from_secs(30)),
@@ -320,13 +302,11 @@ mod tests {
         ));
     }
 
-    /// Smoke test: walking our own current process should succeed (we won't
-    /// find a `claude` in our test process tree, so it should be None — but
-    /// importantly the function must terminate and not panic).
+    /// Smoke test: walking our own current process should terminate
+    /// (cargo test isn't running claude, so no match expected).
     #[test]
-    fn find_claude_pid_on_self_terminates() {
+    fn find_agent_pid_on_self_terminates() {
         let me = std::process::id();
-        // We're running under cargo test, no claude here.
-        assert!(find_claude_pid(me).is_none());
+        assert!(find_agent_pid(me, provider::providers()).is_none());
     }
 }

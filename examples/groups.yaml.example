@@ -1,4 +1,8 @@
-# Example tad groups file. Copy to ~/.config/tad/groups.yaml and customize.
+# Reference for the `groups:` schema. As of v0.10 groups live inside the
+# unified ~/.config/tad/config.yaml file under a `groups:` key — see
+# examples/config.yaml.example for the unified layout. This standalone
+# file is kept as schema documentation; if you have a pre-v0.10 install
+# tad migrates it into config.yaml on first launch.
 # All hostnames here are fictional.
 #
 # Schema:
@@ -13,7 +17,7 @@
 #
 # Open with:  tad -g <name>
 # Drill in:   tad -g <name> <host>
-# Edit:       tad groups-edit
+# Edit:       tad groups edit
 
 _meta:
   description: Example tad groups (fictional hosts).

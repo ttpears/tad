@@ -1,16 +1,18 @@
-# tad app config. Copy to ~/.config/tad/config.yaml.
+# tad config. Copy to ~/.config/tad/config.yaml.
 #
-# theme: one of the built-in names, or a custom inline palette.
-#
-# Built-in names:
+# Unified config: theme, ui prefs, and groups all live in this one file.
+# Pre-v0.10 layouts split groups out into ~/.config/tad/groups.yaml; on
+# first launch tad auto-migrates that into the `groups:` section here.
+
+# ---- theme ----
+# A built-in name, or a custom inline palette. Built-ins:
 #   tokyonight  tokyonight-storm  dracula  nord  gruvbox  catppuccin
 #   solarized-dark  onedark  terminal  (terminal uses your 16-color palette)
-
 theme: tokyonight
 
-# To override individual colors, use an inline map instead of a name.
-# Any keys you omit fall back to the tokyonight defaults. Values are hex
-# RGB ("#RRGGBB" or "RRGGBB").
+# To override individual colors, use an inline map instead of a name. Any
+# key you omit falls back to the tokyonight defaults. Values are hex RGB
+# ("#RRGGBB" or "RRGGBB").
 #
 # theme:
 #   fg: "#a9b1d6"
@@ -22,3 +24,14 @@ theme: tokyonight
 #   error: "#f7768e"
 #   selection_bg: "#2a2e42"
 #   border: "#3b4261"
+
+# ---- groups ----
+# Multi-host configurations for `tad -g <name>` / the dashboard Groups view.
+# See examples/groups.yaml.example for the full schema and more examples.
+groups:
+  web:
+    layout: panes              # panes | synced-panes | windows | browse
+    hosts:
+      - web-1.example.com
+      - web-2.example.com
+      - web-3.example.com

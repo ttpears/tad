@@ -1,22 +1,19 @@
 #compdef tad
-# zsh completion for tad. Source of truth: `tad complete` and `tad groups`.
+# zsh completion for tad. Source of truth: `tad complete` and `tad groups list`.
 
 _tad() {
-   # Subcommand position
+   # ---- top-level (position 2) ----
    if (( CURRENT == 2 )); then
       local -a subs
       subs=(
-         'complete:print sessions (internal)'
-         'groups:list groups'
-         'group-hosts:list hosts in a group'
-         'groups-add:add a group'
-         'groups-rm:remove a group'
-         'groups-edit:open groups.yaml in $EDITOR'
+         'groups:manage groups (list, hosts, add, rm, edit)'
          'config:first-launch wizard / groups editor (TUI)'
          'tmux-keybind:print/install a tmux popup binding for the dashboard'
          'status:one-line summary of running Claude Code agents (for tmux status-line)'
+         'watch:long-running poller — auto-popup the dashboard on Active→Idle'
       )
-      # Also offer existing sessions as completion candidates (most common case)
+      # Sessions and group names are first-class top-level completions
+      # because `tad <session>` / `tad <group>` is the common bare invocation.
       local -a attached detached state rest
       while IFS=$'\t' read -r state rest; do
          case $state in
@@ -25,7 +22,7 @@ _tad() {
          esac
       done < <(tad complete 2>/dev/null)
       local -a groups
-      groups=("${(@f)$(tad groups 2>/dev/null)}")
+      groups=("${(@f)$(tad groups list 2>/dev/null)}")
       _describe -t commands 'command' subs
       _describe -t attached 'attached session' attached
       _describe -t detached 'detached session' detached
@@ -40,26 +37,46 @@ _tad() {
             _tad_groups
          elif (( CURRENT == 4 )); then
             local -a hosts
-            hosts=("${(@f)$(tad group-hosts ${words[3]} 2>/dev/null)}")
+            hosts=("${(@f)$(tad groups hosts ${words[3]} 2>/dev/null)}")
             _describe -t hosts "host in ${words[3]}" hosts
          fi
          return
          ;;
-      group-hosts|groups-rm)
-         if (( CURRENT == 3 )); then
-            _tad_groups
-         elif (( CURRENT == 4 )) && [[ ${words[2]} == group-hosts ]]; then
-            # Informational: show hosts in the chosen group
-            local -a hosts
-            hosts=("${(@f)$(tad group-hosts ${words[3]} 2>/dev/null)}")
-            _describe -t hosts "host in ${words[3]}" hosts
-         fi
+      groups)
+         _tad_groups_sub
          return
          ;;
-      groups-add)
-         # tad groups-add <name> <layout> <host>...
-         # position 3 = NAME (free-form), 4 = LAYOUT, 5+ = HOSTS.
+   esac
+}
+
+# Completion inside `tad groups <sub>` ...
+_tad_groups_sub() {
+   if (( CURRENT == 3 )); then
+      local -a subs=(
+         'list:list known groups'
+         'hosts:print hosts in a group'
+         'add:add a group (interactive wizard if no args)'
+         'rm:remove a group'
+         'edit:open the groups file in $EDITOR'
+      )
+      _describe -t commands 'groups subcommand' subs
+      return
+   fi
+
+   case ${words[3]} in
+      hosts|rm)
          if (( CURRENT == 4 )); then
+            _tad_groups
+         elif (( CURRENT == 5 )) && [[ ${words[3]} == hosts ]]; then
+            local -a hosts
+            hosts=("${(@f)$(tad groups hosts ${words[4]} 2>/dev/null)}")
+            _describe -t hosts "host in ${words[4]}" hosts
+         fi
+         ;;
+      add)
+         # tad groups add <name> <layout> <host>...
+         # position 4 = NAME (free-form), 5 = LAYOUT, 6+ = HOSTS.
+         if (( CURRENT == 5 )); then
             local -a layouts
             layouts=(
                'panes:single window, one pane per host'
@@ -68,22 +85,21 @@ _tad() {
                'browse:list hosts only, no auto-open'
             )
             _describe -t layouts 'layout' layouts
-         elif (( CURRENT >= 5 )); then
+         elif (( CURRENT >= 6 )); then
             local -a all_hosts g
-            for g in "${(@f)$(tad groups 2>/dev/null | cut -d: -f1)}"; do
+            for g in "${(@f)$(tad groups list 2>/dev/null | cut -d: -f1)}"; do
                [[ -n $g ]] || continue
-               all_hosts+=("${(@f)$(tad group-hosts $g 2>/dev/null)}")
+               all_hosts+=("${(@f)$(tad groups hosts $g 2>/dev/null)}")
             done
             _describe -t hosts 'known host' all_hosts
          fi
-         return
          ;;
    esac
 }
 
 _tad_groups() {
    local -a groups
-   groups=("${(@f)$(tad groups 2>/dev/null)}")
+   groups=("${(@f)$(tad groups list 2>/dev/null)}")
    _describe -t groups 'group' groups
 }
 

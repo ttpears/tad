@@ -134,7 +134,7 @@ autoload -Uz compinit && compinit
 
 ## First-launch wizard / `tad config`
 
-The first time you run bare `tad` with no `~/.config/tad/groups.yaml`,
+The first time you run bare `tad` with no groups configured,
 a TUI wizard offers to import SSH hosts from sources you already have
 on disk and shape them into groups. You can also launch it any time
 with `tad config` — when a config already exists, that opens an edit
@@ -204,14 +204,14 @@ function tad() {
    would conflict.
 4. **Define your groups**. Either let the first-launch wizard /
    `tad config` mine them from your shell history and `~/.ssh/config`,
-   or open `tad groups-edit` and hand-edit, or run `tad groups-add`
+   or open `tad groups edit` and hand-edit, or run `tad groups add`
    for a single-group interactive prompt. The config lives at
-   `~/.config/tad/groups.yaml`. The old function knew nothing about
+   `~/.config/tad/config.yaml` under the `groups:` key. The old function knew nothing about
    groups; everything else is a strict superset of the old behavior so
    existing muscle memory still works:
    - `tad <name>` — attach or create (same as old)
    - `tad` — opens the dashboard (was: list sessions)
-   - new: `tad -g <group>`, `tad groups`, `tad config`, `tad complete`, etc.
+   - new: `tad -g <group>`, `tad groups`, `tad config`, etc.
 5. **Optional: pick a theme**. Drop `theme: tokyonight` into
    `~/.config/tad/config.yaml` (or any of the built-ins; see Theme
    section).
@@ -229,12 +229,14 @@ tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
 tad config                   first-launch wizard / groups editor (TUI)
-tad groups                   list known groups
-tad group-hosts <group>      list hosts in a group
-tad groups-add <name> <layout> <host>...
+
+tad groups [list]            list known groups (default subcommand)
+tad groups hosts <group>     list hosts in a group
+tad groups add <name> <layout> <host>...
                              add a group (layout: panes|synced-panes|windows|browse)
-tad groups-rm <name>         remove a group
-tad groups-edit              open the groups file in $EDITOR
+                             — with no args, launches an interactive prompt
+tad groups rm <name>         remove a group
+tad groups edit              open the groups file in $EDITOR
 
 tad tmux-keybind             print a tmux popup binding for the dashboard
 tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
@@ -242,9 +244,17 @@ tad tmux-keybind --install   write it into ~/.tmux.conf (idempotent)
 tad status                   one-line summary of running Claude Code agents
                              across all tmux panes — for `#(tad status)` in
                              your status-line
+tad watch                    long-running poller that auto-pops the dashboard
+                             when an agent goes idle (run from your shell rc
+                             / tmux startup hook / systemd-user service)
 
-tad complete                 emit completion source (used by shell)
+tad --select-agent <target>  open the dashboard on the Agents view with the
+                             given pane preselected (used by `tad watch`)
 ```
+
+The `tad groups …` family used to live as flat subcommands
+(`tad groups-add`, `tad group-hosts`, etc.). Those still parse but error
+with a one-line hint pointing to the new form — update any scripts.
 
 ## Jumping back to the dashboard from inside tmux
 
@@ -327,11 +337,60 @@ Detection is process-tree based (walks `/proc/<pane_pid>/task/*/children`
 looking for a `claude` comm), so it catches any agent regardless of how
 it was started.
 
+### `tad watch`: auto-pop the dashboard when an agent needs you
+
+The status segment is for *checking*. `tad watch` is for *being summoned*.
+It's a long-running poller that watches every claude pane for the
+Active→Idle transition (transcript stopped being written for
+`ui.auto_popup_idle_secs`) and, when one happens, runs `tmux display-popup`
+with the dashboard preselected on the agent that just went idle. Quit
+the popup and you're back where you were.
+
+Start it once per user session — any of these work:
+
+```sh
+# In ~/.zshrc / ~/.bashrc:
+pgrep -x tad >/dev/null || tad watch &
+
+# In ~/.tmux.conf (or .tmux.local.conf):
+set-hook -g session-created 'run-shell "pgrep -x tad >/dev/null || tad watch &"'
+
+# As a systemd-user service: ~/.config/systemd/user/tad-watch.service
+#   [Service] ExecStart=/usr/bin/tad watch
+#   [Install] WantedBy=default.target
+# then: systemctl --user enable --now tad-watch
+```
+
+A pidfile (`$XDG_STATE_HOME/tad/watch.pid`) guards against double-running
+— a second `tad watch` exits immediately. Per-agent cooldown
+(`ui.auto_popup_cooldown_secs`, default 300s) keeps the same idle agent
+from re-popping every tick; agent activity resets the cooldown.
+
+Tune (or disable) via `~/.config/tad/config.yaml`:
+
+```yaml
+ui:
+  auto_popup: true                # set false to fully silence the watcher
+  auto_popup_idle_secs: 30        # Active→Idle threshold
+  auto_popup_cooldown_secs: 300   # per-agent re-pop suppression
+  auto_popup_width: 80%
+  auto_popup_height: 80%
+```
+
+The popup runs `tad --select-agent <target>` — that's also a useful
+direct invocation if you want a hotkey to jump straight to a particular
+agent in the Agents view.
+
 ## Groups config
 
-Lives at `~/.config/tad/groups.yaml`. See `examples/groups.yaml.example` for
-the schema. Edit by hand, via `tad config`, or via the `groups-*`
-subcommands.
+Lives in `~/.config/tad/config.yaml` under the `groups:` key (alongside
+`theme:` and `ui:`). See `examples/groups.yaml.example` for the group
+schema. Edit by hand, via `tad config`, or via `tad groups <add|rm|edit>`.
+
+Pre-v0.10 layouts used a separate `~/.config/tad/groups.yaml`. On first
+launch tad auto-migrates it: groups move into `config.yaml` and the old
+file is renamed to `groups.yaml.migrated` so the migration is one-shot
+and reversible.
 
 Layouts:
 - `panes`         — single window, one pane per host. **Default.**
@@ -348,33 +407,72 @@ in scripts, `panes` keeps it off.
 
 ## Dashboard
 
-Bare `tad` opens a TUI with three views — Sessions, Groups, Hosts — that
-you cycle through with `Tab` (or jump to with `1`/`2`/`3`):
+Bare `tad` opens a TUI with five views — **Projects** (the lead view),
+Sessions, Groups, Hosts, Agents — that you cycle through with `Tab`
+(or jump to with `1` / `2` / `3` / `4` / `5`):
 
-| Sessions | Groups | Hosts |
-| --- | --- | --- |
-| ![sessions](docs/screenshots/dashboard-sessions.png) | ![groups](docs/screenshots/dashboard-groups.png) | ![hosts](docs/screenshots/dashboard-hosts.png) |
+| Projects | Sessions | Groups | Hosts | Agents |
+| --- | --- | --- | --- | --- |
+| (cockpit per repo) | (raw tmux sessions) | (multi-host configs) | (one row per host) | (one row per claude pane) |
 
-Keys:
+### Projects (1)
+
+The dashboard's lead view. A **project** = a git repo root (or any
+directory with a `.tad/` marker) that tad has seen via a tmux pane cwd
+or a Claude transcript. Each row aggregates: number of tmux sessions
+in this project, number of claude agents running in it, how many of
+those are awaiting input, and the most recent transcript activity.
+
+```
+tad-github                3 sess   2 agt   1 waiting   · 4s
+salt-masters              1 sess   1 agt                · 2h
+gitlab-mcp                1 sess   0 agt                · 1d
+```
+
+Enter on a project attaches to its most-recently-active session — or
+jumps to its most-recently-active agent pane if there are no sessions.
+`n` on a project spawns a fresh `claude` agent in that project's root
+(an optional initial prompt is sent to claude as its first message);
+it adds a window to the project's existing session or starts a new
+one named after the project. The preview pane shows root path, git
+branch + dirty count, and nested lists of sessions and agents (with
+the same `! awaiting · 2s` markers from the Agents view).
+
+Launching `tad` from inside a project directory preselects that
+project's row automatically, so the dashboard opens with the right
+context whether you wanted to browse or just resume where you are.
+
+### Other views
+
+Same shapes as before, with the keystroke shifted:
+
+Keys (any view):
 - `↑/↓` or `j/k`         move selection
 - `Tab` / `Shift-Tab`    cycle views forward/back
-- `1`, `2`, `3`          jump to Sessions / Groups / Hosts
+- `1` / `2` / `3` / `4` / `5`   jump to Projects / Sessions / Groups / Hosts / Agents
 - `g` / `G`              first / last item
 - `Enter`                open the highlighted item
-- `n`                    new session — opens a name prompt (preseeded
-                         with the highlighted item's short name; edit
-                         and Enter to create)
+- `n`                    new — context-sensitive:
+                         * Projects view → spawn a fresh `claude` agent
+                           in the selected project's root (optional
+                           initial prompt); adds a window to the project's
+                           existing session or starts a new one named
+                           after the project
+                         * Hosts view → new tmux session with the host
+                           prefilled as the SSH target
+                         * other views → blank new tmux session prompt
 - `d`                    kill (sessions view only)
+- `s` / `S`              snooze / clear snooze (agents view only)
 - `/`                    enter filter mode (live — ↑↓ navigates, Enter
                          opens, Tab cycles views with filter applied,
                          Esc exits and clears)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
 
-Sessions/groups/hosts auto-refresh every ~1.5 seconds. The last view
-you were on (Sessions / Groups / Hosts) is remembered across launches
-in `$XDG_STATE_HOME/tad/dashboard.state` (typically
-`~/.local/state/tad/dashboard.state`).
+All views auto-refresh every ~1.5 seconds. The last view you were on
+is remembered across launches in `$XDG_STATE_HOME/tad/dashboard.state`
+(typically `~/.local/state/tad/dashboard.state`); first launch defaults
+to Projects.
 
 ## Theme
 
@@ -407,9 +505,9 @@ theme:
 ## Files
 
 ```
-~/.config/tad/groups.yaml         — your group definitions
-~/.config/tad/config.yaml         — theme + UI preferences (optional)
+~/.config/tad/config.yaml         — unified config: theme, ui, groups
 ~/.local/state/tad/dashboard.state — last dashboard view (persisted)
+~/.config/tad/groups.yaml.migrated — pre-v0.10 leftover after auto-migration
 ```
 
 ## Regenerating the README screenshots

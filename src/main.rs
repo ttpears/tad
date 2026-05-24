@@ -5,11 +5,22 @@ mod agents;
 mod cli;
 mod config;
 mod dashboard;
+mod doctor;
 mod groups;
+mod install;
+mod proc_util;
+mod projects;
+mod provider;
 mod sessions;
+mod shell;
+mod snooze;
 mod theme;
 mod tmux;
+mod tmux_conf;
 mod tmux_keybind;
+mod transcript;
+mod ui_config;
+mod watch;
 mod wizard;
 
 fn main() {
@@ -20,6 +31,10 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    // Pre-v0.10 layouts kept groups in ~/.config/tad/groups.yaml. Fold
+    // them into the unified config.yaml on first startup; idempotent.
+    config::migrate_if_needed();
+
     let cli = cli::Cli::parse();
     let rc = match cli::dispatch(cli) {
         Ok(c) => c,

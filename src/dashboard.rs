@@ -1,29 +1,48 @@
 //! Native TUI dashboard. Live updates every ~1.5s.
+//!
+//! This file is the spine — it owns the shared state types (`App`,
+//! `AppData`, `View`, `InputMode`, `TextInput`, `OpenTarget`-via-
+//! `dispatch`), `state_path`/`load`/`save_last_view`, `RunOpts` and
+//! `run_with`, and the event/render loop. Everything else lives in
+//! a submodule:
+//!
+//!   * `keys`     — per-mode keyboard handlers + global `handle_key`
+//!   * `render`   — `ui()` + tabs / main / status composition
+//!   * `format`   — per-view row formatters + cwd/truncate helpers
+//!   * `preview`  — per-view preview-pane builders
+//!   * `modal`    — new-session / snooze / new-agent overlays
+//!   * `dispatch` — `OpenTarget` + post-dashboard tmux side effects
+//!
+//! Submodule items are `pub(super)` — visible across the dashboard
+//! tree, not to the rest of the crate. The crate-public surface is
+//! just `RunOpts` and `run_with`.
+
+mod dispatch;
+mod format;
+mod keys;
+mod modal;
+mod preview;
+mod render;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
-    Frame, Terminal,
-};
+use ratatui::{backend::CrosstermBackend, widgets::ListState, Terminal};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::{
     agents::{self, Agent},
     config, groups,
+    projects::{self, Project},
     sessions::{self, Session},
     theme::{self, Theme},
-    tmux,
 };
+
+use dispatch::OpenTarget;
 
 /// `~/.local/state/tad/dashboard.state` — last view the user was on.
 /// Falls back to the cache dir and finally `/tmp` so we always have a path.
@@ -39,18 +58,18 @@ fn state_path() -> PathBuf {
 /// When `pristine` is set, the first edit replaces the whole value — matches
 /// browser autofill behavior so prefilled values don't get in the user's way.
 #[derive(Default, Clone)]
-struct TextInput {
-    value: String,
+pub(super) struct TextInput {
+    pub(super) value: String,
     /// Byte index into `value` (UTF-8 aware).
-    cursor: usize,
-    pristine: bool,
+    pub(super) cursor: usize,
+    pub(super) pristine: bool,
 }
 
 impl TextInput {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::default()
     }
-    fn pristine(value: impl Into<String>) -> Self {
+    pub(super) fn pristine(value: impl Into<String>) -> Self {
         let value = value.into();
         let cursor = value.len();
         Self {
@@ -59,19 +78,19 @@ impl TextInput {
             pristine: true,
         }
     }
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
         self.pristine = false;
     }
-    fn insert(&mut self, c: char) {
+    pub(super) fn insert(&mut self, c: char) {
         if self.pristine {
             self.clear();
         }
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
-    fn backspace(&mut self) {
+    pub(super) fn backspace(&mut self) {
         if self.pristine {
             self.clear();
             return;
@@ -86,7 +105,7 @@ impl TextInput {
         self.value.replace_range(prev..self.cursor, "");
         self.cursor = prev;
     }
-    fn delete(&mut self) {
+    pub(super) fn delete(&mut self) {
         if self.pristine {
             self.clear();
             return;
@@ -100,7 +119,7 @@ impl TextInput {
         }
         self.value.replace_range(self.cursor..next, "");
     }
-    fn left(&mut self) {
+    pub(super) fn left(&mut self) {
         self.pristine = false;
         if self.cursor == 0 {
             return;
@@ -111,7 +130,7 @@ impl TextInput {
         }
         self.cursor = c;
     }
-    fn right(&mut self) {
+    pub(super) fn right(&mut self) {
         self.pristine = false;
         if self.cursor >= self.value.len() {
             return;
@@ -122,24 +141,25 @@ impl TextInput {
         }
         self.cursor = c;
     }
-    fn home(&mut self) {
+    pub(super) fn home(&mut self) {
         self.pristine = false;
         self.cursor = 0;
     }
-    fn end(&mut self) {
+    pub(super) fn end(&mut self) {
         self.pristine = false;
         self.cursor = self.value.len();
     }
-    fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         &self.value
     }
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.value.is_empty()
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
+pub(super) enum View {
+    Projects,
     Sessions,
     Groups,
     Hosts,
@@ -147,48 +167,54 @@ enum View {
 }
 
 impl View {
-    fn next(self) -> Self {
+    pub(super) fn next(self) -> Self {
         match self {
+            View::Projects => View::Sessions,
             View::Sessions => View::Groups,
             View::Groups => View::Hosts,
             View::Hosts => View::Agents,
-            View::Agents => View::Sessions,
+            View::Agents => View::Projects,
         }
     }
-    fn prev(self) -> Self {
+    pub(super) fn prev(self) -> Self {
         match self {
-            View::Sessions => View::Agents,
+            View::Projects => View::Agents,
+            View::Sessions => View::Projects,
             View::Groups => View::Sessions,
             View::Hosts => View::Groups,
             View::Agents => View::Hosts,
         }
     }
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
+            View::Projects => "Projects",
             View::Sessions => "Sessions",
             View::Groups => "Groups",
             View::Hosts => "Hosts",
             View::Agents => "Agents",
         }
     }
-    fn index(self) -> usize {
+    pub(super) fn index(self) -> usize {
         match self {
-            View::Sessions => 0,
-            View::Groups => 1,
-            View::Hosts => 2,
-            View::Agents => 3,
+            View::Projects => 0,
+            View::Sessions => 1,
+            View::Groups => 2,
+            View::Hosts => 3,
+            View::Agents => 4,
         }
     }
-    fn slug(self) -> &'static str {
+    pub(super) fn slug(self) -> &'static str {
         match self {
+            View::Projects => "projects",
             View::Sessions => "sessions",
             View::Groups => "groups",
             View::Hosts => "hosts",
             View::Agents => "agents",
         }
     }
-    fn from_slug(s: &str) -> Option<Self> {
+    pub(super) fn from_slug(s: &str) -> Option<Self> {
         match s.trim() {
+            "projects" => Some(View::Projects),
             "sessions" => Some(View::Sessions),
             "groups" => Some(View::Groups),
             "hosts" => Some(View::Hosts),
@@ -212,13 +238,25 @@ fn save_last_view(view: View) {
     let _ = std::fs::write(path, view.slug());
 }
 
-struct AppData {
-    sessions: Vec<Session>,
-    groups: Vec<(String, config::Group)>,
+pub(super) struct AppData {
+    pub(super) sessions: Vec<Session>,
+    pub(super) groups: Vec<(String, config::Group)>,
     /// host → list of groups it belongs to
-    hosts: Vec<(String, Vec<String>)>,
+    pub(super) hosts: Vec<(String, Vec<String>)>,
     /// Claude Code agents discovered across tmux panes.
-    agents: Vec<Agent>,
+    pub(super) agents: Vec<Agent>,
+    /// Project (typically git repo) frame around everything else.
+    /// Derived from session/agent cwds — the primary noun.
+    pub(super) projects: Vec<Project>,
+    /// Snooze map loaded once per refresh (~1.5s) so the per-row
+    /// formatters don't each re-open the snooze file. Cheap to load
+    /// (one small YAML), but multiplied by every visible Agents row
+    /// and every preview render it was a real waste.
+    pub(super) snoozes: crate::snooze::SnoozeState,
+    /// User UI prefs cached per refresh for the same reason as
+    /// `snoozes` — format_agent_line previously read `config.yaml`
+    /// once per row per render.
+    pub(super) ui: crate::ui_config::UiConfig,
 }
 
 impl AppData {
@@ -244,57 +282,79 @@ impl AppData {
         }
         let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
         let agents = agents::scan();
+        // Projects are a pure aggregation over the same sessions+agents
+        // — pass the slices in so we don't re-run the tmux subprocess
+        // and /proc walk a second time per refresh.
+        let project_list = projects::from_scanned(&sessions, &agents);
+        let snoozes = crate::snooze::load(std::time::SystemTime::now());
+        let ui = crate::ui_config::load();
         Self {
             sessions,
             groups,
             hosts,
             agents,
+            projects: project_list,
+            snoozes,
+            ui,
         }
     }
 }
 
-enum OpenTarget {
-    /// Attach to an existing session by name, no prompt.
-    AttachExisting(String),
-    /// Create a new session, optionally running `ssh <host>` as its command.
-    CreateNew {
-        name: String,
-        host: Option<String>,
-    },
-    Group(String),
-    Host(String),
-    /// Jump to a specific tmux pane by `session:window.pane` target.
-    JumpToPane(String),
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum InputMode {
+pub(super) enum InputMode {
     None,
     Filter,
     NewSession,
+    SnoozeSelect,
+    /// `n` on a Projects row: one-field modal collecting an optional
+    /// initial prompt, then spawning `claude` in a new tmux window in
+    /// the project's root.
+    NewAgent,
+    /// `R` on an Agents row: one-field modal prefilled with the
+    /// agent's current window name. Enter renames the window in place
+    /// (no dashboard exit; the next refresh shows the new name).
+    RenameAgent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NewSessionField {
+pub(super) enum NewSessionField {
     Name,
     Host,
 }
 
-struct App {
-    view: View,
-    data: AppData,
-    list_state_sessions: ListState,
-    list_state_groups: ListState,
-    list_state_hosts: ListState,
-    list_state_agents: ListState,
-    filter: TextInput,
-    input_mode: InputMode,
-    new_session_name: TextInput,
-    new_session_host: TextInput,
-    new_session_field: NewSessionField,
-    should_quit: bool,
-    open_after: Option<OpenTarget>,
-    theme: Theme,
+pub(super) struct App {
+    pub(super) view: View,
+    pub(super) data: AppData,
+    pub(super) list_state_projects: ListState,
+    pub(super) list_state_sessions: ListState,
+    pub(super) list_state_groups: ListState,
+    pub(super) list_state_hosts: ListState,
+    pub(super) list_state_agents: ListState,
+    /// Cursor over `data.ui.snooze_intervals` in the snooze modal.
+    pub(super) snooze_cursor: usize,
+    /// Initial prompt text input for the new-agent modal. Optional —
+    /// empty just spawns `claude` with no preset prompt.
+    pub(super) new_agent_prompt: TextInput,
+    /// Project the new-agent modal is targeting (captured when the
+    /// modal opens, so a mid-modal refresh doesn't drift the target).
+    pub(super) new_agent_project: Option<String>,
+    /// New window name being typed in the rename-agent modal.
+    pub(super) rename_agent_text: TextInput,
+    /// `session:window.pane` of the agent being renamed (captured at
+    /// modal-open time for the same reason as `new_agent_project`).
+    pub(super) rename_agent_target: Option<String>,
+    /// Set when launched via `--select-agent` (i.e. from the auto-popup):
+    /// after the user snoozes or otherwise resolves the row, we exit the
+    /// dashboard so they're back where they were.
+    pub(super) from_popup: bool,
+    pub(super) filter: TextInput,
+    pub(super) input_mode: InputMode,
+    pub(super) new_session_name: TextInput,
+    pub(super) new_session_host: TextInput,
+    pub(super) new_session_field: NewSessionField,
+    pub(super) should_quit: bool,
+    pub(super) open_after: Option<OpenTarget>,
+    pub(super) theme: Theme,
 }
 
 impl App {
@@ -320,13 +380,29 @@ impl App {
         } else {
             Some(0)
         });
+        let mut p = ListState::default();
+        p.select(if data.projects.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
         App {
-            view: load_last_view().unwrap_or(View::Sessions),
+            // Default to Projects — the user-facing primary noun for
+            // the cockpit. Old `dashboard.state` still wins when present
+            // so power users who lived on Sessions stay there.
+            view: load_last_view().unwrap_or(View::Projects),
             data,
+            list_state_projects: p,
             list_state_sessions: s,
             list_state_groups: g,
             list_state_hosts: h,
             list_state_agents: a,
+            snooze_cursor: 0,
+            new_agent_prompt: TextInput::new(),
+            new_agent_project: None,
+            rename_agent_text: TextInput::new(),
+            rename_agent_target: None,
+            from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
             new_session_name: TextInput::new(),
@@ -338,8 +414,9 @@ impl App {
         }
     }
 
-    fn list_state_mut(&mut self) -> &mut ListState {
+    pub(super) fn list_state_mut(&mut self) -> &mut ListState {
         match self.view {
+            View::Projects => &mut self.list_state_projects,
             View::Sessions => &mut self.list_state_sessions,
             View::Groups => &mut self.list_state_groups,
             View::Hosts => &mut self.list_state_hosts,
@@ -347,11 +424,13 @@ impl App {
         }
     }
 
-    fn items(&self) -> Vec<String> {
-        // For Agents we key items by the unique target (session:window.pane)
-        // so selection survives across refreshes even when window names
-        // collide. Lookups go back through `data.agents`.
+    pub(super) fn items(&self) -> Vec<String> {
+        // Projects are keyed by their `name` (basename of root); when
+        // two roots collide on name the latter shadows the former in
+        // the list, which is acceptable for a v1 (caller can rename
+        // its directory or we can disambiguate with the parent later).
         let iter: Box<dyn Iterator<Item = String>> = match self.view {
+            View::Projects => Box::new(self.data.projects.iter().map(|p| p.name.clone())),
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
@@ -365,8 +444,9 @@ impl App {
         }
     }
 
-    fn selected(&self) -> Option<String> {
+    pub(super) fn selected(&self) -> Option<String> {
         let state = match self.view {
+            View::Projects => &self.list_state_projects,
             View::Sessions => &self.list_state_sessions,
             View::Groups => &self.list_state_groups,
             View::Hosts => &self.list_state_hosts,
@@ -376,10 +456,11 @@ impl App {
         self.items().get(idx).cloned()
     }
 
-    fn refresh(&mut self) {
+    pub(super) fn refresh(&mut self) {
         self.data = AppData::load();
         // Clamp selections to new list sizes
         for (state, len) in [
+            (&mut self.list_state_projects, self.data.projects.len()),
             (&mut self.list_state_sessions, self.data.sessions.len()),
             (&mut self.list_state_groups, self.data.groups.len()),
             (&mut self.list_state_hosts, self.data.hosts.len()),
@@ -395,10 +476,26 @@ impl App {
     }
 }
 
-pub fn run() -> Result<i32> {
-    // First-launch wizard: if no groups.yaml, offer the import wizard. The
-    // wizard owns its own terminal; on return, fall through to the dashboard.
-    if !crate::config::config_path().exists() {
+/// Options for launching the dashboard. Today: open on a specific agent
+/// row (used by `tad watch` when an agent goes idle and we pop a popup
+/// from the auto-popup watcher).
+#[derive(Debug, Default, Clone)]
+pub struct RunOpts {
+    /// If Some, the dashboard opens on the Agents view with the row whose
+    /// `target` matches preselected. Missing-target = no preselection
+    /// (we still open on Agents).
+    pub select_agent: Option<String>,
+}
+
+pub fn run_with(opts: RunOpts) -> Result<i32> {
+    // First-launch wizard: offer it when the user has no groups defined yet
+    // (file missing, file empty, or `groups:` key absent). The wizard owns
+    // its own terminal; on return, fall through to the dashboard.
+    let needs_wizard = match crate::config::load() {
+        Ok(doc) => doc.groups.is_empty(),
+        Err(_) => true,
+    };
+    if needs_wizard {
         let _ = crate::wizard::run_first_launch();
     }
     enable_raw_mode()?;
@@ -407,7 +504,7 @@ pub fn run() -> Result<i32> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = app_loop(&mut terminal);
+    let result = app_loop(&mut terminal, opts);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -421,44 +518,45 @@ pub fn run() -> Result<i32> {
         }
         Some(OpenTarget::Group(name)) => groups::open(&name, None),
         Some(OpenTarget::Host(name)) => sessions::attach_or_create_remote(&name),
-        Some(OpenTarget::JumpToPane(target)) => jump_to_pane(&target),
+        Some(OpenTarget::JumpToPane(target)) => dispatch::jump_to_pane(&target),
+        Some(OpenTarget::SpawnAgent {
+            project_name,
+            prompt,
+        }) => dispatch::spawn_agent_in_project(&project_name, prompt.as_deref()),
         None => Ok(1),
     }
 }
 
-/// Jump to a tmux pane. When tad is invoked from inside a tmux client
-/// (the common case via the popup keybind), `switch-client` flips us there
-/// and the popup closes. Outside tmux, fall back to `attach -t` which
-/// brings up the session containing the pane.
-fn jump_to_pane(target: &str) -> Result<i32> {
-    let inside_tmux = std::env::var_os("TMUX").is_some();
-    if inside_tmux {
-        let status = std::process::Command::new("tmux")
-            .args(["switch-client", "-t", target])
-            .status();
-        if matches!(&status, Ok(s) if s.success()) {
-            return Ok(0);
+fn app_loop<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    opts: RunOpts,
+) -> Result<App> {
+    let mut app = App::new();
+    // Honor --select-agent: jump to Agents and try to select the matching
+    // row. If the target isn't in the scan (agent vanished between the
+    // watcher noticing and us launching), we still open on Agents — the
+    // first row stays selected.
+    if let Some(target) = &opts.select_agent {
+        app.view = View::Agents;
+        app.from_popup = true;
+        if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
+            app.list_state_agents.select(Some(idx));
+        }
+    } else if app.view == View::Projects {
+        // Cwd-aware preselection: if the user launched tad from inside a
+        // known project, drop them on that project's row. Turns the
+        // dashboard from "browser of all projects" into "default to where
+        // I already am, browse when I want."
+        if let Some(idx) = dispatch::current_project_index(&app.data.projects) {
+            app.list_state_projects.select(Some(idx));
         }
     }
-    // Outside tmux: split target on ':' to get the session name and attach.
-    let session = target.split(':').next().unwrap_or(target);
-    let attach = std::process::Command::new("tmux")
-        .args(["attach", "-t", session])
-        .status();
-    match attach {
-        Ok(s) if s.success() => Ok(0),
-        _ => Ok(1),
-    }
-}
-
-fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<App> {
-    let mut app = App::new();
     let mut last_view = app.view;
     let mut last_refresh = Instant::now();
     let refresh_every = Duration::from_millis(1500);
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
+        terminal.draw(|f| render::ui(f, &mut app))?;
 
         if last_refresh.elapsed() > refresh_every {
             app.refresh();
@@ -471,9 +569,12 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
                     continue;
                 }
                 match app.input_mode {
-                    InputMode::Filter => handle_filter_key(&mut app, key),
-                    InputMode::NewSession => handle_new_session_key(&mut app, key),
-                    InputMode::None => handle_key(&mut app, key.code, key.modifiers),
+                    InputMode::Filter => keys::handle_filter_key(&mut app, key),
+                    InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
+                    InputMode::NewAgent => keys::handle_new_agent_key(&mut app, key),
+                    InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
+                    InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
+                    InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
                 }
             }
         }
@@ -484,823 +585,5 @@ fn app_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> Result<
         if app.should_quit {
             return Ok(app);
         }
-    }
-}
-
-fn handle_filter_key(app: &mut App, key: crossterm::event::KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let filter_before = app.filter.as_str().to_string();
-    match key.code {
-        // Navigate the (filtered) list without leaving filter mode — the whole
-        // point: see a match, arrow to it, Enter, done.
-        KeyCode::Down => move_selection(app, 1),
-        KeyCode::Up => move_selection(app, -1),
-        KeyCode::PageDown => move_selection(app, 10),
-        KeyCode::PageUp => move_selection(app, -10),
-        KeyCode::Tab => app.view = app.view.next(),
-        KeyCode::BackTab => app.view = app.view.prev(),
-        KeyCode::Enter => {
-            if let Some(name) = app.selected() {
-                app.open_after = Some(match app.view {
-                    View::Sessions => OpenTarget::AttachExisting(name),
-                    View::Groups => OpenTarget::Group(name),
-                    View::Hosts => OpenTarget::Host(name),
-                    View::Agents => OpenTarget::JumpToPane(name),
-                });
-                app.should_quit = true;
-            }
-        }
-        // Esc clears the filter and exits filter mode in one step.
-        KeyCode::Esc => {
-            app.filter.clear();
-            app.input_mode = InputMode::None;
-        }
-        // Backspace on an empty filter exits filter mode (mirrors fzf).
-        KeyCode::Backspace if app.filter.is_empty() => app.input_mode = InputMode::None,
-        KeyCode::Backspace => app.filter.backspace(),
-        KeyCode::Delete => app.filter.delete(),
-        KeyCode::Left => app.filter.left(),
-        KeyCode::Right => app.filter.right(),
-        KeyCode::Home => app.filter.home(),
-        KeyCode::End => app.filter.end(),
-        KeyCode::Char('u') if ctrl => app.filter.clear(),
-        KeyCode::Char('a') if ctrl => app.filter.home(),
-        KeyCode::Char('e') if ctrl => app.filter.end(),
-        KeyCode::Char('c') if ctrl => app.should_quit = true,
-        KeyCode::Char(c) if !ctrl => app.filter.insert(c),
-        _ => {}
-    }
-    let len = app.items().len();
-    let filter_changed = app.filter.as_str() != filter_before;
-    let state = app.list_state_mut();
-    if filter_changed {
-        // Typing narrows the list — snap to the top match so Enter just works.
-        state.select(if len == 0 { None } else { Some(0) });
-    } else {
-        match state.selected() {
-            Some(i) if i >= len => state.select(if len == 0 { None } else { Some(len - 1) }),
-            None if len > 0 => state.select(Some(0)),
-            _ => {}
-        }
-    }
-}
-
-fn handle_new_session_key(app: &mut App, key: crossterm::event::KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::None;
-            app.new_session_name.clear();
-            app.new_session_host.clear();
-            app.new_session_field = NewSessionField::Name;
-            return;
-        }
-        KeyCode::Enter => {
-            let name = app.new_session_name.as_str().trim().to_string();
-            if name.is_empty() {
-                return;
-            }
-            let host = {
-                let h = app.new_session_host.as_str().trim();
-                if h.is_empty() {
-                    None
-                } else {
-                    Some(h.to_string())
-                }
-            };
-            app.input_mode = InputMode::None;
-            app.new_session_name.clear();
-            app.new_session_host.clear();
-            app.new_session_field = NewSessionField::Name;
-            app.open_after = Some(OpenTarget::CreateNew { name, host });
-            app.should_quit = true;
-            return;
-        }
-        KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
-            app.new_session_field = match app.new_session_field {
-                NewSessionField::Name => NewSessionField::Host,
-                NewSessionField::Host => NewSessionField::Name,
-            };
-            return;
-        }
-        _ => {}
-    }
-    let field = match app.new_session_field {
-        NewSessionField::Name => &mut app.new_session_name,
-        NewSessionField::Host => &mut app.new_session_host,
-    };
-    match key.code {
-        KeyCode::Left => field.left(),
-        KeyCode::Right => field.right(),
-        KeyCode::Home => field.home(),
-        KeyCode::End => field.end(),
-        KeyCode::Backspace => field.backspace(),
-        KeyCode::Delete => field.delete(),
-        KeyCode::Char('u') if ctrl => field.clear(),
-        KeyCode::Char('a') if ctrl => field.home(),
-        KeyCode::Char('e') if ctrl => field.end(),
-        KeyCode::Char(c) if !ctrl => field.insert(c),
-        _ => {}
-    }
-}
-
-fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-        KeyCode::Tab => app.view = app.view.next(),
-        KeyCode::BackTab => app.view = app.view.prev(),
-        KeyCode::Char('1') => app.view = View::Sessions,
-        KeyCode::Char('2') => app.view = View::Groups,
-        KeyCode::Char('3') => app.view = View::Hosts,
-        KeyCode::Char('4') => app.view = View::Agents,
-        KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
-        KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
-        KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
-        KeyCode::PageUp | KeyCode::Char('K') => move_selection(app, -10),
-        KeyCode::Home | KeyCode::Char('g') => {
-            let len = app.items().len();
-            if len > 0 {
-                app.list_state_mut().select(Some(0));
-            }
-        }
-        KeyCode::End | KeyCode::Char('G') => {
-            let len = app.items().len();
-            if len > 0 {
-                app.list_state_mut().select(Some(len - 1));
-            }
-        }
-        KeyCode::Enter => {
-            if let Some(name) = app.selected() {
-                app.open_after = Some(match app.view {
-                    View::Sessions => OpenTarget::AttachExisting(name),
-                    View::Groups => OpenTarget::Group(name),
-                    View::Hosts => OpenTarget::Host(name),
-                    View::Agents => OpenTarget::JumpToPane(name),
-                });
-                app.should_quit = true;
-            }
-        }
-        KeyCode::Char('d') => {
-            if app.view == View::Sessions {
-                if let Some(name) = app.selected() {
-                    tmux::kill_session(&name);
-                    app.refresh();
-                }
-            }
-        }
-        KeyCode::Char('/') => {
-            app.input_mode = InputMode::Filter;
-            app.filter.clear();
-            let len = app.items().len();
-            if len > 0 {
-                app.list_state_mut().select(Some(0));
-            }
-        }
-        KeyCode::Char('n') => {
-            // Only the Hosts view prefills usefully (short→name, FQDN→ssh).
-            // Sessions/Groups views start blank since 'n' means a brand-new
-            // session that has nothing to do with the current selection.
-            // Prefilled values are marked pristine so the first keystroke
-            // replaces them — typing just works.
-            match (app.view, app.selected()) {
-                (View::Hosts, Some(h)) => {
-                    app.new_session_name = TextInput::pristine(short_name(&h));
-                    app.new_session_host = TextInput::pristine(h);
-                }
-                _ => {
-                    app.new_session_name = TextInput::new();
-                    app.new_session_host = TextInput::new();
-                }
-            }
-            app.new_session_field = NewSessionField::Name;
-            app.input_mode = InputMode::NewSession;
-        }
-        KeyCode::Char('r') => app.refresh(),
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
-        _ => {}
-    }
-}
-
-fn move_selection(app: &mut App, delta: i32) {
-    let len = app.items().len() as i32;
-    if len == 0 {
-        return;
-    }
-    let cur = app.list_state_mut().selected().unwrap_or(0) as i32;
-    let mut next = cur + delta;
-    next = next.rem_euclid(len);
-    app.list_state_mut().select(Some(next as usize));
-}
-
-fn ui(f: &mut Frame, app: &mut App) {
-    let area = f.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    render_tabs(f, chunks[0], app);
-    render_main(f, chunks[1], app);
-    render_status(f, chunks[2], app);
-
-    if app.input_mode == InputMode::NewSession {
-        render_new_session_modal(f, area, app);
-    }
-}
-
-fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    // Agents tab is annotated with live counts so you don't have to switch
-    // into the view to know what's going on.
-    let agents_title = if app.data.agents.is_empty() {
-        "Agents".to_string()
-    } else {
-        let c = agents::counts(&app.data.agents, std::time::Duration::from_secs(30));
-        if c.idle == 0 {
-            format!("Agents ({})", c.total)
-        } else if c.active == 0 {
-            format!("Agents ({} idle)", c.total)
-        } else {
-            format!("Agents ({}/{})", c.active, c.total)
-        }
-    };
-    let titles: Vec<Line> = vec![
-        Line::from(View::Sessions.title()),
-        Line::from(View::Groups.title()),
-        Line::from(View::Hosts.title()),
-        Line::from(agents_title),
-    ];
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.border))
-                .title(" tad "),
-        )
-        .select(app.view.index())
-        .style(Style::default().fg(app.theme.muted))
-        .highlight_style(
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-    f.render_widget(tabs, area);
-}
-
-fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
-    let width = 70.min(area.width.saturating_sub(4));
-    let height = 7;
-    let popup = centered_rect(width, height, area);
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.accent))
-        .title(Span::styled(
-            " new session ",
-            Style::default()
-                .fg(app.theme.accent_bold)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let active = app.new_session_field;
-    let theme = app.theme;
-    let field_line =
-        move |label: &str, field: &TextInput, active: bool, placeholder: &str| -> Line<'static> {
-            let label_style = if active {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.muted)
-            };
-            let mut spans = vec![Span::styled(format!("  {:<6}", label), label_style)];
-            let value = field.as_str();
-            if value.is_empty() {
-                if active {
-                    spans.push(Span::styled(
-                        placeholder.to_string(),
-                        Style::default().fg(theme.muted),
-                    ));
-                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-                } else {
-                    spans.push(Span::styled(
-                        placeholder.to_string(),
-                        Style::default().fg(theme.muted),
-                    ));
-                }
-            } else if !active {
-                spans.push(Span::styled(
-                    value.to_string(),
-                    Style::default().fg(theme.fg),
-                ));
-            } else {
-                // Active field with content. Pristine values get muted/italic so
-                // the user knows the next keystroke will replace them. Otherwise
-                // render with a block cursor at the cursor position.
-                let value_style = if field.pristine {
-                    Style::default()
-                        .fg(theme.muted)
-                        .add_modifier(Modifier::ITALIC)
-                } else {
-                    Style::default().fg(theme.fg)
-                };
-                let cur = field.cursor.min(value.len());
-                let (pre, post) = value.split_at(cur);
-                if field.pristine {
-                    spans.push(Span::styled(value.to_string(), value_style));
-                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-                } else if post.is_empty() {
-                    spans.push(Span::styled(pre.to_string(), value_style));
-                    spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-                } else {
-                    let mut chars = post.chars();
-                    let cursor_char = chars.next().unwrap_or(' ');
-                    let after_cursor: String = chars.collect();
-                    spans.push(Span::styled(pre.to_string(), value_style));
-                    spans.push(Span::styled(
-                        cursor_char.to_string(),
-                        Style::default().bg(theme.accent).fg(theme.fg),
-                    ));
-                    spans.push(Span::styled(after_cursor, value_style));
-                }
-            }
-            Line::from(spans)
-        };
-
-    let lines = vec![
-        Line::from(""),
-        field_line(
-            "name:",
-            &app.new_session_name,
-            active == NewSessionField::Name,
-            "(required)",
-        ),
-        field_line(
-            "ssh:",
-            &app.new_session_host,
-            active == NewSessionField::Host,
-            "(optional — blank = no ssh)",
-        ),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Tab/↑↓ field  ←→ cursor  ^U clear  ↵ create  Esc cancel",
-            Style::default().fg(app.theme.muted),
-        )),
-    ];
-
-    let inner = Paragraph::new(lines).block(block);
-    f.render_widget(inner, popup);
-}
-
-fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(area);
-    render_list(f, chunks[0], app);
-    render_preview(f, chunks[1], app);
-}
-
-fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
-    let items_strs = app.items();
-    let theme = &app.theme;
-    let list_items: Vec<ListItem> = items_strs
-        .iter()
-        .map(|name| {
-            let line = match app.view {
-                View::Sessions => format_session_line(&app.data, name, theme),
-                View::Groups => format_group_line(&app.data, name, theme),
-                View::Hosts => format_host_line(&app.data, name, theme),
-                View::Agents => format_agent_line(&app.data, name, theme),
-            };
-            ListItem::new(line)
-        })
-        .collect();
-
-    let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
-        format!(" {} — /{} ", app.view.title(), app.filter.as_str())
-    } else {
-        format!(" {} ({}) ", app.view.title(), items_strs.len())
-    };
-
-    let list = List::new(list_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.border))
-                .title(title),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(app.theme.selection_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let state = match app.view {
-        View::Sessions => &mut app.list_state_sessions,
-        View::Groups => &mut app.list_state_groups,
-        View::Hosts => &mut app.list_state_hosts,
-        View::Agents => &mut app.list_state_agents,
-    };
-    f.render_stateful_widget(list, area, state);
-}
-
-fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
-    let s = match data.sessions.iter().find(|s| s.name == name) {
-        Some(s) => s,
-        None => return Line::from(name.to_string()),
-    };
-    let marker = if s.attached {
-        Span::styled("● ", Style::default().fg(theme.success))
-    } else {
-        Span::raw("  ")
-    };
-    Line::from(vec![
-        marker,
-        Span::styled(
-            format!("{:<22}", truncate(&s.name, 22)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:>3}w  ", s.windows),
-            Style::default().fg(theme.warning),
-        ),
-        Span::styled(
-            format!("{:<12}", truncate(&s.active_window, 12)),
-            Style::default().fg(theme.fg),
-        ),
-        Span::raw(" "),
-        Span::styled(s.activity_str.clone(), Style::default().fg(theme.muted)),
-    ])
-}
-
-fn format_group_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
-    let g = match data.groups.iter().find(|(n, _)| n == name) {
-        Some((_, g)) => g,
-        None => return Line::from(name.to_string()),
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("{:<28}", truncate(name, 28)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:>3} hosts  ", g.hosts.len()),
-            Style::default().fg(theme.warning),
-        ),
-        Span::styled(g.layout.clone(), Style::default().fg(theme.muted)),
-    ])
-}
-
-fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
-    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
-        return Line::from(target.to_string());
-    };
-    let active_window = std::time::Duration::from_secs(30);
-    let (marker_text, marker_style, status_text, status_style) =
-        match agent.activity_status(active_window) {
-            agents::ActivityStatus::Active(d) => (
-                "● ",
-                Style::default().fg(theme.success),
-                format!("active · {}", agents::format_elapsed(d)),
-                Style::default().fg(theme.success),
-            ),
-            agents::ActivityStatus::Idle(d) => (
-                "○ ",
-                Style::default().fg(theme.muted),
-                format!("idle {}", agents::format_elapsed(d)),
-                Style::default().fg(theme.muted),
-            ),
-            agents::ActivityStatus::NoTranscript => (
-                "? ",
-                Style::default().fg(theme.warning),
-                "no transcript".to_string(),
-                Style::default().fg(theme.warning),
-            ),
-        };
-    let cwd_short = cwd_for_display(&agent.cwd);
-    Line::from(vec![
-        Span::styled(marker_text, marker_style),
-        Span::styled(
-            format!("{:<22}", truncate(target, 22)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{:<28}", truncate(&cwd_short, 28)),
-            Style::default().fg(theme.fg),
-        ),
-        Span::raw(" "),
-        Span::styled(status_text, status_style),
-    ])
-}
-
-/// Shorten a cwd for display: replace $HOME prefix with `~`. The full path
-/// is still shown in the preview pane.
-fn cwd_for_display(p: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = p.strip_prefix(&home) {
-            if rest.as_os_str().is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", rest.display());
-        }
-    }
-    p.display().to_string()
-}
-
-fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
-    let in_groups = data
-        .hosts
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, g)| g.clone())
-        .unwrap_or_default();
-    Line::from(vec![
-        Span::styled(
-            format!("{:<45}", truncate(name, 45)),
-            Style::default().fg(theme.accent),
-        ),
-        Span::raw("  "),
-        Span::styled(in_groups.join(", "), Style::default().fg(theme.muted)),
-    ])
-}
-
-fn render_preview(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border))
-        .title(" preview ");
-    let lines: Vec<Line> = match app.selected() {
-        Some(name) => match app.view {
-            View::Sessions => preview_session(&name, &app.theme),
-            View::Groups => preview_group(&app.data, &name, &app.theme),
-            View::Hosts => preview_host(&app.data, &name, &app.theme),
-            View::Agents => preview_agent(&app.data, &name, &app.theme),
-        },
-        None => vec![Line::from(Span::styled(
-            "no selection",
-            Style::default().fg(app.theme.muted),
-        ))],
-    };
-    let para = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
-}
-
-fn preview_session(name: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let windows = tmux::run([
-        "list-windows",
-        "-t",
-        name,
-        "-F",
-        "  #{window_index}: #{window_name}  (#{window_panes} panes)",
-    ])
-    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-    .unwrap_or_default();
-    let meta = tmux::run([
-        "display-message",
-        "-p",
-        "-t",
-        name,
-        "created: #{t:session_created}\nactivity: #{t:session_activity}",
-    ])
-    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-    .unwrap_or_default();
-    let mut lines = vec![Line::from(vec![
-        Span::styled("session: ", Style::default().fg(theme.muted)),
-        Span::styled(
-            name.to_string(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    lines.push(Line::from(""));
-    for l in windows.lines() {
-        lines.push(Line::from(Span::styled(
-            l.to_string(),
-            Style::default().fg(theme.fg),
-        )));
-    }
-    lines.push(Line::from(""));
-    for l in meta.lines() {
-        lines.push(Line::from(Span::styled(
-            l.to_string(),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    lines
-}
-
-fn preview_group(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let g = match data.groups.iter().find(|(n, _)| n == name) {
-        Some((_, g)) => g,
-        None => return vec![Line::from("?")],
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("group: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                name.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("layout: ", Style::default().fg(theme.muted)),
-            Span::styled(g.layout.clone(), Style::default().fg(theme.warning)),
-        ]),
-        Line::from(Span::styled(
-            format!("hosts ({}):", g.hosts.len()),
-            Style::default().fg(theme.fg),
-        )),
-    ];
-    for h in &g.hosts {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", h),
-            Style::default().fg(theme.fg),
-        )));
-    }
-    lines
-}
-
-fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let in_groups: Vec<String> = data
-        .hosts
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, g)| g.clone())
-        .unwrap_or_default();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("host: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                name.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled("member of:", Style::default().fg(theme.fg))),
-    ];
-    for g in &in_groups {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", g),
-            Style::default().fg(theme.fg),
-        )));
-    }
-    lines
-}
-
-fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
-        return vec![Line::from(Span::styled(
-            "agent gone — refresh",
-            Style::default().fg(theme.muted),
-        ))];
-    };
-    let active_window = std::time::Duration::from_secs(30);
-    let status = match agent.activity_status(active_window) {
-        agents::ActivityStatus::Active(d) => {
-            format!("● active ({})", agents::format_elapsed(d))
-        }
-        agents::ActivityStatus::Idle(d) => {
-            format!("○ idle for {}", agents::format_elapsed(d))
-        }
-        agents::ActivityStatus::NoTranscript => "? no transcript on disk".to_string(),
-    };
-    let kv = |k: &str, v: String| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
-            Span::styled(v, Style::default().fg(theme.fg)),
-        ])
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("agent: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                target.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        kv("status", status),
-        kv("session", agent.session.clone()),
-        kv(
-            "window",
-            format!("{} ({})", agent.window_name, agent.window_index),
-        ),
-        kv("pane", agent.pane_index.clone()),
-        kv("cwd", agent.cwd.display().to_string()),
-        kv("pid", agent.claude_pid.to_string()),
-    ];
-    if let Some(tp) = &agent.transcript_path {
-        let short = tp.file_name().map(|s| s.to_string_lossy().into_owned());
-        if let Some(name) = short {
-            lines.push(kv("transcript", name));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↵ jump to this pane",
-        Style::default().fg(theme.muted),
-    )));
-    lines
-}
-
-fn render_status(f: &mut Frame, area: Rect, app: &App) {
-    let theme = &app.theme;
-    let line = match app.input_mode {
-        InputMode::Filter => {
-            let value = app.filter.as_str();
-            let cur = app.filter.cursor.min(value.len());
-            let (pre, post) = value.split_at(cur);
-            let mut spans = vec![
-                Span::styled("/", Style::default().fg(theme.warning)),
-                Span::styled(pre.to_string(), Style::default().fg(theme.fg)),
-            ];
-            if post.is_empty() {
-                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-            } else {
-                let mut chars = post.chars();
-                let c = chars.next().unwrap_or(' ');
-                let rest: String = chars.collect();
-                spans.push(Span::styled(
-                    c.to_string(),
-                    Style::default().bg(theme.accent).fg(theme.fg),
-                ));
-                spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
-            }
-            spans.push(Span::styled(
-                "    ↑↓ nav  ↵ open  ⇥ view  ^U clear  Esc exit",
-                Style::default().fg(theme.muted),
-            ));
-            Line::from(spans)
-        }
-        InputMode::NewSession => Line::from(Span::styled(
-            "type session name, Enter to create, Esc to cancel",
-            Style::default().fg(theme.muted),
-        )),
-        InputMode::None => {
-            let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
-                vec![
-                    Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
-                    Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
-                ]
-            };
-            let mut spans = Vec::new();
-            spans.extend(bind("↑↓/jk", "nav"));
-            spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3/4", "jump"));
-            spans.extend(bind("↵", "open"));
-            spans.extend(bind("n", "new"));
-            if app.view == View::Sessions {
-                spans.extend(bind("d", "kill"));
-            }
-            spans.extend(bind("/", "filter"));
-            spans.extend(bind("r", "refresh"));
-            spans.extend(bind("q", "quit"));
-            Line::from(spans)
-        }
-    };
-    f.render_widget(Paragraph::new(line), area);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect()
-    }
-}
-
-/// Strip any FQDN suffix to make a tmux-friendly session name.
-fn short_name(s: &str) -> String {
-    s.split('.').next().unwrap_or(s).to_string()
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
     }
 }

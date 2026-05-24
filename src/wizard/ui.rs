@@ -326,7 +326,13 @@ pub fn run(entry: Entry) -> Result<()> {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut term = Terminal::new(backend)?;
 
-    let config_exists = config::config_path().exists();
+    // "Config exists" for wizard purposes means "user already has groups
+    // configured" — not just "config.yaml file is present" (a file with
+    // only a theme set still counts as a first launch from the groups
+    // perspective).
+    let config_exists = config::load()
+        .map(|d| !d.groups.is_empty())
+        .unwrap_or(false);
     let mut state = match entry {
         Entry::FirstLaunch => WizardState::for_first_launch(),
         Entry::Config => WizardState::for_config(config_exists),
