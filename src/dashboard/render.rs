@@ -125,7 +125,14 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
         format!(" {} — /{} ", app.view.title(), app.filter.as_str())
     } else {
-        format!(" {} ({}) ", app.view.title(), items_strs.len())
+        // For Agents view, items_strs includes synthetic project-header
+        // separators — count the real agents from data, not items, so
+        // the title doesn't claim "Agents (15)" when actually 8.
+        let count = match app.view {
+            super::View::Agents => app.data.agents.len(),
+            _ => items_strs.len(),
+        };
+        format!(" {} ({}) ", app.view.title(), count)
     };
 
     let list = List::new(list_items)

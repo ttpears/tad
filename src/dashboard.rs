@@ -380,6 +380,11 @@ impl App {
         } else {
             Some(0)
         });
+        // The Agents view's items() injects project-header rows; the
+        // initial index 0 may land on a header. Snap to the next data
+        // row so the first thing the user sees highlighted is an
+        // actual agent, not a synthetic separator.
+        snap_agents_selection_to_data_row(&mut a, &data);
         let mut p = ListState::default();
         p.select(if data.projects.is_empty() {
             None
@@ -434,7 +439,7 @@ impl App {
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
-            View::Agents => Box::new(self.data.agents.iter().map(|a| a.target.clone())),
+            View::Agents => Box::new(agent_items_grouped_by_project(&self.data).into_iter()),
         };
         if self.filter.is_empty() {
             iter.collect()
@@ -453,18 +458,31 @@ impl App {
             View::Agents => &self.list_state_agents,
         };
         let idx = state.selected()?;
-        self.items().get(idx).cloned()
+        let item = self.items().get(idx).cloned()?;
+        // Header rows in the Agents view aren't "selections" for any
+        // action key — return None so Enter / d / R / s / n no-op
+        // and snooze/rename modals don't open with a header as their
+        // target.
+        if is_agent_header(&item) {
+            return None;
+        }
+        Some(item)
     }
 
     pub(super) fn refresh(&mut self) {
         self.data = AppData::load();
-        // Clamp selections to new list sizes
+        // Clamp selections to new list sizes. The Agents view uses a
+        // grouped list (project header rows interleaved with agent
+        // rows), so the row count there comes from the grouped items()
+        // helper rather than data.agents.len(), and the clamp needs
+        // to land on a non-header row.
+        let agents_view_len = agent_items_grouped_by_project(&self.data).len();
         for (state, len) in [
             (&mut self.list_state_projects, self.data.projects.len()),
             (&mut self.list_state_sessions, self.data.sessions.len()),
             (&mut self.list_state_groups, self.data.groups.len()),
             (&mut self.list_state_hosts, self.data.hosts.len()),
-            (&mut self.list_state_agents, self.data.agents.len()),
+            (&mut self.list_state_agents, agents_view_len),
         ] {
             match (state.selected(), len) {
                 (_, 0) => state.select(None),
@@ -473,7 +491,81 @@ impl App {
                 _ => {}
             }
         }
+        // Ensure the Agents-view selection isn't on a synthetic header
+        // row (would happen on first load and after a refresh narrows
+        // the list).
+        snap_agents_selection_to_data_row(&mut self.list_state_agents, &self.data);
     }
+}
+
+/// If the agents-view list state is parked on a header row, advance
+/// it forward to the next data row. No-op if the selection is already
+/// on data, or if no agents exist at all.
+pub(super) fn snap_agents_selection_to_data_row(state: &mut ListState, data: &AppData) {
+    let items = agent_items_grouped_by_project(data);
+    if items.is_empty() {
+        return;
+    }
+    let Some(cur) = state.selected() else {
+        return;
+    };
+    let mut idx = cur.min(items.len() - 1);
+    let start = idx;
+    while is_agent_header(&items[idx]) {
+        idx = (idx + 1) % items.len();
+        if idx == start {
+            // Pathological all-headers case (can't happen since we
+            // skip empty projects, but be safe).
+            return;
+        }
+    }
+    state.select(Some(idx));
+}
+
+/// Sentinel that prefixes Agents-view "header" rows — synthetic
+/// non-selectable entries inserted between project groups to visually
+/// separate them. Chosen as ASCII bell + a leading sigil because no
+/// tmux target / agent name will ever contain those characters; the
+/// `§` is the visible part of the rendered header.
+pub(super) const AGENT_HEADER_SIGIL: &str = "\x07§";
+
+pub(super) fn is_agent_header(item: &str) -> bool {
+    item.starts_with(AGENT_HEADER_SIGIL)
+}
+
+/// Build the Agents-view item list: for each project (in the order
+/// projects::scan already sorted them — most-recently-active first),
+/// emit one header row followed by that project's agent target rows.
+/// Projects with zero agents are skipped. The header row carries the
+/// project name and an at-a-glance summary (`N agents · M awaiting`)
+/// so the heaviest projects sort and read first.
+fn agent_items_grouped_by_project(data: &AppData) -> Vec<String> {
+    let mut items = Vec::new();
+    for project in &data.projects {
+        if project.agents.is_empty() {
+            continue;
+        }
+        let awaiting = project
+            .agents
+            .iter()
+            .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
+            .count();
+        let plural = if project.agents.len() == 1 { "" } else { "s" };
+        let suffix = if awaiting > 0 {
+            format!(" · {awaiting} awaiting")
+        } else {
+            String::new()
+        };
+        items.push(format!(
+            "{AGENT_HEADER_SIGIL} {} · {} agent{plural}{suffix}",
+            project.name,
+            project.agents.len()
+        ));
+        for a in &project.agents {
+            items.push(a.target.clone());
+        }
+    }
+    items
 }
 
 /// Options for launching the dashboard. Today: open on a specific agent
@@ -585,5 +677,151 @@ fn app_loop<B: ratatui::backend::Backend>(
         if app.should_quit {
             return Ok(app);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::Agent;
+    use crate::projects::Project;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    fn mk_agent(target: &str, cwd: &str) -> Agent {
+        Agent {
+            target: target.into(),
+            session: target.split(':').next().unwrap_or("").into(),
+            window_index: "0".into(),
+            window_name: "w".into(),
+            pane_index: "0".into(),
+            cwd: PathBuf::from(cwd),
+            agent_pid: 1,
+            provider_id: "claude",
+            last_activity: Some(SystemTime::now()),
+            transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
+        }
+    }
+
+    fn mk_data(projects: Vec<Project>, agents: Vec<Agent>) -> AppData {
+        AppData {
+            sessions: vec![],
+            groups: vec![],
+            hosts: vec![],
+            agents,
+            projects,
+            snoozes: crate::snooze::SnoozeState::default(),
+            ui: crate::ui_config::UiConfig::default(),
+        }
+    }
+
+    #[test]
+    fn grouped_items_emit_header_then_agents_per_project() {
+        let a1 = mk_agent("salt:1.0", "/repo/salt");
+        let a2 = mk_agent("salt:2.0", "/repo/salt");
+        let a3 = mk_agent("cops:1.0", "/repo/cops");
+        let data = mk_data(
+            vec![
+                Project {
+                    root: PathBuf::from("/repo/salt"),
+                    name: "salt".into(),
+                    sessions: vec![],
+                    agents: vec![a1.clone(), a2.clone()],
+                    last_activity: a1.last_activity,
+                },
+                Project {
+                    root: PathBuf::from("/repo/cops"),
+                    name: "cops".into(),
+                    sessions: vec![],
+                    agents: vec![a3.clone()],
+                    last_activity: a3.last_activity,
+                },
+            ],
+            vec![a1, a2, a3],
+        );
+
+        let items = agent_items_grouped_by_project(&data);
+        // header, agent, agent, header, agent
+        assert_eq!(items.len(), 5);
+        assert!(is_agent_header(&items[0]));
+        assert!(items[0].contains("salt"));
+        assert!(items[0].contains("2 agents"));
+        assert_eq!(items[1], "salt:1.0");
+        assert_eq!(items[2], "salt:2.0");
+        assert!(is_agent_header(&items[3]));
+        assert!(items[3].contains("cops"));
+        assert!(items[3].contains("1 agent"));
+        assert!(!items[3].contains("1 agents")); // singular wording
+        assert_eq!(items[4], "cops:1.0");
+    }
+
+    #[test]
+    fn grouped_items_skip_projects_with_no_agents() {
+        let a = mk_agent("salt:1.0", "/repo/salt");
+        let data = mk_data(
+            vec![
+                Project {
+                    root: PathBuf::from("/repo/salt"),
+                    name: "salt".into(),
+                    sessions: vec![],
+                    agents: vec![a.clone()],
+                    last_activity: a.last_activity,
+                },
+                // Empty project (in projects list because it has a
+                // tmux session but no live claude in any pane) — must
+                // not emit a header.
+                Project {
+                    root: PathBuf::from("/repo/dormant"),
+                    name: "dormant".into(),
+                    sessions: vec![],
+                    agents: vec![],
+                    last_activity: None,
+                },
+            ],
+            vec![a],
+        );
+        let items = agent_items_grouped_by_project(&data);
+        assert_eq!(items.len(), 2);
+        assert!(is_agent_header(&items[0]));
+        assert!(!items.iter().any(|i| i.contains("dormant")));
+    }
+
+    #[test]
+    fn header_summary_includes_awaiting_count_when_nonzero() {
+        let mut a = mk_agent("salt:1.0", "/repo/salt");
+        a.attention = crate::transcript::Attention::AwaitingInput;
+        let data = mk_data(
+            vec![Project {
+                root: PathBuf::from("/repo/salt"),
+                name: "salt".into(),
+                sessions: vec![],
+                agents: vec![a.clone()],
+                last_activity: a.last_activity,
+            }],
+            vec![a],
+        );
+        let items = agent_items_grouped_by_project(&data);
+        assert!(items[0].contains("1 awaiting"));
+    }
+
+    #[test]
+    fn snap_skips_a_header_at_the_initial_position() {
+        let a = mk_agent("salt:1.0", "/repo/salt");
+        let data = mk_data(
+            vec![Project {
+                root: PathBuf::from("/repo/salt"),
+                name: "salt".into(),
+                sessions: vec![],
+                agents: vec![a.clone()],
+                last_activity: a.last_activity,
+            }],
+            vec![a],
+        );
+        let mut state = ListState::default();
+        state.select(Some(0)); // would land on the header
+        snap_agents_selection_to_data_row(&mut state, &data);
+        // Snapped forward past the header to the agent row.
+        assert_eq!(state.selected(), Some(1));
     }
 }
