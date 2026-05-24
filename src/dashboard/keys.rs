@@ -254,15 +254,31 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
         KeyCode::PageUp | KeyCode::Char('K') => move_selection(app, -10),
         KeyCode::Home | KeyCode::Char('g') => {
-            let len = app.items().len();
-            if len > 0 {
-                app.list_state_mut().select(Some(0));
+            let items = app.items();
+            if !items.is_empty() {
+                // First non-header (Agents view has interleaved
+                // project headers; other views never do).
+                let first = items
+                    .iter()
+                    .position(|i| !super::is_agent_header(i))
+                    .unwrap_or(0);
+                app.list_state_mut().select(Some(first));
             }
         }
         KeyCode::End | KeyCode::Char('G') => {
-            let len = app.items().len();
-            if len > 0 {
-                app.list_state_mut().select(Some(len - 1));
+            let items = app.items();
+            if !items.is_empty() {
+                // Last non-header (Agents view: headers always
+                // precede their agents, so the last row is an agent
+                // unless the project list is pathological).
+                let last = items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, i)| !super::is_agent_header(i))
+                    .map(|(i, _)| i)
+                    .unwrap_or(items.len() - 1);
+                app.list_state_mut().select(Some(last));
             }
         }
         KeyCode::Enter => {
@@ -378,12 +394,26 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 }
 
 fn move_selection(app: &mut App, delta: i32) {
-    let len = app.items().len() as i32;
+    let items = app.items();
+    let len = items.len() as i32;
     if len == 0 {
         return;
     }
     let cur = app.list_state_mut().selected().unwrap_or(0) as i32;
-    let mut next = cur + delta;
-    next = next.rem_euclid(len);
+    let mut next = (cur + delta).rem_euclid(len);
+
+    // The Agents view interleaves project-header rows (non-selectable
+    // separators) with agent rows. Skip past any header we'd otherwise
+    // land on, continuing in the same direction as `delta`. Wrap once;
+    // if all rows are headers (shouldn't happen — we don't emit
+    // headers for empty projects) we leave the cursor put.
+    if app.view == View::Agents {
+        let step: i32 = if delta >= 0 { 1 } else { -1 };
+        let mut hops = 0;
+        while super::is_agent_header(&items[next as usize]) && hops < len {
+            next = (next + step).rem_euclid(len);
+            hops += 1;
+        }
+    }
     app.list_state_mut().select(Some(next as usize));
 }

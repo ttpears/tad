@@ -135,6 +135,23 @@ pub(super) fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Lin
 }
 
 pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
+    // Project-header rows (emitted by the Agents view's grouped items
+    // list) are visually distinct dividers — bold project name in the
+    // accent colour, with the inline count summary. The sigil isn't
+    // shown; it's just an in-band marker for `is_agent_header`.
+    if let Some(rest) = target.strip_prefix(super::AGENT_HEADER_SIGIL) {
+        let label = rest.trim_start();
+        return Line::from(vec![
+            Span::styled("── ", Style::default().fg(theme.border)),
+            Span::styled(
+                label.to_string(),
+                Style::default()
+                    .fg(theme.accent_bold)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ─────────────", Style::default().fg(theme.border)),
+        ]);
+    }
     let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
         return Line::from(target.to_string());
     };
@@ -219,6 +236,9 @@ pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> 
     });
 
     let mut spans = vec![
+        // Two-space indent so agent rows visually nest under their
+        // project-group header in the Agents view.
+        Span::raw("  "),
         Span::styled(marker_text, marker_style),
         Span::styled(
             format!("{:<22}", truncate(target, 22)),
