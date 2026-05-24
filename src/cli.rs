@@ -52,10 +52,11 @@ pub enum Cmd {
     /// agents across all panes. Designed for `#(tad status)` in tmux.conf
     /// status-right. Prints nothing when no agents are running.
     ///
-    /// Format: `claude: N` if all agents are active; `claude: A/N` if
-    /// some are idle (`A` = active, `N` = total). Override the
-    /// "active" threshold (seconds since the last transcript write) with
-    /// `--active-secs` (default: 30).
+    /// Format: `agents: N` if all are active; `agents: A/N` if some
+    /// are idle (`A` = active, `N` = total); appends `· M waiting`
+    /// when any agents have transitioned to "awaiting input" recently.
+    /// Override the "active" threshold (seconds since the last
+    /// transcript write) with `--active-secs` (default: 30).
     Status {
         /// Mtime within this many seconds = "active". Default 30s.
         #[arg(long, default_value_t = 30)]
@@ -343,10 +344,10 @@ fn print_status(active_secs: u64) {
     }
     let c = agents::counts(&agents, std::time::Duration::from_secs(active_secs));
     // "Waiting" only counts AwaitingInput agents whose transcript was
-    // written recently — claude sessions that have been sitting idle at
-    // the prompt for hours/days are technically "AwaitingInput" but the
-    // user clearly walked away, and lighting up the status bar over them
-    // teaches the user to ignore the signal.
+    // written recently — agents that have been sitting idle at the
+    // prompt for hours/days are technically "AwaitingInput" but the
+    // user clearly walked away, and lighting up the status bar over
+    // them teaches the user to ignore the signal.
     let ui = crate::ui_config::load();
     let now = std::time::SystemTime::now();
     let awaiting = agents
@@ -360,11 +361,11 @@ fn print_status(active_secs: u64) {
         })
         .count();
     let base = if c.idle == 0 {
-        format!("claude: {}", c.total)
+        format!("agents: {}", c.total)
     } else if c.active == 0 {
-        format!("claude: {} idle", c.total)
+        format!("agents: {} idle", c.total)
     } else {
-        format!("claude: {}/{}", c.active, c.total)
+        format!("agents: {}/{}", c.active, c.total)
     };
     if awaiting > 0 {
         print!("{base} · {awaiting} waiting");

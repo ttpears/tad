@@ -338,7 +338,13 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
         ),
         kv("pane", agent.pane_index.clone()),
         kv("cwd", agent.cwd.display().to_string()),
-        kv("pid", agent.claude_pid.to_string()),
+        kv("pid", agent.agent_pid.to_string()),
+        kv(
+            "provider",
+            crate::provider::by_id(agent.provider_id)
+                .map(|p| p.label().to_string())
+                .unwrap_or_else(|| agent.provider_id.to_string()),
+        ),
     ];
     if let Some(tp) = &agent.transcript_path {
         let short = tp.file_name().map(|s| s.to_string_lossy().into_owned());

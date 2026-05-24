@@ -294,7 +294,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
                 (View::Agents, Some(target)) => {
                     if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
-                        let _ = kill_agent(agent.claude_pid);
+                        let _ = kill_agent(agent.agent_pid);
                         app.refresh();
                     }
                 }

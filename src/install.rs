@@ -81,7 +81,7 @@ pub fn run(opts: InstallOpts) -> Result<i32> {
     println!();
     println!("Done. Quick check:");
     println!("  prefix + {}    pops the dashboard", opts.key);
-    println!("  status-right   should show `claude: N` once an agent is running");
+    println!("  status-right   should show `agents: N` once one is running");
     println!("  tad status     prints the same string the segment renders");
     Ok(0)
 }

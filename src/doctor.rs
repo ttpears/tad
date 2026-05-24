@@ -64,7 +64,7 @@ impl Report {
 pub fn run() -> Result<i32> {
     let mut r = Report::new();
 
-    check_claude(&mut r);
+    check_agent_runtime(&mut r);
     check_tmux_version(&mut r);
     check_config_yaml(&mut r);
     check_marker_blocks(&mut r);
@@ -88,32 +88,40 @@ pub fn run() -> Result<i32> {
     }
 }
 
-fn check_claude(r: &mut Report) {
-    match Command::new("claude").arg("--version").output() {
+fn check_agent_runtime(r: &mut Report) {
+    // Today the default provider's id happens to equal its binary name
+    // (`claude`). Future providers may have a separate "preferred CLI
+    // binary" property; for v1 we just probe `<id> --version`.
+    let provider = crate::provider::default_provider();
+    let bin = provider.id();
+    let label = format!("{} in PATH", provider.label());
+    match Command::new(bin).arg("--version").output() {
         Ok(out) if out.status.success() => {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            r.add("claude in PATH", Verdict::Pass(ver));
+            r.add(label, Verdict::Pass(ver));
         }
         Ok(out) => r.add(
-            "claude in PATH",
+            label,
             Verdict::Warn {
                 msg: format!(
-                    "`claude --version` exited {}",
+                    "`{bin} --version` exited {}",
                     out.status.code().unwrap_or(-1)
                 ),
                 fix: None,
             },
         ),
         Err(_) => r.add(
-            "claude in PATH",
+            label,
             Verdict::Fail {
-                msg: "no `claude` binary on PATH — process-tree detection \
-                      will still work for sessions that find one, but the \
-                      Agents view will be empty if none exist"
-                    .into(),
-                fix: Some(
-                    "install Claude Code: https://docs.claude.com/en/docs/claude-code".into(),
+                msg: format!(
+                    "no `{bin}` binary on PATH — process-tree detection will \
+                     still work for sessions that find one, but the Agents \
+                     view will be empty if none exist"
                 ),
+                fix: Some(format!(
+                    "install {}: https://docs.claude.com/en/docs/claude-code",
+                    provider.label()
+                )),
             },
         ),
     }

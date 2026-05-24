@@ -10,6 +10,7 @@ mod groups;
 mod install;
 mod proc_util;
 mod projects;
+mod provider;
 mod sessions;
 mod shell;
 mod snooze;

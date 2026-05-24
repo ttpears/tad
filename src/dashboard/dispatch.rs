@@ -92,10 +92,17 @@ pub(super) fn spawn_agent_in_project(project_name: &str, prompt: Option<&str>) -
         .find(|p| p.name == project_name)
         .ok_or_else(|| anyhow::anyhow!("project {} no longer exists", project_name))?;
     let root_str = p.root.to_string_lossy().into_owned();
-    let cmd = match prompt {
-        Some(t) if !t.trim().is_empty() => format!("claude {}", crate::shell::quote(t)),
-        _ => "claude".to_string(),
-    };
+    // Provider-agnostic: the spawn command (and its prompt-quoting)
+    // belongs to the provider. Pick the provider the project's
+    // existing agents are using (so a project full of `aider` doesn't
+    // get an unexpected `claude`); fall back to the configured
+    // default when there's no existing agent to learn from.
+    let prov = p
+        .agents
+        .first()
+        .and_then(|a| crate::provider::by_id(a.provider_id))
+        .unwrap_or_else(crate::provider::default_provider);
+    let cmd = prov.spawn_command(prompt);
 
     let (session_name, window_target) = if let Some(s) = p.sessions.first() {
         let out = tmux::run([
@@ -208,11 +215,11 @@ pub(super) fn project_enter_target(data: &AppData, name: &str) -> Option<OpenTar
 /// in-flight tool calls before exiting. The pane stays open with its
 /// shell — the next dashboard refresh sees the agent's gone and drops
 /// the row. Returns true iff we successfully signalled the process.
-pub(super) fn kill_agent(claude_pid: u32) -> bool {
-    if claude_pid == 0 {
+pub(super) fn kill_agent(agent_pid: u32) -> bool {
+    if agent_pid == 0 {
         return false;
     }
-    let rc = unsafe { libc::kill(claude_pid as i32, libc::SIGINT) };
+    let rc = unsafe { libc::kill(agent_pid as i32, libc::SIGINT) };
     rc == 0
 }
 
@@ -275,7 +282,8 @@ mod tests {
             window_name: "w".into(),
             pane_index: "0".into(),
             cwd: PathBuf::from("/repo"),
-            claude_pid: 1,
+            agent_pid: 1,
+            provider_id: "claude",
             last_activity: Some(now),
             transcript_path: None,
             attention: crate::transcript::Attention::Unknown,
