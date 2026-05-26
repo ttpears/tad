@@ -191,6 +191,13 @@ trait Popper {
 struct RealPopper;
 impl Popper for RealPopper {
     fn pop(&mut self, target: &str, ui: &UiConfig) {
+        // Skip the popup if the user is already looking at that exact
+        // pane — the popup would just cover the thing it's trying to
+        // point them at. `display-message` defaults to the same client
+        // `display-popup` would pick, so the two stay in sync.
+        if active_client_pane().as_deref() == Some(target) {
+            return;
+        }
         // tmux picks the most-recently-active client when -t isn't given;
         // good enough for the single-user case. If no client is attached
         // (user not currently viewing tmux), display-popup fails silently
@@ -212,6 +219,31 @@ impl Popper for RealPopper {
                 &format!("tad --select-agent {}", crate::shell::quote(target)),
             ])
             .status();
+    }
+}
+
+/// Current pane of the most-recently-active tmux client, formatted the
+/// same way agent targets are (`session:window.pane`). Returns None when
+/// no client is attached or the query fails — both are "don't suppress"
+/// outcomes for the caller.
+fn active_client_pane() -> Option<String> {
+    let out = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-F",
+            "#{session_name}:#{window_index}.#{pane_index}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
     }
 }
 
