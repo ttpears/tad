@@ -93,6 +93,7 @@ pub(super) fn preview_project(data: &AppData, name: &str, theme: &Theme) -> Vec<
                         .add_modifier(Modifier::BOLD),
                 ),
                 transcript::Attention::Working => ("● ", Style::default().fg(theme.success)),
+                transcript::Attention::Away => ("· ", Style::default().fg(theme.muted)),
                 transcript::Attention::Unknown => ("· ", Style::default().fg(theme.muted)),
             };
             lines.push(Line::from(vec![

@@ -196,6 +196,23 @@ pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> 
             "working".to_string(),
             Style::default().fg(theme.success),
         ),
+        transcript::Attention::Away => {
+            // Claude wrote an away_summary after the last end_turn —
+            // the user has been recognized as away. Show the row (so
+            // abandoned work isn't invisible) but render it muted so
+            // it doesn't compete with active rows for attention.
+            let age = agent
+                .last_activity
+                .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+                .map(|d| format!(" · {}", agents::format_elapsed(d)))
+                .unwrap_or_default();
+            (
+                "· ",
+                Style::default().fg(theme.muted),
+                format!("user away{age}"),
+                Style::default().fg(theme.muted),
+            )
+        }
         transcript::Attention::Unknown => match agent.activity_status(active_window) {
             agents::ActivityStatus::Active(d) => (
                 "● ",

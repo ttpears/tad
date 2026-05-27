@@ -39,6 +39,14 @@ pub enum Attention {
     /// processed, or the user just sent something and claude is
     /// thinking. In any case the user shouldn't be summoned.
     Working,
+    /// Claude finished a turn AND has since written an `away_summary`
+    /// system event — its own "the user walked away from this session"
+    /// signal. The session is technically still AwaitingInput but the
+    /// user has already been recognized as away, so surfacing it as
+    /// "waiting" is noise. Watcher / status segment treat this as
+    /// quiet; the dashboard still shows the row (with an "away" label)
+    /// so abandoned work isn't invisible.
+    Away,
     /// Couldn't decide — empty transcript, unparseable lines, unfamiliar
     /// event shapes, etc. Caller should fall back to the mtime heuristic.
     Unknown,
@@ -120,9 +128,21 @@ pub fn classify(bytes: &[u8]) -> Attention {
     //
     // We may have read mid-line at the head of the tail window — that
     // partial line will fail to parse and we just skip it.
+    //
+    // Side-channel: if we encounter an `away_summary` system event
+    // BEFORE the first decisive user/assistant event, the user has
+    // walked away from this session (claude writes the summary on
+    // user-inactivity). When that flag is set and the verdict would
+    // be AwaitingInput, downgrade to Away so the status segment and
+    // marker don't shout about a session the user has abandoned.
+    let mut saw_away_since_last_message = false;
     for raw in text.lines().rev() {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+        if is_away_summary(trimmed) {
+            saw_away_since_last_message = true;
             continue;
         }
         // Cheap pre-filter so we don't pay serde overhead on the dozens
@@ -135,11 +155,22 @@ pub fn classify(bytes: &[u8]) -> Attention {
             continue;
         };
         match decide(&ev) {
+            Some(Attention::AwaitingInput) if saw_away_since_last_message => {
+                return Attention::Away;
+            }
             Some(state) => return state,
             None => continue,
         }
     }
     Attention::Unknown
+}
+
+/// Cheap substring check for the away-summary event marker. claude
+/// writes these as `{"type":"system","subtype":"away_summary",...}`;
+/// the two substrings together are enough to identify them without
+/// parsing the JSON.
+fn is_away_summary(line: &str) -> bool {
+    line.contains("\"type\":\"system\"") && line.contains("\"subtype\":\"away_summary\"")
 }
 
 /// Turn one event into an attention verdict, or None if this event
@@ -292,5 +323,52 @@ this is not json at all
         // The newer event isn't decisive, so we walk back and find the
         // older end_turn → AwaitingInput.
         assert_eq!(classify(lines.as_bytes()), Attention::AwaitingInput);
+    }
+
+    /// claude wrote an away_summary after the last end_turn → the user
+    /// has been recognized as away. Downgrade AwaitingInput to Away.
+    #[test]
+    fn away_summary_after_end_turn_yields_away() {
+        let lines = "\
+{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}
+{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"…\"}
+";
+        assert_eq!(classify(lines.as_bytes()), Attention::Away);
+    }
+
+    /// A user reply after the away_summary means the user came back —
+    /// classify should reflect the new exchange (Working in this case
+    /// because the trailing event is a user message), not Away.
+    #[test]
+    fn user_reply_after_away_summary_overrides_it() {
+        let lines = "\
+{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}
+{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"…\"}
+{\"type\":\"user\",\"message\":{\"role\":\"user\"}}
+";
+        assert_eq!(classify(lines.as_bytes()), Attention::Working);
+    }
+
+    /// An assistant turn that completes AFTER an earlier away_summary
+    /// (i.e. user came back, replied, claude finished again) is genuine
+    /// AwaitingInput — the away signal was older than the new exchange.
+    #[test]
+    fn new_exchange_after_old_away_summary_is_awaiting_input() {
+        let lines = "\
+{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}
+{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"…\"}
+{\"type\":\"user\",\"message\":{\"role\":\"user\"}}
+{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}
+";
+        assert_eq!(classify(lines.as_bytes()), Attention::AwaitingInput);
+    }
+
+    /// away_summary alone with no decisive assistant event in range →
+    /// fall back to Unknown (the away flag without an AwaitingInput
+    /// verdict to downgrade isn't a verdict by itself).
+    #[test]
+    fn away_summary_alone_is_unknown() {
+        let lines = "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"…\"}\n";
+        assert_eq!(classify(lines.as_bytes()), Attention::Unknown);
     }
 }
