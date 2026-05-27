@@ -343,9 +343,10 @@ pub(super) struct App {
     /// `session:window.pane` of the agent being renamed (captured at
     /// modal-open time for the same reason as `new_agent_project`).
     pub(super) rename_agent_target: Option<String>,
-    /// Set when launched via `--select-agent` (i.e. from the auto-popup):
-    /// after the user snoozes or otherwise resolves the row, we exit the
-    /// dashboard so they're back where they were.
+    /// Set when launched via `--select-agent`. The caller is scripting
+    /// a "look at this one agent" flow, so after the user snoozes or
+    /// otherwise resolves the row we exit so they return to wherever
+    /// they came from.
     pub(super) from_popup: bool,
     pub(super) filter: TextInput,
     pub(super) input_mode: InputMode,
@@ -569,8 +570,8 @@ fn agent_items_grouped_by_project(data: &AppData) -> Vec<String> {
 }
 
 /// Options for launching the dashboard. Today: open on a specific agent
-/// row (used by `tad watch` when an agent goes idle and we pop a popup
-/// from the auto-popup watcher).
+/// row (`--select-agent <target>` — useful for scripts that want to
+/// jump straight to a particular agent).
 #[derive(Debug, Default, Clone)]
 pub struct RunOpts {
     /// If Some, the dashboard opens on the Agents view with the row whose

@@ -1,249 +1,193 @@
-//! `tad watch` — long-running poller that auto-pops the dashboard when a
-//! Claude Code agent transitions from Active to Idle (most-recent
-//! transcript write age crosses the configured threshold). That's the
-//! "agent is no longer thinking, probably awaiting input" signal.
+//! `tad watch` — long-running poller that keeps the per-window
+//! `@tad-attn` tmux user-variable in sync with each Claude Code agent's
+//! attention state. Rendering of that variable (window-status marker,
+//! status-right segment, custom user formats) lives elsewhere; this
+//! module is only the trigger side.
 //!
-//! Run it once per user session: in your tmux startup hook, as a
-//! systemd-user service, or just `tad watch &` in your shell rc. The
-//! pidfile guard means a second `tad watch` exits immediately rather
-//! than double-popping. Set `ui.auto_popup: false` in
-//! `~/.config/tad/config.yaml` to fully silence it without unsetting
-//! the startup hook.
+//! Run it once per user session — `tad install` writes a tmux
+//! `session-created` hook that does so. The pidfile guard means a
+//! second `tad watch` exits immediately rather than racing on the
+//! attention variable.
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::agents::{self, ActivityStatus, Agent};
+use crate::notify::{AttentionNotifier, TmuxNotifier};
 use crate::snooze::{self, SnoozeState};
 use crate::transcript::Attention;
 use crate::ui_config::{self, UiConfig};
 
-/// Unified agent state combining the precise transcript signal (when
-/// parseable) with the mtime-based fallback. Pop triggers are defined
-/// against transitions in this state, not in either raw input.
+/// Unified agent state. The marker is set when status is `Attention`
+/// and there's no active snooze and the user hasn't visited the pane
+/// since the attention period began.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
-    /// Claude finished its turn and is sitting at the prompt expecting
-    /// you to reply. This is the precise "needs attention" signal.
-    AwaitingInput,
-    /// Either currently processing (Attention::Working) or, when the
-    /// transcript can't be classified, the mtime-based "wrote recently"
-    /// signal.
+    /// Agent finished its turn and is sitting at the prompt expecting
+    /// you to reply, OR the mtime fallback says the pane has gone idle
+    /// when we can't parse the transcript.
+    Attention,
+    /// Currently processing, or mtime is fresh enough that we believe
+    /// work is in progress.
     Busy,
-    /// Mtime stale and we don't have a precise signal. Fallback bucket
-    /// for "nothing seems to be happening."
+    /// Mtime stale and no precise signal. Fallback "nothing happening".
     Idle,
 }
 
 #[derive(Debug)]
 struct AgentState {
     last_status: Status,
-    last_popped: Option<Instant>,
-    /// Was this agent snoozed at the previous observation? Used to fire
-    /// a "snooze just expired and you're still idle" pop — the snooze
-    /// semantics are *remind me in X*, not *mute for X*.
+    /// Was this agent snoozed at the previous observation? Used to
+    /// re-arm the marker when the snooze deadline expires while the
+    /// agent is still in attention state — "remind me later" semantics.
     was_snoozed: bool,
+    /// Sticky-true for the duration of an attention period once the
+    /// user has visited the pane. Reset when the status leaves
+    /// attention so the next entry shows the marker again.
+    cleared_by_visit: bool,
 }
 
 fn classify(agent: &Agent, mtime_idle_threshold: Duration) -> Status {
     match agent.attention {
-        Attention::AwaitingInput => Status::AwaitingInput,
+        Attention::AwaitingInput => Status::Attention,
         Attention::Working => Status::Busy,
         Attention::Unknown => match agent.activity_status(mtime_idle_threshold) {
             ActivityStatus::Active(_) => Status::Busy,
-            // No transcript / stale transcript both fall into Idle when
-            // the precise signal isn't available.
+            // The mtime fallback for "agent stopped writing" — without
+            // a precise signal we treat a stalled transcript as the
+            // user-needs-to-look signal.
             _ => Status::Idle,
         },
     }
 }
 
-/// Decide whether a status transition deserves a popup. The precise
-/// signal (anything → AwaitingInput) is preferred; the mtime fallback
-/// (Busy → Idle) is the legacy heuristic for agents whose transcripts
-/// we can't parse.
-fn is_pop_transition(prev: Status, curr: Status) -> bool {
-    match (prev, curr) {
-        (_, Status::AwaitingInput) if prev != Status::AwaitingInput => true,
-        (Status::Busy, Status::Idle) => true,
-        _ => false,
-    }
+/// "Is this a state the marker should light up for?" Both
+/// AwaitingInput (precise) and the mtime fallback Idle qualify;
+/// Busy does not.
+fn is_attention(s: Status) -> bool {
+    matches!(s, Status::Attention | Status::Idle)
 }
 
 pub fn run(interval_secs: u64) -> Result<i32> {
     let pid_path = pid_path();
     enforce_singleton(&pid_path)?;
-    // Best-effort cleanup on graceful exit. If we crash the pidfile is
-    // stale, but the next watcher detects a dead pid and overwrites.
     let _guard = PidFileGuard(pid_path);
 
     let ui = ui_config::load();
-    if !ui.auto_popup {
-        eprintln!("tad watch: ui.auto_popup is false in config.yaml — nothing to do");
-        return Ok(0);
+    if let Some(warning) = ui_config::deprecation_warning() {
+        eprintln!("tad watch: warning: {warning}");
     }
-
     let interval = Duration::from_secs(interval_secs.max(1));
     eprintln!(
-        "tad watch: polling every {}s, idle threshold {}s, cooldown {}s",
+        "tad watch: polling every {}s, attention-idle threshold {}s",
         interval.as_secs(),
-        ui.auto_popup_idle.as_secs(),
-        ui.auto_popup_cooldown.as_secs(),
+        ui.attention_idle.as_secs(),
     );
 
     let mut state: HashMap<String, AgentState> = HashMap::new();
+    let mut notifier = TmuxNotifier;
+    let mut marked: std::collections::HashSet<String> = Default::default();
     loop {
         let agents = agents::scan();
-        // Snoozes are user-set from the dashboard's `s` modal and live in
-        // a shared file so this process picks up changes without IPC.
-        // The file is small (one line per active snooze, pruned lazily),
-        // so re-reading every tick is fine.
         let snoozes = snooze::load(std::time::SystemTime::now());
         process_tick(
             &mut state,
+            &mut marked,
             &agents,
-            ui.auto_popup_idle,
-            ui.auto_popup_cooldown,
-            Instant::now(),
+            ui.attention_idle,
             &snoozes,
             std::time::SystemTime::now(),
+            &mut notifier,
             &ui,
-            &mut RealPopper,
         );
         std::thread::sleep(interval);
     }
 }
 
-/// Pure-ish tick: caller supplies the agent list and popper so tests can
-/// drive the state machine without spawning tmux or waiting on real
-/// timestamps.
+/// Pure tick: caller supplies agents, snooze view, wall-clock, and the
+/// notifier so tests can drive the state machine without tmux.
+///
+/// `marked` is the set of targets that currently have the marker set
+/// from this watcher's POV. It's used so the PidFileGuard's cleanup
+/// can sweep the world clean on shutdown without re-scanning.
 #[allow(clippy::too_many_arguments)]
-fn process_tick<P: Popper>(
+fn process_tick<N: AttentionNotifier>(
     state: &mut HashMap<String, AgentState>,
+    marked: &mut std::collections::HashSet<String>,
     agents: &[Agent],
     idle_threshold: Duration,
-    cooldown: Duration,
-    now: Instant,
     snoozes: &SnoozeState,
     wall_now: std::time::SystemTime,
-    ui: &UiConfig,
-    popper: &mut P,
+    notifier: &mut N,
+    _ui: &UiConfig,
 ) {
     let alive: std::collections::HashSet<&str> = agents.iter().map(|a| a.target.as_str()).collect();
-    state.retain(|target, _| alive.contains(target.as_str()));
+    // Evict state for agents that vanished from the scan. Also unset
+    // their marker so a stale "needs attention" doesn't hang around
+    // after a pane is closed.
+    let dropped: Vec<String> = state
+        .keys()
+        .filter(|t| !alive.contains(t.as_str()))
+        .cloned()
+        .collect();
+    for t in dropped {
+        if marked.remove(&t) {
+            notifier.set_attn(&t, false);
+        }
+        state.remove(&t);
+    }
 
     for agent in agents {
         let new_status = classify(agent, idle_threshold);
         let is_snoozed_now = snooze::is_snoozed(snoozes, &agent.target, wall_now);
         let entry = state.entry(agent.target.clone()).or_insert(AgentState {
-            // First time we see the agent: seed its state without firing.
-            // If they're already AwaitingInput at first sight we don't
-            // know whether they need us or they're a stale-leftover
-            // session the user already replied to.
             last_status: new_status,
-            last_popped: None,
             was_snoozed: is_snoozed_now,
+            cleared_by_visit: false,
         });
 
         let was = entry.last_status;
-        let was_snoozed = entry.was_snoozed;
-        let just_transitioned = is_pop_transition(was, new_status);
-        // Snooze-expiry: deadline passed and the agent is still in a
-        // pop-worthy state → remind the user. "remind me in 5m"
-        // semantics, not "mute for 5m".
-        let snooze_just_expired = was_snoozed
-            && !is_snoozed_now
-            && matches!(new_status, Status::AwaitingInput | Status::Idle);
+        let entering_attention = !is_attention(was) && is_attention(new_status);
+        if entering_attention {
+            // Fresh attention period — give the user a chance to see
+            // the marker even if they were just in the pane.
+            entry.cleared_by_visit = false;
+        }
         entry.last_status = new_status;
         entry.was_snoozed = is_snoozed_now;
 
-        let pop_now = !is_snoozed_now && (just_transitioned || snooze_just_expired);
-        if pop_now && should_pop(entry.last_popped, cooldown, now) {
-            popper.pop(&agent.target, ui);
-            entry.last_popped = Some(now);
+        if !is_attention(new_status) {
+            if marked.remove(&agent.target) {
+                notifier.set_attn(&agent.target, false);
+            }
+            entry.cleared_by_visit = false;
+            continue;
         }
 
-        // Re-arm cooldown when work resumes — if the user replies and
-        // the agent starts writing again, the next AwaitingInput should
-        // pop immediately rather than wait out the leftover cooldown.
-        if new_status == Status::Busy {
-            entry.last_popped = None;
+        if is_snoozed_now {
+            if marked.remove(&agent.target) {
+                notifier.set_attn(&agent.target, false);
+            }
+            continue;
         }
-    }
-}
 
-fn should_pop(last_popped: Option<Instant>, cooldown: Duration, now: Instant) -> bool {
-    match last_popped {
-        None => true,
-        Some(t) => now.duration_since(t) >= cooldown,
-    }
-}
-
-/// Indirection so tests don't shell out to tmux.
-trait Popper {
-    fn pop(&mut self, target: &str, ui: &UiConfig);
-}
-
-struct RealPopper;
-impl Popper for RealPopper {
-    fn pop(&mut self, target: &str, ui: &UiConfig) {
-        // Skip the popup if the user is already looking at that exact
-        // pane — the popup would just cover the thing it's trying to
-        // point them at. `display-message` defaults to the same client
-        // `display-popup` would pick, so the two stay in sync.
-        if active_client_pane().as_deref() == Some(target) {
-            return;
+        if notifier.is_visited(&agent.target) {
+            entry.cleared_by_visit = true;
         }
-        // tmux picks the most-recently-active client when -t isn't given;
-        // good enough for the single-user case. If no client is attached
-        // (user not currently viewing tmux), display-popup fails silently
-        // and we'll try again on the next Active→Idle transition.
-        //
-        // The target is shell-quoted because tmux's display-popup passes
-        // its final argument to `sh -c`, and tmux session names can
-        // contain spaces / quotes / shell metacharacters. An unquoted
-        // `tad --select-agent my work:0.0` would split on the space and
-        // launch with a garbage target.
-        let _ = Command::new("tmux")
-            .args([
-                "display-popup",
-                "-E",
-                "-w",
-                &ui.auto_popup_width,
-                "-h",
-                &ui.auto_popup_height,
-                &format!("tad --select-agent {}", crate::shell::quote(target)),
-            ])
-            .status();
-    }
-}
 
-/// Current pane of the most-recently-active tmux client, formatted the
-/// same way agent targets are (`session:window.pane`). Returns None when
-/// no client is attached or the query fails — both are "don't suppress"
-/// outcomes for the caller.
-fn active_client_pane() -> Option<String> {
-    let out = Command::new("tmux")
-        .args([
-            "display-message",
-            "-p",
-            "-F",
-            "#{session_name}:#{window_index}.#{pane_index}",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+        let want_on = !entry.cleared_by_visit;
+        let currently_on = marked.contains(&agent.target);
+        if want_on != currently_on {
+            notifier.set_attn(&agent.target, want_on);
+            if want_on {
+                marked.insert(agent.target.clone());
+            } else {
+                marked.remove(&agent.target);
+            }
+        }
     }
 }
 
@@ -279,8 +223,6 @@ fn enforce_singleton(path: &std::path::Path) -> Result<()> {
 struct PidFileGuard(PathBuf);
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
-        // Only remove the pidfile if it still contains our pid — don't
-        // race with a successor watcher that already replaced it.
         if let Ok(text) = fs::read_to_string(&self.0) {
             if text.trim().parse::<u32>().ok() == Some(std::process::id()) {
                 let _ = fs::remove_file(&self.0);
@@ -293,35 +235,24 @@ impl Drop for PidFileGuard {
 mod tests {
     use super::*;
 
-    /// Observe-only popper: records every (target, popup_dims) it's
-    /// asked to pop, so tests can assert on the pop decisions made by
-    /// `tick` without actually spawning tmux.
+    /// Recording notifier — captures every set_attn call and answers
+    /// is_visited from a scripted queue so tests don't need a tmux
+    /// server.
     #[derive(Default)]
-    struct RecordingPopper {
-        calls: Vec<String>,
+    struct RecordingNotifier {
+        calls: Vec<(String, bool)>,
+        /// Queue of (target, visited) answers. Pops front on each call;
+        /// if empty returns false.
+        visit_answers: std::collections::VecDeque<bool>,
     }
-    impl Popper for RecordingPopper {
-        fn pop(&mut self, target: &str, _ui: &UiConfig) {
-            self.calls.push(target.to_string());
+    impl AttentionNotifier for RecordingNotifier {
+        fn set_attn(&mut self, target: &str, on: bool) {
+            self.calls.push((target.to_string(), on));
+        }
+        fn is_visited(&mut self, _target: &str) -> bool {
+            self.visit_answers.pop_front().unwrap_or(false)
         }
     }
-
-    #[test]
-    fn should_pop_returns_true_when_never_popped() {
-        assert!(should_pop(None, Duration::from_secs(60), Instant::now()));
-    }
-
-    #[test]
-    fn should_pop_respects_cooldown() {
-        let now = Instant::now();
-        let recent = now - Duration::from_secs(10);
-        let stale = now - Duration::from_secs(120);
-        assert!(!should_pop(Some(recent), Duration::from_secs(60), now));
-        assert!(should_pop(Some(stale), Duration::from_secs(60), now));
-    }
-
-    // pid_is_alive lives in `crate::proc_util` now and is tested there;
-    // the duplicate tests that used to live here are gone.
 
     use crate::agents::Agent;
     use std::path::PathBuf;
@@ -351,260 +282,214 @@ mod tests {
         }
     }
 
-    /// First time we see an agent we should NOT pop, even if they're
-    /// already idle — we'd be popping on a state we never observed
-    /// transitioning, which is just startup noise.
+    fn empty_marked() -> std::collections::HashSet<String> {
+        Default::default()
+    }
+
+    /// Entering attention → marker on, exactly once.
     #[test]
-    fn no_pop_on_first_observation_even_if_idle() {
+    fn entering_attention_sets_marker() {
         let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
+        let mut marked = empty_marked();
+        let mut n = RecordingNotifier::default();
         let ui = UiConfig::default();
+        let wall = SystemTime::now();
+
+        // tick 1: Busy (seed state, no call)
         process_tick(
             &mut state,
+            &mut marked,
+            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall,
+            &mut n,
+            &ui,
+        );
+        assert!(n.calls.is_empty());
+
+        // tick 2: Idle (mtime fallback) — entering attention → set on
+        process_tick(
+            &mut state,
+            &mut marked,
             &[mk_agent("s:0.0", Some(Duration::from_secs(120)))],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            Instant::now(),
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall + Duration::from_secs(60),
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert!(popper.calls.is_empty(), "should not pop on first sighting");
-        assert_eq!(state.len(), 1);
+        assert_eq!(n.calls, vec![("s:0.0".to_string(), true)]);
+        assert!(marked.contains("s:0.0"));
     }
 
-    /// The canonical case: agent was active last tick, idle this tick. Pop.
+    /// While in attention, a visit clears the marker and it stays off
+    /// for subsequent ticks (sticky).
     #[test]
-    fn pops_on_active_to_idle_transition() {
+    fn visit_clears_marker_and_stays_clear() {
         let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
+        let mut marked = empty_marked();
+        let mut n = RecordingNotifier::default();
         let ui = UiConfig::default();
-        let now0 = Instant::now();
+        let wall = SystemTime::now();
 
-        // tick 1: agent is active
+        // tick 1: seed Busy
         process_tick(
             &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(1)),
+                Attention::Working,
+            )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall,
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert!(popper.calls.is_empty());
-
-        // tick 2: agent is now idle (no transcript write in last 60s)
+        // tick 2: Attention, not visited → marker on
         process_tick(
             &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(2)),
+                Attention::AwaitingInput,
+            )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(60),
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall + Duration::from_secs(10),
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
-    }
+        assert_eq!(n.calls, vec![("s:0.0".into(), true)]);
 
-    /// Cooldown: a second idle-tick within the cooldown window shouldn't
-    /// re-pop the same agent.
-    #[test]
-    fn cooldown_prevents_repeated_pop() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let cooldown = Duration::from_secs(300);
-        let now0 = Instant::now();
-
-        // tick 1: active
+        // tick 3: still Attention, visit registered → marker off
+        n.visit_answers.push_back(true);
         process_tick(
             &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(3)),
+                Attention::AwaitingInput,
+            )],
             Duration::from_secs(30),
-            cooldown,
-            now0,
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall + Duration::from_secs(20),
+            &mut n,
             &ui,
-            &mut popper,
-        );
-        // tick 2: idle → pop
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
-            Duration::from_secs(30),
-            cooldown,
-            now0 + Duration::from_secs(60),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        // tick 3: still idle, well within cooldown → no second pop
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(120)))],
-            Duration::from_secs(30),
-            cooldown,
-            now0 + Duration::from_secs(120),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
-    }
-
-    /// Re-arm: after a pop, if the agent goes active again (user replied,
-    /// claude is working) and then idle again, we should pop again
-    /// without waiting out the original cooldown.
-    #[test]
-    fn activity_rearms_cooldown() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let now0 = Instant::now();
-
-        // active → idle → pop
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(60),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        assert_eq!(popper.calls.len(), 1);
-
-        // active again (user replied)
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(70),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        // idle again — should pop despite cooldown not having elapsed,
-        // because activity reset it
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(130),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        assert_eq!(popper.calls.len(), 2);
-    }
-
-    /// Snooze: an agent whose target is in the snooze map shouldn't pop
-    /// on Active→Idle until the snooze deadline passes.
-    #[test]
-    fn snooze_suppresses_pop_until_deadline() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let now0 = Instant::now();
-        let wall0 = std::time::SystemTime::now();
-
-        // tick 1: active (seed state, no pop)
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
-            &SnoozeState::default(),
-            wall0,
-            &ui,
-            &mut popper,
-        );
-
-        // Snooze s:0.0 for 1 hour starting now.
-        let mut snoozes = SnoozeState::default();
-        snoozes.snoozes.insert(
-            "s:0.0".into(),
-            wall0
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-                + 3600,
-        );
-
-        // tick 2: idle → would normally pop, but snoozed → suppressed.
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(60),
-            &snoozes,
-            wall0 + Duration::from_secs(60),
-            &ui,
-            &mut popper,
-        );
-        assert!(
-            popper.calls.is_empty(),
-            "snooze should suppress the Active→Idle pop"
-        );
-
-        // tick 3: snooze has expired, agent is still idle → "remind me"
-        // fires: a snooze-expiry-while-idle pops once.
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(7200)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(7200),
-            &SnoozeState::default(),
-            wall0 + Duration::from_secs(7200),
-            &ui,
-            &mut popper,
         );
         assert_eq!(
-            popper.calls,
-            vec!["s:0.0".to_string()],
-            "snooze expiry while still idle should fire a reminder pop"
+            n.calls,
+            vec![("s:0.0".into(), true), ("s:0.0".into(), false)]
         );
+
+        // tick 4: still Attention, not visited this tick → stays off
+        process_tick(
+            &mut state,
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(4)),
+                Attention::AwaitingInput,
+            )],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall + Duration::from_secs(30),
+            &mut n,
+            &ui,
+        );
+        // Still only the two calls — no re-set.
+        assert_eq!(n.calls.len(), 2);
     }
 
-    /// Snooze + agent goes Active during the snooze + still idle when
-    /// snooze expires. The activity-during-snooze isn't a pop trigger
-    /// (snooze suppresses transitions), but when the snooze expires
-    /// we still want the remind-me pop.
+    /// Status leaves attention → marker off, sticky flag reset so the
+    /// next attention period gets a fresh marker.
     #[test]
-    fn snooze_expiry_while_idle_pops_even_after_activity() {
+    fn leaving_attention_clears_and_re_arms() {
         let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
+        let mut marked = empty_marked();
+        let mut n = RecordingNotifier::default();
         let ui = UiConfig::default();
-        let now0 = Instant::now();
-        let wall0 = std::time::SystemTime::now();
+        let wall = SystemTime::now();
+
+        // attention, marker on
+        process_tick(
+            &mut state,
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(1)),
+                Attention::AwaitingInput,
+            )],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall,
+            &mut n,
+            &ui,
+        );
+        // visited → marker off
+        n.visit_answers.push_back(true);
+        process_tick(
+            &mut state,
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(2)),
+                Attention::AwaitingInput,
+            )],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall + Duration::from_secs(5),
+            &mut n,
+            &ui,
+        );
+        // back to Busy — already off so no extra call
+        let calls_before = n.calls.len();
+        process_tick(
+            &mut state,
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(1)),
+                Attention::Working,
+            )],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall + Duration::from_secs(10),
+            &mut n,
+            &ui,
+        );
+        assert_eq!(n.calls.len(), calls_before);
+
+        // back to Attention, not visited → marker on again (sticky cleared)
+        process_tick(
+            &mut state,
+            &mut marked,
+            &[mk_agent_with_attention(
+                "s:0.0",
+                Some(Duration::from_secs(2)),
+                Attention::AwaitingInput,
+            )],
+            Duration::from_secs(30),
+            &SnoozeState::default(),
+            wall + Duration::from_secs(20),
+            &mut n,
+            &ui,
+        );
+        assert!(n.calls.last() == Some(&("s:0.0".into(), true)));
+    }
+
+    /// Snooze suppresses the marker, expiry re-arms it.
+    #[test]
+    fn snooze_suppresses_marker_until_expiry() {
+        let mut state = HashMap::new();
+        let mut marked = empty_marked();
+        let mut n = RecordingNotifier::default();
+        let ui = UiConfig::default();
+        let wall0 = SystemTime::now();
         let snooze_until = wall0
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -613,173 +498,98 @@ mod tests {
         let mut snoozes = SnoozeState::default();
         snoozes.snoozes.insert("s:0.0".into(), snooze_until);
 
-        // tick 1: seed as snoozed + active
+        // seed Busy under snooze
         process_tick(
             &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
-            &snoozes,
-            wall0,
-            &ui,
-            &mut popper,
-        );
-        // tick 2: still snoozed, agent now idle → suppressed
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(60)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(30),
-            &snoozes,
-            wall0 + Duration::from_secs(30),
-            &ui,
-            &mut popper,
-        );
-        assert!(popper.calls.is_empty());
-
-        // tick 3: snooze expired, agent still idle → reminder pop
-        process_tick(
-            &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(120)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(90),
-            &SnoozeState::default(),
-            wall0 + Duration::from_secs(90),
-            &ui,
-            &mut popper,
-        );
-        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
-    }
-
-    /// The precise transcript signal: agent was Working (transcript
-    /// classifier said so), now AwaitingInput → pop. This fires even
-    /// if the mtime is still fresh, because the assistant's last
-    /// stop_reason is end_turn.
-    #[test]
-    fn precise_signal_pops_on_busy_to_awaiting_input() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let now0 = Instant::now();
-
-        // tick 1: classifier says Working — seed state, no pop
-        process_tick(
-            &mut state,
+            &mut marked,
             &[mk_agent_with_attention(
                 "s:0.0",
                 Some(Duration::from_secs(1)),
                 Attention::Working,
             )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            &snoozes,
+            wall0,
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert!(popper.calls.is_empty());
-
-        // tick 2: classifier flips to AwaitingInput (claude finished a
-        // turn) — pop *immediately*, no idle-threshold wait required.
+        // entering Attention while snoozed → no marker
         process_tick(
             &mut state,
+            &mut marked,
             &[mk_agent_with_attention(
                 "s:0.0",
                 Some(Duration::from_secs(2)),
                 Attention::AwaitingInput,
             )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(5),
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            &snoozes,
+            wall0 + Duration::from_secs(10),
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert_eq!(popper.calls, vec!["s:0.0".to_string()]);
-    }
+        assert!(n.calls.is_empty());
 
-    /// Mixed: precise signal Unknown on tick 1, becomes Working on tick
-    /// 2 (parseable now), AwaitingInput on tick 3 → pop.
-    /// Sanity-checks that Unknown→Working isn't mistaken for a transition.
-    #[test]
-    fn unknown_to_working_does_not_pop() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let now0 = Instant::now();
-
+        // snooze expired, still Attention → marker on
         process_tick(
             &mut state,
+            &mut marked,
             &[mk_agent_with_attention(
                 "s:0.0",
-                Some(Duration::from_secs(1)),
-                Attention::Unknown,
+                Some(Duration::from_secs(120)),
+                Attention::AwaitingInput,
             )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall0 + Duration::from_secs(120),
+            &mut n,
             &ui,
-            &mut popper,
         );
+        assert_eq!(n.calls, vec![("s:0.0".into(), true)]);
+    }
+
+    /// Vanished agents are evicted, and if they were marked we unset
+    /// the marker on the way out so stale state doesn't linger.
+    #[test]
+    fn vanished_agents_clear_their_marker() {
+        let mut state = HashMap::new();
+        let mut marked = empty_marked();
+        let mut n = RecordingNotifier::default();
+        let ui = UiConfig::default();
+        let wall = SystemTime::now();
+
         process_tick(
             &mut state,
+            &mut marked,
             &[mk_agent_with_attention(
                 "s:0.0",
                 Some(Duration::from_secs(2)),
-                Attention::Working,
+                Attention::AwaitingInput,
             )],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(5),
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall,
+            &mut n,
             &ui,
-            &mut popper,
         );
-        assert!(popper.calls.is_empty(), "Unknown→Busy should not pop");
-    }
+        assert_eq!(n.calls, vec![("s:0.0".into(), true)]);
 
-    /// Agents that vanish from the scan should be evicted from state, so
-    /// when they reappear we treat them as fresh (no false pop).
-    #[test]
-    fn vanished_agents_are_forgotten() {
-        let mut state = HashMap::new();
-        let mut popper = RecordingPopper::default();
-        let ui = UiConfig::default();
-        let now0 = Instant::now();
-
+        // pane vanished
         process_tick(
             &mut state,
-            &[mk_agent("s:0.0", Some(Duration::from_secs(1)))],
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0,
-            &SnoozeState::default(),
-            std::time::SystemTime::now(),
-            &ui,
-            &mut popper,
-        );
-        assert_eq!(state.len(), 1);
-
-        // scan now returns nothing — that agent went away
-        process_tick(
-            &mut state,
+            &mut marked,
             &[],
             Duration::from_secs(30),
-            Duration::from_secs(300),
-            now0 + Duration::from_secs(10),
             &SnoozeState::default(),
-            std::time::SystemTime::now(),
+            wall + Duration::from_secs(10),
+            &mut n,
             &ui,
-            &mut popper,
         );
         assert!(state.is_empty());
+        assert!(marked.is_empty());
+        assert_eq!(
+            n.calls,
+            vec![("s:0.0".into(), true), ("s:0.0".into(), false)]
+        );
     }
 }

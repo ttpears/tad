@@ -25,6 +25,18 @@ theme: tokyonight
 #   selection_bg: "#2a2e42"
 #   border: "#3b4261"
 
+# ---- ui ----
+# All keys have sensible defaults; uncomment only what you want to override.
+#
+# ui:
+#   attention_idle_secs: 30        # Active→Idle threshold for the mtime fallback
+#                                  # used by `tad watch` when transcripts aren't
+#                                  # parseable. Lower = faster marker, more noise.
+#   awaiting_freshness_secs: 600   # AwaitingInput agents older than this are
+#                                  # treated as "user walked away" and excluded
+#                                  # from the `tad status` "waiting" count.
+#   snooze_intervals_secs: [300, 1800, 7200]   # offered in the dashboard 's' modal
+
 # ---- groups ----
 # Multi-host configurations for `tad -g <name>` / the dashboard Groups view.
 # See examples/groups.yaml.example for the full schema and more examples.

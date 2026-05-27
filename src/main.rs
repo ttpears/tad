@@ -8,6 +8,7 @@ mod dashboard;
 mod doctor;
 mod groups;
 mod install;
+mod notify;
 mod proc_util;
 mod projects;
 mod provider;

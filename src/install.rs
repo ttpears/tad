@@ -1,6 +1,7 @@
-//! `tad install` — one-shot setup that writes the three tmux conf hooks
-//! tad needs (popup keybind, `#(tad status)` segment, `tad watch`
-//! startup) so users don't have to wire each one by hand.
+//! `tad install` — one-shot setup that writes the tmux conf hooks tad
+//! needs (popup keybind, `#(tad status)` segment, `tad watch` startup,
+//! and the per-window attention marker) so users don't have to wire
+//! each one by hand.
 //!
 //! Each hook is a marker-delimited block (see [`crate::tmux_conf`]),
 //! so re-running updates in place, uninstalling removes only the
@@ -20,6 +21,8 @@ const STATUS_BEG: &str = "# >>> tad status segment >>>";
 const STATUS_END: &str = "# <<< tad status segment <<<";
 const WATCH_BEG: &str = "# >>> tad watch startup >>>";
 const WATCH_END: &str = "# <<< tad watch startup <<<";
+const ATTN_BEG: &str = "# >>> tad attention marker >>>";
+const ATTN_END: &str = "# <<< tad attention marker <<<";
 
 #[derive(Debug, Clone)]
 pub struct InstallOpts {
@@ -29,6 +32,10 @@ pub struct InstallOpts {
     pub width: String,
     pub height: String,
     pub status_interval: u64,
+    /// Skip the per-window attention-marker block. Users who already
+    /// have a heavily customised `window-status-format` and want only
+    /// the aggregate `tad status` segment can opt out.
+    pub no_window_marker: bool,
 }
 
 impl Default for InstallOpts {
@@ -40,6 +47,7 @@ impl Default for InstallOpts {
             width: "80%".into(),
             height: "80%".into(),
             status_interval: 5,
+            no_window_marker: false,
         }
     }
 }
@@ -59,12 +67,20 @@ pub fn run(opts: InstallOpts) -> Result<i32> {
     );
     println!("  2. status segment    #(tad status) in status-right");
     println!("  3. watch startup     `tad watch` on tmux session-created");
+    if !opts.no_window_marker {
+        println!(
+            "  4. attention marker  `!` appended to window-status-format when an agent needs you"
+        );
+    }
     println!();
 
     let mut wrote_any = false;
     wrote_any |= install_keybind(&path, &opts)?;
     wrote_any |= install_status(&path, &opts)?;
     wrote_any |= install_watch_hook(&path, &opts)?;
+    if !opts.no_window_marker {
+        wrote_any |= install_attn_marker(&path, &opts)?;
+    }
 
     if !wrote_any {
         println!("nothing to change — your tmux conf is already set up");
@@ -83,6 +99,9 @@ pub fn run(opts: InstallOpts) -> Result<i32> {
     println!("  prefix + {}    pops the dashboard", opts.key);
     println!("  status-right   should show `agents: N` once one is running");
     println!("  tad status     prints the same string the segment renders");
+    if !opts.no_window_marker {
+        println!("  window list    a `!` trails any window whose agent needs your attention");
+    }
     Ok(0)
 }
 
@@ -95,6 +114,7 @@ pub fn uninstall(conf_path: Option<&Path>) -> Result<i32> {
     }
     let mut removed_any = false;
     for (label, beg, end) in [
+        ("attention marker", ATTN_BEG, ATTN_END),
         ("watch startup", WATCH_BEG, WATCH_END),
         ("status segment", STATUS_BEG, STATUS_END),
         ("popup keybind", KEYBIND_BEG, KEYBIND_END),
@@ -149,6 +169,19 @@ fn install_status(path: &Path, opts: &InstallOpts) -> Result<bool> {
         &body,
         opts.yes,
     )
+}
+
+fn install_attn_marker(path: &Path, opts: &InstallOpts) -> Result<bool> {
+    // `set -ga` *appends* the conditional `!` to whatever
+    // window-status-format the user (or their theme) already has. When
+    // `@tad-attn` is unset on that window, the conditional yields the
+    // empty string and nothing renders. The trailing space inside the
+    // conditional gives the marker a little air from the window name.
+    let body = "# Managed by `tad install`. Re-run to update; remove with\n\
+                # `tad install --uninstall`.\n\
+                set -ga window-status-format         '#{?@tad-attn, !,}'\n\
+                set -ga window-status-current-format '#{?@tad-attn, !,}'";
+    apply(path, "attention marker", ATTN_BEG, ATTN_END, body, opts.yes)
 }
 
 fn install_watch_hook(path: &Path, opts: &InstallOpts) -> Result<bool> {

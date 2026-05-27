@@ -65,16 +65,18 @@ pub enum Cmd {
 
     /// Diagnose the half-installed / silently-broken states the cockpit
     /// can land in: missing tools, wrong tmux version, stale pidfile,
-    /// missing tmux conf blocks, ui.auto_popup mismatch with the watch
-    /// hook, leftover pre-v0.10 migrated files, etc. Pure-diagnose for
-    /// now — prints findings + suggested fixes.
+    /// missing tmux conf blocks, legacy ui.auto_popup* keys in config,
+    /// leftover pre-v0.10 migrated files, etc. Pure-diagnose for now —
+    /// prints findings + suggested fixes.
     Doctor,
 
-    /// One-shot setup: write the three tmux conf blocks tad needs
+    /// One-shot setup: write the four tmux conf blocks tad needs
     /// (popup keybind + `#(tad status)` status segment + `tad watch`
-    /// session-created hook) so users don't have to wire each one
-    /// individually. Each block lives behind its own marker pair and
-    /// is idempotent — re-running updates, `--uninstall` removes.
+    /// session-created hook + per-window `@tad-attn` marker append) so
+    /// users don't have to wire each one individually. Each block
+    /// lives behind its own marker pair and is idempotent — re-running
+    /// updates, `--uninstall` removes. Use `--no-window-marker` to skip
+    /// the window-status block if you already customize it heavily.
     Install {
         /// Skip per-block confirmation prompts.
         #[arg(short, long)]
@@ -100,19 +102,24 @@ pub enum Cmd {
         /// without thrashing.
         #[arg(long, default_value_t = 5)]
         status_interval: u64,
+        /// Skip the per-window attention-marker block. By default
+        /// `tad install` appends a `!` to window-status-format when an
+        /// agent in that window needs your attention; this flag opts
+        /// out for users with heavily customised tmux status lines.
+        #[arg(long)]
+        no_window_marker: bool,
     },
 
     /// Long-running watcher: poll all tmux panes for Claude Code agents
-    /// and pop the dashboard (with the agent preselected) when one
-    /// transitions Active → Idle. The signal is "transcript hasn't been
-    /// written in `ui.auto_popup_idle_secs`" — i.e. agent stopped
-    /// thinking, probably awaiting your input.
+    /// and keep the per-window `@tad-attn` tmux user-variable in sync
+    /// with each agent's attention state. Rendering is passive: the
+    /// `tad install` window-status block appends a `!` to the window
+    /// when its `@tad-attn` is set, and the `#(tad status)` segment
+    /// shows the aggregate count. No popups.
     ///
-    /// Run once per user session: drop `tad watch &` in your shell rc,
-    /// add it to a tmux startup hook, or run it as a systemd-user
-    /// service. A pidfile guard makes a second `tad watch` exit
-    /// immediately. Set `ui.auto_popup: false` in config.yaml to fully
-    /// silence the watcher without removing the startup hook.
+    /// Run once per user session — `tad install` writes a tmux
+    /// session-created hook that does so. A pidfile guard makes a
+    /// second `tad watch` exit immediately.
     Watch {
         /// Poll interval in seconds. Default 5.
         #[arg(long, default_value_t = 5)]
@@ -264,6 +271,7 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
             width,
             height,
             status_interval,
+            no_window_marker,
         } => {
             if uninstall {
                 install::uninstall(conf_path.as_deref())
@@ -275,6 +283,7 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
                     width,
                     height,
                     status_interval,
+                    no_window_marker,
                 })
             }
         }
@@ -334,6 +343,11 @@ fn renamed(old: &str, new: &str) -> Result<i32> {
     Ok(2)
 }
 
+/// Maximum length (chars) of the comma-joined waiting-names list
+/// before we fall back to the count. Keeps the status segment from
+/// hogging status-right when many agents are waiting.
+const WAITING_NAMES_BUDGET: usize = 40;
+
 /// Render the status-line segment to stdout. Empty when no agents — tmux
 /// happily renders an empty `#()` segment as nothing, so the user's
 /// status-line stays clean when no Claude Code is running.
@@ -343,14 +357,14 @@ fn print_status(active_secs: u64) {
         return;
     }
     let c = agents::counts(&agents, std::time::Duration::from_secs(active_secs));
+    let ui = crate::ui_config::load();
+    let now = std::time::SystemTime::now();
     // "Waiting" only counts AwaitingInput agents whose transcript was
     // written recently — agents that have been sitting idle at the
     // prompt for hours/days are technically "AwaitingInput" but the
     // user clearly walked away, and lighting up the status bar over
     // them teaches the user to ignore the signal.
-    let ui = crate::ui_config::load();
-    let now = std::time::SystemTime::now();
-    let awaiting = agents
+    let waiting_names: Vec<String> = agents
         .iter()
         .filter(|a| {
             a.attention == crate::transcript::Attention::AwaitingInput
@@ -359,7 +373,8 @@ fn print_status(active_secs: u64) {
                     .map(|age| age <= ui.awaiting_freshness)
                     .unwrap_or(false)
         })
-        .count();
+        .map(|a| a.session.clone())
+        .collect();
     let base = if c.idle == 0 {
         format!("agents: {}", c.total)
     } else if c.active == 0 {
@@ -367,10 +382,25 @@ fn print_status(active_secs: u64) {
     } else {
         format!("agents: {}/{}", c.active, c.total)
     };
-    if awaiting > 0 {
-        print!("{base} · {awaiting} waiting");
+    if let Some(tail) = format_waiting_tail(&waiting_names, WAITING_NAMES_BUDGET) {
+        print!("{base} · {tail}");
     } else {
         print!("{base}");
+    }
+}
+
+/// Build the `waiting: …` tail of the status segment. Returns None when
+/// nothing is waiting (caller omits the separator). Returns the name
+/// list when it fits in `budget` chars, otherwise the count.
+fn format_waiting_tail(names: &[String], budget: usize) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let joined = names.join(", ");
+    if joined.chars().count() <= budget {
+        Some(format!("waiting: {joined}"))
+    } else {
+        Some(format!("waiting: {}", names.len()))
     }
 }
 
@@ -383,6 +413,34 @@ mod tests {
     fn parses_config_subcommand() {
         let cli = Cli::try_parse_from(["tad", "config"]).expect("parse");
         assert!(matches!(cli.cmd, Some(Cmd::Config)));
+    }
+
+    #[test]
+    fn waiting_tail_is_none_when_empty() {
+        let v: Vec<String> = vec![];
+        assert!(format_waiting_tail(&v, 40).is_none());
+    }
+
+    #[test]
+    fn waiting_tail_lists_names_when_under_budget() {
+        let v = vec!["foo".to_string(), "bar".to_string()];
+        assert_eq!(
+            format_waiting_tail(&v, 40).as_deref(),
+            Some("waiting: foo, bar")
+        );
+    }
+
+    #[test]
+    fn waiting_tail_falls_back_to_count_over_budget() {
+        // 5 names of 10 chars each = 50 chars before joining, way over 20.
+        let v = vec![
+            "aaaaaaaaaa".to_string(),
+            "bbbbbbbbbb".to_string(),
+            "cccccccccc".to_string(),
+            "dddddddddd".to_string(),
+            "eeeeeeeeee".to_string(),
+        ];
+        assert_eq!(format_waiting_tail(&v, 20).as_deref(), Some("waiting: 5"));
     }
 
     #[test]

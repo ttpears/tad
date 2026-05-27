@@ -13,26 +13,16 @@ use std::time::Duration;
 /// at default.
 #[derive(Debug, Clone)]
 pub struct UiConfig {
-    /// When true (default), `tad watch` pops the dashboard with the agent
-    /// preselected on an Active→Idle transition. Set false to fully
-    /// silence the watcher.
-    pub auto_popup: bool,
-    /// Idle threshold for the watcher's Active→Idle classification.
-    /// Defaults to 30s — matches the `tad status` default so what shows
-    /// up as "idle" in the status line is also what triggers the popup.
-    pub auto_popup_idle: Duration,
-    /// `tmux display-popup -w` value for the auto-popup. Defaults to 80%.
-    pub auto_popup_width: String,
-    /// `tmux display-popup -h` value for the auto-popup. Defaults to 80%.
-    pub auto_popup_height: String,
-    /// Per-agent cooldown after a popup fires, so we don't re-pop the
-    /// same idle agent every tick. Defaults to 5 minutes — enough that
-    /// the user has time to respond, short enough that a truly stuck
-    /// agent eventually re-surfaces if they ignored it.
-    pub auto_popup_cooldown: Duration,
+    /// Idle threshold for the watcher's attention classification when
+    /// the precise transcript signal isn't available — agents whose
+    /// transcript mtime is older than this fall into the mtime
+    /// fallback "Idle" bucket and light up the `@tad-attn` marker.
+    /// Defaults to 30s.
+    pub attention_idle: Duration,
     /// Snooze durations offered in the dashboard's `s` modal. Default
-    /// 5m / 30m / 2h. Snoozes are honored by `tad watch` and persist
-    /// across watcher restarts (stored in $XDG_STATE_HOME/tad/snooze.yaml).
+    /// 5m / 30m / 2h. Snoozes are honored by `tad watch` (they
+    /// suppress the `@tad-attn` marker) and persist across watcher
+    /// restarts (stored in $XDG_STATE_HOME/tad/snooze.yaml).
     pub snooze_intervals: Vec<Duration>,
     /// How recent the transcript mtime must be for an AwaitingInput
     /// agent to count toward the "N waiting" tail in `tad status`.
@@ -47,11 +37,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            auto_popup: true,
-            auto_popup_idle: Duration::from_secs(30),
-            auto_popup_width: "80%".into(),
-            auto_popup_height: "80%".into(),
-            auto_popup_cooldown: Duration::from_secs(5 * 60),
+            attention_idle: Duration::from_secs(30),
             snooze_intervals: vec![
                 Duration::from_secs(5 * 60),
                 Duration::from_secs(30 * 60),
@@ -62,17 +48,27 @@ impl Default for UiConfig {
     }
 }
 
-/// Wire-format struct; mapped onto [`UiConfig`] with defaults filled in.
+/// Wire-format struct; mapped onto [`UiConfig`] with defaults filled
+/// in. Pre-v0.11 keys (`auto_popup`, `auto_popup_idle_secs`, …) are
+/// still accepted so an existing config doesn't fail to parse; their
+/// values are mapped where they have an analogue (idle_secs →
+/// attention_idle) and otherwise ignored. See
+/// [`deprecation_warning_for`] for the user-facing notice.
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct UiWire {
+    attention_idle_secs: Option<u64>,
+    snooze_intervals_secs: Option<Vec<u64>>,
+    awaiting_freshness_secs: Option<u64>,
+
+    // Legacy keys (pre-v0.11). Kept so existing configs deserialize
+    // cleanly. `auto_popup_idle_secs` is mapped onto the new
+    // `attention_idle` field; the rest are silently ignored.
     auto_popup: Option<bool>,
     auto_popup_idle_secs: Option<u64>,
     auto_popup_width: Option<String>,
     auto_popup_height: Option<String>,
     auto_popup_cooldown_secs: Option<u64>,
-    snooze_intervals_secs: Option<Vec<u64>>,
-    awaiting_freshness_secs: Option<u64>,
 }
 
 /// The top-level fragment we deserialize: just the `ui:` key. Other keys
@@ -93,27 +89,61 @@ pub fn load() -> UiConfig {
         Err(_) => return UiConfig::default(),
     };
     let wire: Wire = serde_yml::from_str(&text).unwrap_or_default();
+    merge(wire)
+}
+
+/// If any legacy `auto_popup*` keys are present in the user's config,
+/// return a one-line warning to emit at startup. Returns None when the
+/// config is clean. Pure on the parsed wire so tests can drive it
+/// without filesystem.
+pub fn deprecation_warning() -> Option<String> {
+    let path = dirs::config_dir()?.join("tad").join("config.yaml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let wire: Wire = serde_yml::from_str(&text).ok()?;
+    deprecation_warning_for(&wire.ui)
+}
+
+fn deprecation_warning_for(ui: &UiWire) -> Option<String> {
+    let mut found = Vec::new();
+    if ui.auto_popup.is_some() {
+        found.push("auto_popup");
+    }
+    if ui.auto_popup_idle_secs.is_some() {
+        found.push("auto_popup_idle_secs");
+    }
+    if ui.auto_popup_width.is_some() {
+        found.push("auto_popup_width");
+    }
+    if ui.auto_popup_height.is_some() {
+        found.push("auto_popup_height");
+    }
+    if ui.auto_popup_cooldown_secs.is_some() {
+        found.push("auto_popup_cooldown_secs");
+    }
+    if found.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "ui.{} {} deprecated in v0.11 (popup removed; passive @tad-attn marker replaces it). \
+         Use `attention_idle_secs` instead of `auto_popup_idle_secs`; remove the rest.",
+        found.join(", ui."),
+        if found.len() == 1 { "is" } else { "are" }
+    ))
+}
+
+fn merge(wire: Wire) -> UiConfig {
     let defaults = UiConfig::default();
+    // attention_idle: prefer the new key, fall back to the legacy
+    // `auto_popup_idle_secs` if the new key is unset (so a user who
+    // hasn't migrated their config yet still gets their tuned value).
+    let attention_idle = wire
+        .ui
+        .attention_idle_secs
+        .or(wire.ui.auto_popup_idle_secs)
+        .map(Duration::from_secs)
+        .unwrap_or(defaults.attention_idle);
     UiConfig {
-        auto_popup: wire.ui.auto_popup.unwrap_or(defaults.auto_popup),
-        auto_popup_idle: wire
-            .ui
-            .auto_popup_idle_secs
-            .map(Duration::from_secs)
-            .unwrap_or(defaults.auto_popup_idle),
-        auto_popup_width: wire
-            .ui
-            .auto_popup_width
-            .unwrap_or(defaults.auto_popup_width),
-        auto_popup_height: wire
-            .ui
-            .auto_popup_height
-            .unwrap_or(defaults.auto_popup_height),
-        auto_popup_cooldown: wire
-            .ui
-            .auto_popup_cooldown_secs
-            .map(Duration::from_secs)
-            .unwrap_or(defaults.auto_popup_cooldown),
+        attention_idle,
         snooze_intervals: wire
             .ui
             .snooze_intervals_secs
@@ -132,53 +162,10 @@ pub fn load() -> UiConfig {
 mod tests {
     use super::*;
 
-    /// Map a Wire onto a UiConfig the same way load() does, sharing one
-    /// place to keep the field-by-field merge in sync between prod code
-    /// and tests.
-    fn merge(wire: Wire) -> UiConfig {
-        let defaults = UiConfig::default();
-        UiConfig {
-            auto_popup: wire.ui.auto_popup.unwrap_or(defaults.auto_popup),
-            auto_popup_idle: wire
-                .ui
-                .auto_popup_idle_secs
-                .map(Duration::from_secs)
-                .unwrap_or(defaults.auto_popup_idle),
-            auto_popup_width: wire
-                .ui
-                .auto_popup_width
-                .unwrap_or(defaults.auto_popup_width),
-            auto_popup_height: wire
-                .ui
-                .auto_popup_height
-                .unwrap_or(defaults.auto_popup_height),
-            auto_popup_cooldown: wire
-                .ui
-                .auto_popup_cooldown_secs
-                .map(Duration::from_secs)
-                .unwrap_or(defaults.auto_popup_cooldown),
-            snooze_intervals: wire
-                .ui
-                .snooze_intervals_secs
-                .map(|v| v.into_iter().map(Duration::from_secs).collect())
-                .filter(|v: &Vec<Duration>| !v.is_empty())
-                .unwrap_or(defaults.snooze_intervals),
-            awaiting_freshness: wire
-                .ui
-                .awaiting_freshness_secs
-                .map(Duration::from_secs)
-                .unwrap_or(defaults.awaiting_freshness),
-        }
-    }
-
     #[test]
     fn defaults_are_sensible() {
         let d = UiConfig::default();
-        assert!(d.auto_popup);
-        assert_eq!(d.auto_popup_idle, Duration::from_secs(30));
-        assert_eq!(d.auto_popup_width, "80%");
-        assert_eq!(d.auto_popup_height, "80%");
-        assert_eq!(d.auto_popup_cooldown, Duration::from_secs(300));
+        assert_eq!(d.attention_idle, Duration::from_secs(30));
         assert_eq!(
             d.snooze_intervals,
             vec![
@@ -187,30 +174,25 @@ mod tests {
                 Duration::from_secs(7200),
             ]
         );
+        assert_eq!(d.awaiting_freshness, Duration::from_secs(600));
     }
 
     #[test]
-    fn parses_full_ui_section() {
+    fn parses_new_ui_section() {
         let yaml = "\
 theme: dracula
 ui:
-  auto_popup: false
-  auto_popup_idle_secs: 10
-  auto_popup_width: 60%
-  auto_popup_height: 70%
-  auto_popup_cooldown_secs: 120
+  attention_idle_secs: 10
   snooze_intervals_secs: [60, 600, 3600]
+  awaiting_freshness_secs: 120
 groups:
   foo:
     hosts: [a]
 ";
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
         let cfg = merge(wire);
-        assert!(!cfg.auto_popup);
-        assert_eq!(cfg.auto_popup_idle, Duration::from_secs(10));
-        assert_eq!(cfg.auto_popup_width, "60%");
-        assert_eq!(cfg.auto_popup_height, "70%");
-        assert_eq!(cfg.auto_popup_cooldown, Duration::from_secs(120));
+        assert_eq!(cfg.attention_idle, Duration::from_secs(10));
+        assert_eq!(cfg.awaiting_freshness, Duration::from_secs(120));
         assert_eq!(
             cfg.snooze_intervals,
             vec![
@@ -222,10 +204,25 @@ groups:
     }
 
     #[test]
+    fn legacy_auto_popup_idle_secs_is_honored_for_attention_idle() {
+        // A pre-v0.11 config that only tuned auto_popup_idle_secs
+        // should still take effect under the new field name.
+        let yaml = "ui:\n  auto_popup_idle_secs: 90\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
+        assert_eq!(cfg.attention_idle, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn new_key_wins_when_both_legacy_and_new_present() {
+        let yaml = "ui:\n  attention_idle_secs: 5\n  auto_popup_idle_secs: 90\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
+        assert_eq!(cfg.attention_idle, Duration::from_secs(5));
+    }
+
+    #[test]
     fn empty_snooze_list_falls_back_to_defaults() {
-        // A user who writes `snooze_intervals_secs: []` shouldn't end up
-        // with an empty list (no snooze options in the picker == broken
-        // UX); fall back to the default set.
         let yaml = "ui:\n  snooze_intervals_secs: []\n";
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
         let cfg = merge(wire);
@@ -236,16 +233,31 @@ groups:
     fn missing_ui_section_yields_defaults() {
         let yaml = "theme: dracula\ngroups: {}\n";
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
-        assert!(wire.ui.auto_popup.is_none());
+        assert!(wire.ui.attention_idle_secs.is_none());
         assert!(wire.ui.auto_popup_idle_secs.is_none());
     }
 
     #[test]
     fn unknown_ui_keys_are_ignored() {
-        // Future-proofing: a config that includes a key tad doesn't know
-        // about yet must not fail to parse.
-        let yaml = "ui:\n  auto_popup: false\n  some_future_key: 42\n";
+        // Future-proofing: an unknown key shouldn't break parsing.
+        let yaml = "ui:\n  attention_idle_secs: 7\n  some_future_key: 42\n";
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
-        assert_eq!(wire.ui.auto_popup, Some(false));
+        assert_eq!(wire.ui.attention_idle_secs, Some(7));
+    }
+
+    #[test]
+    fn legacy_keys_emit_deprecation_warning() {
+        let yaml = "ui:\n  auto_popup: false\n  auto_popup_width: 50%\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let warning = deprecation_warning_for(&wire.ui).expect("should warn");
+        assert!(warning.contains("auto_popup"));
+        assert!(warning.contains("auto_popup_width"));
+    }
+
+    #[test]
+    fn clean_config_has_no_warning() {
+        let yaml = "ui:\n  attention_idle_secs: 30\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        assert!(deprecation_warning_for(&wire.ui).is_none());
     }
 }

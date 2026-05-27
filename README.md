@@ -337,49 +337,53 @@ Detection is process-tree based (walks `/proc/<pane_pid>/task/*/children`
 looking for a `claude` comm), so it catches any agent regardless of how
 it was started.
 
-### `tad watch`: auto-pop the dashboard when an agent needs you
+### `tad watch`: passive `@tad-attn` attention marker
 
-The status segment is for *checking*. `tad watch` is for *being summoned*.
-It's a long-running poller that watches every claude pane for the
-Active→Idle transition (transcript stopped being written for
-`ui.auto_popup_idle_secs`) and, when one happens, runs `tmux display-popup`
-with the dashboard preselected on the agent that just went idle. Quit
-the popup and you're back where you were.
+The status segment is for *checking* at a glance. `tad watch` is for
+*surfacing* attention without grabbing your screen. It's a long-running
+poller that watches every claude pane and, when one needs your input,
+sets the per-window tmux user-variable `@tad-attn=1` on that window.
+When you respond (or visit the pane), it unsets it. No popups, no
+modal interruptions — just a quiet bit you can render however you like.
 
-Start it once per user session — any of these work:
+`tad install` writes a window-status block that appends a `!` to the
+window name when `@tad-attn` is set, so your tmux window list looks
+like:
 
-```sh
-# In ~/.zshrc / ~/.bashrc:
-pgrep -x tad >/dev/null || tad watch &
-
-# In ~/.tmux.conf (or .tmux.local.conf):
-set-hook -g session-created 'run-shell "pgrep -x tad >/dev/null || tad watch &"'
-
-# As a systemd-user service: ~/.config/systemd/user/tad-watch.service
-#   [Service] ExecStart=/usr/bin/tad watch
-#   [Install] WantedBy=default.target
-# then: systemctl --user enable --now tad-watch
+```
+[1] main   [2] salt !   [3] cops
 ```
 
-A pidfile (`$XDG_STATE_HOME/tad/watch.pid`) guards against double-running
-— a second `tad watch` exits immediately. Per-agent cooldown
-(`ui.auto_popup_cooldown_secs`, default 300s) keeps the same idle agent
-from re-popping every tick; agent activity resets the cooldown.
+…and the `!` disappears the moment you visit `salt` or the agent
+starts working again. Heavy theme users can opt out with
+`tad install --no-window-marker` and consume `@tad-attn` directly:
 
-Tune (or disable) via `~/.config/tad/config.yaml`:
+```tmux
+set -g status-right '#(tad status) #{?@tad-attn,⚠ ,}%H:%M'
+```
+
+Start it once per user session — `tad install` writes a tmux
+session-created hook that does this for you:
+
+```tmux
+set-hook -g session-created 'run-shell -b "pgrep -x tad >/dev/null || tad watch &"'
+```
+
+A pidfile (`$XDG_STATE_HOME/tad/watch.pid`) guards against
+double-running. Snoozes from the dashboard `s` modal suppress the
+marker for the snoozed agent until the deadline.
+
+Tune via `~/.config/tad/config.yaml`:
 
 ```yaml
 ui:
-  auto_popup: true                # set false to fully silence the watcher
-  auto_popup_idle_secs: 30        # Active→Idle threshold
-  auto_popup_cooldown_secs: 300   # per-agent re-pop suppression
-  auto_popup_width: 80%
-  auto_popup_height: 80%
+  attention_idle_secs: 30         # mtime-fallback threshold
+  awaiting_freshness_secs: 600    # "user walked away" cutoff for status count
 ```
 
-The popup runs `tad --select-agent <target>` — that's also a useful
-direct invocation if you want a hotkey to jump straight to a particular
-agent in the Agents view.
+Pre-v0.11 configs with `ui.auto_popup*` keys still parse; the watcher
+prints a one-line deprecation notice on startup. `tad doctor` flags
+them too.
 
 ## Groups config
 

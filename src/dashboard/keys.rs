@@ -167,10 +167,10 @@ pub(super) fn handle_snooze_key(app: &mut App, key: KeyEvent) {
             {
                 let _ = snooze::snooze(&target, dur);
                 app.input_mode = InputMode::None;
-                // If we got here from --select-agent (the auto-popup),
-                // close the dashboard — the user's done responding to
-                // the popup and wants to go back to whatever they were
-                // doing. Otherwise just dismiss the modal and stay.
+                // If we got here from --select-agent, close the
+                // dashboard so the caller's "look at this one agent"
+                // flow returns to wherever it came from. Otherwise
+                // just dismiss the modal and stay.
                 if app.from_popup {
                     app.should_quit = true;
                 }
