@@ -54,6 +54,10 @@ fn classify(agent: &Agent, mtime_idle_threshold: Duration) -> Status {
     match agent.attention {
         Attention::AwaitingInput => Status::Attention,
         Attention::Working => Status::Busy,
+        // The user has been recognized as away from this session — quiet
+        // the marker until something changes (claude resumes, or the
+        // user replies and a new exchange begins).
+        Attention::Away => Status::Busy,
         Attention::Unknown => match agent.activity_status(mtime_idle_threshold) {
             ActivityStatus::Active(_) => Status::Busy,
             // The mtime fallback for "agent stopped writing" — without
