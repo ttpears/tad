@@ -69,7 +69,7 @@ pub fn run() -> Result<i32> {
     check_config_yaml(&mut r);
     check_marker_blocks(&mut r);
     check_watch_pidfile(&mut r);
-    check_auto_popup_consistency(&mut r);
+    check_legacy_ui_keys(&mut r);
     check_legacy_groups_yaml(&mut r);
     check_snooze_count(&mut r);
 
@@ -221,6 +221,11 @@ fn check_marker_blocks(r: &mut Report) {
             "# >>> tad watch startup >>>",
             "# <<< tad watch startup <<<",
         ),
+        (
+            "attention marker block in tmux conf",
+            "# >>> tad attention marker >>>",
+            "# <<< tad attention marker <<<",
+        ),
     ];
     for (label, begin, end) in cases {
         let has_begin = text.contains(begin);
@@ -307,39 +312,20 @@ fn check_watch_pidfile(r: &mut Report) {
     }
 }
 
-fn check_auto_popup_consistency(r: &mut Report) {
-    let ui = ui_config::load();
-    let path = tmux_conf::resolve_path(None);
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let hook_installed = text.contains("# >>> tad watch startup >>>");
-    if hook_installed && !ui.auto_popup {
-        r.add(
-            "ui.auto_popup vs watch hook",
+fn check_legacy_ui_keys(r: &mut Report) {
+    match ui_config::deprecation_warning() {
+        Some(msg) => r.add(
+            "legacy ui.auto_popup* keys",
             Verdict::Warn {
-                msg: "the watch hook is installed but `ui.auto_popup: false` in \
-                      config.yaml silences every popup — the watcher will run \
-                      and do nothing"
-                    .into(),
+                msg,
                 fix: Some(
-                    "either remove the hook (`tad install --uninstall`) or set \
-                     `ui.auto_popup: true` (it's the default)"
+                    "edit ~/.config/tad/config.yaml: rename auto_popup_idle_secs \
+                     to attention_idle_secs and delete the rest"
                         .into(),
                 ),
             },
-        );
-    } else {
-        r.add(
-            "ui.auto_popup vs watch hook",
-            Verdict::Pass(format!(
-                "auto_popup={}, hook {}",
-                ui.auto_popup,
-                if hook_installed {
-                    "installed"
-                } else {
-                    "absent"
-                }
-            )),
-        );
+        ),
+        None => r.add("legacy ui.auto_popup* keys", Verdict::Pass("none".into())),
     }
 }
 
