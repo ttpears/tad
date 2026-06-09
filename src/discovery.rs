@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::wizard::SourceSet;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFlags {
@@ -29,13 +29,98 @@ pub struct SessionCandidate {
     pub usable: bool,
 }
 
-pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
+/// Tunables for discovery. All fields default so a config file with no
+/// `discovery:` section behaves identically to all-on with threshold 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryConfig {
+    /// History-only hosts seen fewer than this many times are hidden
+    /// (unless they also appear in ssh-config / known_hosts).
+    pub min_history_uses: usize,
+    pub shell_history: bool,
+    pub ssh_config: bool,
+    pub known_hosts: bool,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self { min_history_uses: 2, shell_history: true, ssh_config: true, known_hosts: true }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct DiscoveryWire {
+    min_history_uses: Option<usize>,
+    shell_history: Option<bool>,
+    ssh_config: Option<bool>,
+    known_hosts: Option<bool>,
+}
+
+/// Top-level fragment: just the `discovery:` key. Other keys in the same
+/// file (theme, ui, groups, _meta) are ignored.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct Wire {
+    discovery: DiscoveryWire,
+}
+
+impl DiscoveryConfig {
+    pub fn load() -> Self {
+        let path = match dirs::config_dir() {
+            Some(p) => p.join("tad").join("config.yaml"),
+            None => return Self::default(),
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Self::default(),
+        };
+        let wire: Wire = serde_yml::from_str(&text).unwrap_or_default();
+        Self::from_wire(wire.discovery)
+    }
+
+    fn from_wire(w: DiscoveryWire) -> Self {
+        let d = Self::default();
+        Self {
+            min_history_uses: w.min_history_uses.unwrap_or(d.min_history_uses),
+            shell_history: w.shell_history.unwrap_or(d.shell_history),
+            ssh_config: w.ssh_config.unwrap_or(d.ssh_config),
+            known_hosts: w.known_hosts.unwrap_or(d.known_hosts),
+        }
+    }
+}
+
+fn is_high_signal(h: &HostCandidate) -> bool {
+    h.sources.ssh_config || h.sources.known_hosts
+}
+
+/// Drop low-signal noise, then order by signal: config/known first, then
+/// shell hosts by frequency (desc), then case-insensitive name.
+pub fn rank_and_filter(mut hosts: Vec<HostCandidate>, cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+    hosts.retain(|h| is_high_signal(h) || h.count >= cfg.min_history_uses);
+    hosts.sort_by(|a, b| {
+        (is_high_signal(b) as u8)
+            .cmp(&(is_high_signal(a) as u8))
+            .then(b.count.cmp(&a.count))
+            .then(a.host.to_lowercase().cmp(&b.host.to_lowercase()))
+    });
+    hosts
+}
+
+/// The one entry point for live discovery: scan enabled sources, rank,
+/// filter. Scan errors are swallowed here (callers that want them use
+/// `scan_hosts` directly).
+pub fn discover(cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+    let (hosts, _errors) = scan_hosts(cfg);
+    rank_and_filter(hosts, cfg)
+}
+
+pub fn scan_hosts(cfg: &DiscoveryConfig) -> (Vec<HostCandidate>, Vec<String>) {
     let mut shell = Vec::new();
     let mut ssh_cfg = Vec::new();
     let mut khosts = Vec::new();
     let mut errors = Vec::new();
 
-    if sources.shell {
+    if cfg.shell_history {
         let paths = shell_history_paths();
         let mut any_ok = false;
         for (label, path) in &paths {
@@ -53,7 +138,7 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
         }
     }
 
-    if sources.ssh_config {
+    if cfg.ssh_config {
         if let Some(home) = dirs::home_dir() {
             let path = home.join(".ssh").join("config");
             match std::fs::read_to_string(&path) {
@@ -77,7 +162,7 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
         }
     }
 
-    if sources.known_hosts {
+    if cfg.known_hosts {
         if let Some(home) = dirs::home_dir() {
             let path = home.join(".ssh").join("known_hosts");
             match std::fs::read_to_string(&path) {
@@ -458,11 +543,71 @@ mod tests {
 
     #[test]
     fn scan_hosts_reports_missing_files_as_errors_not_panics() {
-        let (candidates, errors) = scan_hosts(SourceSet::ALL);
+        let (candidates, errors) = scan_hosts(&DiscoveryConfig::default());
         for e in &errors {
             assert!(!e.is_empty());
         }
         let _ = candidates;
+    }
+
+    #[test]
+    fn rank_orders_config_and_known_before_history() {
+        let hosts = vec![
+            HostCandidate { host: "hist".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 9 },
+            HostCandidate { host: "cfg".into(), sources: SourceFlags { ssh_config: true, ..Default::default() }, count: 0 },
+        ];
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        assert_eq!(out[0].host, "cfg");
+        assert_eq!(out[1].host, "hist");
+    }
+
+    #[test]
+    fn rank_orders_history_by_count_desc() {
+        let hosts = vec![
+            HostCandidate { host: "low".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 2 },
+            HostCandidate { host: "high".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 7 },
+        ];
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        assert_eq!(out[0].host, "high");
+        assert_eq!(out[1].host, "low");
+    }
+
+    #[test]
+    fn filter_drops_history_only_below_threshold_but_keeps_config_hosts() {
+        let hosts = vec![
+            HostCandidate { host: "oneoff".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 1 },
+            HostCandidate { host: "kept".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 2 },
+            HostCandidate { host: "incfg".into(), sources: SourceFlags { shell: true, ssh_config: true, ..Default::default() }, count: 1 },
+        ];
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        let names: Vec<_> = out.iter().map(|h| h.host.as_str()).collect();
+        assert!(!names.contains(&"oneoff"));
+        assert!(names.contains(&"kept"));
+        assert!(names.contains(&"incfg"));
+    }
+
+    #[test]
+    fn discovery_config_defaults() {
+        let d = DiscoveryConfig::default();
+        assert_eq!(d.min_history_uses, 2);
+        assert!(d.shell_history && d.ssh_config && d.known_hosts);
+    }
+
+    #[test]
+    fn discovery_config_from_wire_overrides_and_defaults() {
+        let yaml = "discovery:\n  min_history_uses: 5\n  shell_history: false\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = DiscoveryConfig::from_wire(wire.discovery);
+        assert_eq!(cfg.min_history_uses, 5);
+        assert!(!cfg.shell_history);
+        assert!(cfg.ssh_config);
+    }
+
+    #[test]
+    fn discovery_config_missing_section_is_default() {
+        let yaml = "theme: dracula\ngroups: {}\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(DiscoveryConfig::from_wire(wire.discovery), DiscoveryConfig::default());
     }
 
     #[test]

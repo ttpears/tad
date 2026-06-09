@@ -437,7 +437,7 @@ fn handle_welcome(state: &mut WizardState, key: crossterm::event::KeyEvent, curs
                 if (state.sources.shell || state.sources.ssh_config || state.sources.known_hosts)
                     && state.host_candidates.is_empty()
                 {
-                    let (cands, errs) = discovery::scan_hosts(state.sources);
+                    let (cands, errs) = discovery::scan_hosts(&crate::discovery::DiscoveryConfig::default());
                     state.host_candidates = cands;
                     state.scan_errors = errs;
                 }
