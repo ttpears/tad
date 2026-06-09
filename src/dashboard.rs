@@ -581,16 +581,10 @@ pub struct RunOpts {
 }
 
 pub fn run_with(opts: RunOpts) -> Result<i32> {
-    // First-launch wizard: offer it when the user has no groups defined yet
-    // (file missing, file empty, or `groups:` key absent). The wizard owns
-    // its own terminal; on return, fall through to the dashboard.
-    let needs_wizard = match crate::config::load() {
-        Ok(doc) => doc.groups.is_empty(),
-        Err(_) => true,
-    };
-    if needs_wizard {
-        let _ = crate::wizard::run_first_launch();
-    }
+    // The setup wizard is opt-in: most users just want the dashboard, which
+    // works fine with no groups (sessions and agents still show). Users who
+    // want to define groups can run `tad config` — the empty Groups view
+    // points them there.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;

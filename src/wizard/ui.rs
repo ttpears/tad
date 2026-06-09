@@ -12,12 +12,6 @@ use crate::wizard::SourceSet;
 
 pub const LAYOUTS: &[&str] = &["panes", "synced-panes", "windows", "browse"];
 
-#[derive(Debug, Clone, Copy)]
-pub enum Entry {
-    FirstLaunch,
-    Config,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     EditMode,
@@ -322,7 +316,7 @@ impl Drop for TermGuard {
     }
 }
 
-pub fn run(entry: Entry) -> Result<()> {
+pub fn run() -> Result<()> {
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let _guard = TermGuard;
@@ -333,14 +327,11 @@ pub fn run(entry: Entry) -> Result<()> {
     // "Config exists" for wizard purposes means "user already has groups
     // configured" — not just "config.yaml file is present" (a file with
     // only a theme set still counts as a first launch from the groups
-    // perspective).
+    // perspective). With groups → Edit mode; without → the setup flow.
     let config_exists = config::load()
         .map(|d| !d.groups.is_empty())
         .unwrap_or(false);
-    let mut state = match entry {
-        Entry::FirstLaunch => WizardState::for_first_launch(),
-        Entry::Config => WizardState::for_config(config_exists),
-    };
+    let mut state = WizardState::for_config(config_exists);
 
     let mut cursors = Cursors::default();
     let mut filter_mode = false;

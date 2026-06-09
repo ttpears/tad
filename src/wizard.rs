@@ -39,16 +39,10 @@ impl SourceSet {
     }
 }
 
-/// First-launch entry: bare `tad` with no groups.yaml.
-/// Pre-checks all sources, runs the wizard, returns Ok regardless of whether
-/// the user wrote anything — caller falls through to the dashboard either way.
-pub fn run_first_launch() -> Result<()> {
-    ui::run(ui::Entry::FirstLaunch)
-}
-
-/// `tad config` entry: re-runnable. If config exists, opens Edit mode;
-/// otherwise behaves like first launch.
+/// `tad config` entry: the wizard is opt-in. If groups already exist it opens
+/// Edit mode; otherwise it starts at the import/setup flow. The dashboard no
+/// longer launches this automatically — bare `tad` goes straight to the TUI.
 pub fn run_config() -> Result<i32> {
-    ui::run(ui::Entry::Config)?;
+    ui::run()?;
     Ok(0)
 }
