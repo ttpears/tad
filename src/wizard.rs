@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 
-pub mod discovery;
 pub mod ui;
 
 /// Bit-mask of which import sources to scan.

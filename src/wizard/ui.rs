@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 
 use crate::config;
-use crate::wizard::discovery::{HostCandidate, SessionCandidate};
+use crate::discovery::{HostCandidate, SessionCandidate};
 use crate::wizard::SourceSet;
 
 pub const LAYOUTS: &[&str] = &["panes", "synced-panes", "windows", "browse"];
@@ -227,7 +227,7 @@ use ratatui::{
 };
 use std::time::Duration;
 
-use crate::wizard::discovery;
+use crate::discovery;
 
 /// View-layer cursor positions per screen. Kept outside `WizardState` since
 /// these are purely UI concerns the state machine doesn't care about.
@@ -1288,8 +1288,8 @@ mod tests {
         assert!(doc.groups.contains_key("g-2"));
     }
 
-    use crate::wizard::discovery::HostCandidate;
-    use crate::wizard::discovery::SourceFlags;
+    use crate::discovery::HostCandidate;
+    use crate::discovery::SourceFlags;
 
     #[test]
     fn end_to_end_assemble_from_session_and_handbuilt() {
