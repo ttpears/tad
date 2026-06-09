@@ -132,13 +132,15 @@ fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -Uz compinit && compinit
 ```
 
-## First-launch wizard / `tad config`
+## Setup wizard / `tad config`
 
-The first time you run bare `tad` with no groups configured,
-a TUI wizard offers to import SSH hosts from sources you already have
-on disk and shape them into groups. You can also launch it any time
-with `tad config` — when a config already exists, that opens an edit
-view with the option to re-run imports.
+The setup wizard is **opt-in**. Bare `tad` goes straight to the
+dashboard, which works fine with no groups (your tmux sessions and
+Claude agents still show). When you want to define groups, run
+`tad config`: it imports SSH hosts from sources you already have on
+disk and shapes them into groups. When a config already exists, it
+opens an edit view with the option to re-run imports. The empty Groups
+view in the dashboard points you to `tad config` as a reminder.
 
 All scanning is **local**: the wizard reads files on this machine. It
 does not contact hosts, perform DNS lookups, or call any resolver.
@@ -202,8 +204,8 @@ function tad() {
    ```
    The Rust binary ships its own bash + zsh completions; the old one
    would conflict.
-4. **Define your groups**. Either let the first-launch wizard /
-   `tad config` mine them from your shell history and `~/.ssh/config`,
+4. **Define your groups** (optional). Either run the `tad config`
+   wizard to mine them from your shell history and `~/.ssh/config`,
    or open `tad groups edit` and hand-edit, or run `tad groups add`
    for a single-group interactive prompt. The config lives at
    `~/.config/tad/config.yaml` under the `groups:` key. The old function knew nothing about
@@ -228,7 +230,7 @@ tad <name>                   attach or create a session; if <name> matches a
 tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
-tad config                   first-launch wizard / groups editor (TUI)
+tad config                   setup wizard / groups editor (TUI)
 
 tad groups [list]            list known groups (default subcommand)
 tad groups hosts <group>     list hosts in a group

@@ -135,13 +135,52 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         format!(" {} ({}) ", app.view.title(), count)
     };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(title);
+
+    // Empty view: instead of a blank box, show a muted hint. The Groups
+    // hint points at `tad config` — the wizard is opt-in, so this is the
+    // main breadcrumb to it for someone who hasn't set up any groups.
+    if list_items.is_empty() && app.input_mode != InputMode::Filter && app.filter.is_empty() {
+        let hint = match app.view {
+            View::Groups => vec![
+                Line::from(Span::styled(
+                    "No groups yet.",
+                    Style::default().fg(app.theme.fg),
+                )),
+                Line::from(Span::styled(
+                    "Run `tad config` to set up groups.",
+                    Style::default().fg(app.theme.muted),
+                )),
+            ],
+            View::Sessions => vec![Line::from(Span::styled(
+                "No tmux sessions. Press n to start one.",
+                Style::default().fg(app.theme.muted),
+            ))],
+            View::Agents => vec![Line::from(Span::styled(
+                "No Claude agents running.",
+                Style::default().fg(app.theme.muted),
+            ))],
+            View::Hosts => vec![Line::from(Span::styled(
+                "No hosts. Add groups with `tad config`.",
+                Style::default().fg(app.theme.muted),
+            ))],
+            View::Projects => vec![Line::from(Span::styled(
+                "No projects yet.",
+                Style::default().fg(app.theme.muted),
+            ))],
+        };
+        f.render_widget(
+            Paragraph::new(hint).block(block).wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
     let list = List::new(list_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.border))
-                .title(title),
-        )
+        .block(block)
         .highlight_style(
             Style::default()
                 .bg(app.theme.selection_bg)
