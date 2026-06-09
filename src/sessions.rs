@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
 
-use crate::{config, groups, tmux};
+use crate::tmux;
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -57,17 +57,7 @@ pub fn list() -> Result<Vec<Session>> {
 pub fn print_host_completions() -> Result<()> {
     let hosts = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
     for h in &hosts {
-        let mut tags: Vec<String> = Vec::new();
-        if h.sources.ssh_config {
-            tags.push("ssh-config".into());
-        }
-        if h.sources.known_hosts {
-            tags.push("known".into());
-        }
-        if h.sources.shell {
-            tags.push(format!("history \u{00d7}{}", h.count));
-        }
-        println!("{}\t{}", h.host, tags.join(", "));
+        println!("{}\t{}", h.host, crate::discovery::source_tag(h));
     }
     Ok(())
 }
@@ -105,14 +95,6 @@ pub fn print_completions() -> Result<()> {
 pub fn attach_or_create(name: &str) -> Result<i32> {
     if tmux::has_session(name) {
         return tmux::enter(name);
-    }
-    // No live session — if a group by this name is defined, offer to open it.
-    if let Ok(doc) = config::load() {
-        if doc.groups.contains_key(name) {
-            if let Some(true) = confirm_tty(&format!("Open group '{}'?", name), true) {
-                return groups::open(name, None);
-            }
-        }
     }
     if !confirm(&format!("Create new tmux session named {}?", name)) {
         return Ok(1);

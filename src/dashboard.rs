@@ -272,19 +272,6 @@ pub(super) fn build_host_rows(
     discovered: Vec<crate::discovery::HostCandidate>,
     group_members: std::collections::BTreeMap<String, Vec<String>>,
 ) -> Vec<HostRow> {
-    fn tag(h: &crate::discovery::HostCandidate) -> String {
-        let mut t = Vec::new();
-        if h.sources.ssh_config {
-            t.push("ssh-config".to_string());
-        }
-        if h.sources.known_hosts {
-            t.push("known".to_string());
-        }
-        if h.sources.shell {
-            t.push(format!("history \u{00d7}{}", h.count));
-        }
-        t.join(", ")
-    }
     let lc_members: std::collections::BTreeMap<String, Vec<String>> = group_members
         .iter()
         .map(|(k, v)| (k.to_lowercase(), v.clone()))
@@ -301,7 +288,7 @@ pub(super) fn build_host_rows(
         rows.push(HostRow {
             name: h.host.clone(),
             groups,
-            source: tag(h),
+            source: crate::discovery::source_tag(h),
         });
     }
     for (host, groups) in &group_members {
@@ -640,10 +627,9 @@ pub struct RunOpts {
 }
 
 pub fn run_with(opts: RunOpts) -> Result<i32> {
-    // The setup wizard is opt-in: most users just want the dashboard, which
-    // works fine with no groups (sessions and agents still show). Users who
-    // want to define groups can run `tad config` — the empty Groups view
-    // points them there.
+    // The dashboard runs unconditionally. Sessions and agents show with no
+    // config needed; `tad config` opens the groups editor when the user
+    // wants to define groups.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;

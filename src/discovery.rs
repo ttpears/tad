@@ -87,6 +87,22 @@ impl DiscoveryConfig {
     }
 }
 
+/// Human-readable source tag for a discovered host, e.g.
+/// "ssh-config, known" or "history ×7". Empty if no sources set.
+pub fn source_tag(h: &HostCandidate) -> String {
+    let mut t = Vec::new();
+    if h.sources.ssh_config {
+        t.push("ssh-config".to_string());
+    }
+    if h.sources.known_hosts {
+        t.push("known".to_string());
+    }
+    if h.sources.shell {
+        t.push(format!("history \u{00d7}{}", h.count));
+    }
+    t.join(", ")
+}
+
 fn is_high_signal(h: &HostCandidate) -> bool {
     h.sources.ssh_config || h.sources.known_hosts
 }
@@ -368,6 +384,35 @@ pub(crate) fn aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_tag_formats_all_combinations() {
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags {
+                ssh_config: true,
+                known_hosts: true,
+                shell: false,
+            },
+            count: 0,
+        };
+        assert_eq!(source_tag(&h), "ssh-config, known");
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags {
+                shell: true,
+                ..Default::default()
+            },
+            count: 7,
+        };
+        assert_eq!(source_tag(&h), "history \u{00d7}7");
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags::default(),
+            count: 0,
+        };
+        assert_eq!(source_tag(&h), "");
+    }
 
     #[test]
     fn bash_history_extracts_hosts_strips_users_and_flags() {

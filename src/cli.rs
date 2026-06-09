@@ -48,8 +48,8 @@ pub enum Cmd {
         sub: Option<GroupsCmd>,
     },
 
-    /// Open the wizard / editor. First launch when no config exists,
-    /// otherwise opens edit mode with re-run-imports access.
+    /// Open the groups editor (TUI): add/edit/delete groups, picking
+    /// members from discovered hosts. Theme picker included.
     Config,
 
     /// One-line tmux status-line segment summarising running Claude Code
