@@ -294,6 +294,14 @@ pub(super) fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Lin
             Style::default().fg(theme.fg),
         )));
     }
+    if let Some(src) = data.hosts.iter().find(|r| r.name == name).map(|r| r.source.clone()) {
+        if !src.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("source: {}", src),
+                Style::default().fg(theme.muted),
+            )));
+        }
+    }
     lines
 }
 

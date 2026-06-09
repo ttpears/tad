@@ -279,12 +279,16 @@ pub(super) fn build_host_rows(
         if h.sources.shell { t.push(format!("history \u{00d7}{}", h.count)); }
         t.join(", ")
     }
+    let lc_members: std::collections::BTreeMap<String, Vec<String>> = group_members
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
     let mut rows: Vec<HostRow> = Vec::new();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
     for h in &discovered {
         let key = h.host.to_lowercase();
         seen.insert(key.clone());
-        let groups = group_members.get(&h.host).cloned().unwrap_or_default();
+        let groups = lc_members.get(&h.host.to_lowercase()).cloned().unwrap_or_default();
         rows.push(HostRow { name: h.host.clone(), groups, source: tag(h) });
     }
     for (host, groups) in &group_members {
@@ -747,6 +751,21 @@ mod tests {
             snoozes: crate::snooze::SnoozeState::default(),
             ui: crate::ui_config::UiConfig::default(),
         }
+    }
+
+    #[test]
+    fn build_host_rows_matches_group_membership_case_insensitively() {
+        use crate::discovery::{HostCandidate, SourceFlags};
+        let discovered = vec![
+            HostCandidate { host: "web1".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 5 },
+        ];
+        let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        group_members.insert("Web1".into(), vec!["prod".into()]); // different casing than discovered
+        let rows = build_host_rows(discovered, group_members);
+        // exactly one row for web1 (deduped), and it carries the group
+        let web1: Vec<_> = rows.iter().filter(|r| r.name.eq_ignore_ascii_case("web1")).collect();
+        assert_eq!(web1.len(), 1);
+        assert_eq!(web1[0].groups, vec!["prod".to_string()]);
     }
 
     #[test]
