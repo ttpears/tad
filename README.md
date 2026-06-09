@@ -14,11 +14,12 @@
 
 A tmux session and group manager. Bare `tad` opens a native TUI dashboard
 that cycles between live sessions, named groups, and the hosts inside those
-groups, with live updates every ~1.5s. `tad <name>` attaches or creates a
-session — and if no session exists yet but a group by that name does, it
-offers to open the whole group instead. `tad -g <group>` opens a multi-host
-session whose layout you control per group; for multi-pane layouts you're
-prompted whether to enable tmux `synchronize-panes` (default: yes).
+groups, with live updates every ~1.5s. `tad <name>` resolves in order:
+attach to an existing tmux session by that name → SSH into it as a discovered
+host (in a new session) → create a new blank session by that name.
+`tad -g <group>` opens a multi-host session whose layout you control per
+group; for multi-pane layouts you're prompted whether to enable tmux
+`synchronize-panes` (default: yes).
 
 ![tad dashboard demo](docs/screenshots/dashboard.gif)
 
@@ -132,39 +133,58 @@ fpath=(~/.local/share/zsh/site-functions $fpath)
 autoload -Uz compinit && compinit
 ```
 
-## Setup wizard / `tad config`
+Completion scripts live in `completions/`. `tad <TAB>` completes tmux
+**sessions** and **discovered hosts**. Group names complete after
+`tad -g <TAB>` — they are not offered at the bare top level.
 
-The setup wizard is **opt-in**. Bare `tad` goes straight to the
-dashboard, which works fine with no groups (your tmux sessions and
-Claude agents still show). When you want to define groups, run
-`tad config`: it imports SSH hosts from sources you already have on
-disk and shapes them into groups. When a config already exists, it
-opens an edit view with the option to re-run imports. The empty Groups
-view in the dashboard points you to `tad config` as a reminder.
+## Host discovery / `tad config`
 
-All scanning is **local**: the wizard reads files on this machine. It
-does not contact hosts, perform DNS lookups, or call any resolver.
+### Automatic live discovery
 
-Sources it can pull from (each toggleable):
+On every dashboard launch (and for CLI dispatch and shell completion),
+`tad` automatically scans **local sources only** for host names — no
+network, no DNS:
 
+- **`~/.ssh/config`** — concrete `Host` entries, including one-level-deep
+  `Include`. Wildcard patterns are skipped.
+- **`~/.ssh/known_hosts`** — non-hashed entries. `@cert-authority` and
+  `|1|...` hashed entries are skipped.
 - **Shell history** — `$HISTFILE`, `~/.bash_history`, `~/.zsh_history`,
   fish history. Extracts hosts from `ssh user@host -p 22` style
   invocations, strips `user@` and flag values, ignores `sshfs` /
   `ssh-add` / `ssh-keygen` / `ssh-copy-id`.
-- **`~/.ssh/config`** — concrete `Host` entries, including
-  one-level-deep `Include`. Wildcard patterns are skipped.
-- **`~/.ssh/known_hosts`** — non-hashed entries. `@cert-authority` and
-  `|1|...` hashed entries are skipped.
-- **Tmux sessions** — existing sessions become pre-formed group
-  candidates (window names → hosts, layout defaults to `windows`).
-  Sessions whose windows are all generic shell names are pre-marked
-  unusable, but you can still force-import them.
 
-Flow: pick sources → review/toggle imported tmux sessions → review/toggle
-discovered hosts (with `/` filter, `a` select-all, `n` clear) → build
-groups one at a time (name, layout, member hosts) → confirm and write.
-On a re-run via `tad config`, new groups are merged into the existing
-config; name collisions get `-2`, `-3`, ... suffixes.
+Results are **ranked**: ssh-config and known_hosts entries come first,
+then shell-history hosts by frequency. History-only hosts seen fewer than
+`min_history_uses` times (default: 2) are hidden unless they also appear
+in ssh-config or known_hosts. Discovered hosts appear live in the
+dashboard's Hosts view and in shell completion. Discovery is never written
+to config — it is always fresh.
+
+Tune via `~/.config/tad/config.yaml` (all keys optional):
+
+```yaml
+discovery:
+  min_history_uses: 2      # history-only hosts below this are hidden
+  shell_history: true      # toggle sources independently
+  ssh_config: true
+  known_hosts: true
+```
+
+### `tad config` — groups editor
+
+`tad config` opens a slim TUI groups editor. On an empty config it goes
+straight to add-a-group; otherwise it lists your existing groups. From
+there you can:
+
+- **Add a group** — enter a name, pick a layout, then select member hosts
+  from the live discovered host list (with `/` filter) or type them in.
+- **Delete a group.**
+- **Pick a theme.**
+
+Groups are **optional** — an organizing convenience on top of the
+automatic host discovery. Open a group with `tad -g <group>`. The empty
+Groups view in the dashboard points you to `tad config` as a reminder.
 
 ## Migrating from a shell-function `tad`
 
@@ -204,14 +224,17 @@ function tad() {
    ```
    The Rust binary ships its own bash + zsh completions; the old one
    would conflict.
-4. **Define your groups** (optional). Either run the `tad config`
-   wizard to mine them from your shell history and `~/.ssh/config`,
-   or open `tad groups edit` and hand-edit, or run `tad groups add`
-   for a single-group interactive prompt. The config lives at
-   `~/.config/tad/config.yaml` under the `groups:` key. The old function knew nothing about
-   groups; everything else is a strict superset of the old behavior so
-   existing muscle memory still works:
-   - `tad <name>` — attach or create (same as old)
+4. **Define your groups** (optional). Run `tad config` to open the
+   groups editor — it shows discovered hosts (from your ssh-config,
+   known_hosts, and shell history automatically) so you can pick
+   members without typing them manually. Or open `tad groups edit`
+   and hand-edit, or run `tad groups add` for a single-group
+   interactive prompt. The config lives at
+   `~/.config/tad/config.yaml` under the `groups:` key. The old
+   function knew nothing about groups; everything else is a strict
+   superset of the old behavior so existing muscle memory still works:
+   - `tad <name>` — attach existing session, or SSH into a discovered
+     host, or create a new session (replaces the old simple attach-or-create)
    - `tad` — opens the dashboard (was: list sessions)
    - new: `tad -g <group>`, `tad groups`, `tad config`, etc.
 5. **Optional: pick a theme**. Drop `theme: tokyonight` into
@@ -225,12 +248,13 @@ and asks tmux to attach/create. Nothing on disk changes for tmux.
 
 ```
 tad                          TUI dashboard (sessions / groups / hosts)
-tad <name>                   attach or create a session; if <name> matches a
-                             group and no session exists, offers to open it
+tad <name>                   attach existing session → SSH into discovered host
+                             (in a new session) → create a new session by that
+                             name; groups are NOT in bare dispatch (use -g)
 tad -g <group>               open the group per its layout
 tad -g <group> <host>        drill into one host from the group
 
-tad config                   setup wizard / groups editor (TUI)
+tad config                   groups editor (TUI)
 
 tad groups [list]            list known groups (default subcommand)
 tad groups hosts <group>     list hosts in a group
