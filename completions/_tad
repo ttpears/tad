@@ -7,13 +7,11 @@ _tad() {
       local -a subs
       subs=(
          'groups:manage groups (list, hosts, add, rm, edit)'
-         'config:first-launch wizard / groups editor (TUI)'
+         'config:groups editor (TUI)'
          'tmux-keybind:print/install a tmux popup binding for the dashboard'
          'status:one-line summary of running Claude Code agents (for tmux status-line)'
          'watch:long-running poller — auto-popup the dashboard on Active→Idle'
       )
-      # Sessions and group names are first-class top-level completions
-      # because `tad <session>` / `tad <group>` is the common bare invocation.
       local -a attached detached state rest
       while IFS=$'\t' read -r state rest; do
          case $state in
@@ -21,12 +19,12 @@ _tad() {
             detached) detached+=("$rest") ;;
          esac
       done < <(tad complete 2>/dev/null)
-      local -a groups
-      groups=("${(@f)$(tad groups list 2>/dev/null)}")
+      local -a hosts
+      hosts=("${(@f)$(tad complete-hosts 2>/dev/null)}")
       _describe -t commands 'command' subs
       _describe -t attached 'attached session' attached
       _describe -t detached 'detached session' detached
-      _describe -t groups 'group' groups
+      _describe -t hosts 'host' hosts
       _values 'option' '-g[open a group]'
       return
    fi
@@ -91,6 +89,7 @@ _tad_groups_sub() {
                [[ -n $g ]] || continue
                all_hosts+=("${(@f)$(tad groups hosts $g 2>/dev/null)}")
             done
+            all_hosts+=("${(@f)$(tad complete-hosts 2>/dev/null | cut -f1)}")
             _describe -t hosts 'known host' all_hosts
          fi
          ;;
@@ -103,7 +102,7 @@ _tad_groups() {
    _describe -t groups 'group' groups
 }
 
-zstyle ':completion:*:tad:*' group-order attached detached groups commands
+zstyle ':completion:*:tad:*' group-order attached detached hosts commands
 zstyle ':completion:*:tad:*' sort false
 
 _tad "$@"
