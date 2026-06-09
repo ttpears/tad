@@ -137,7 +137,8 @@ fn default_meta() -> serde_yml::Value {
     );
     m.insert(
         "discovery_1".into(),
-        "discovery.min_history_uses = N  (history-only hosts below N uses are hidden; default 2)".into(),
+        "discovery.min_history_uses = N  (history-only hosts below N uses are hidden; default 2)"
+            .into(),
     );
     m.insert(
         "discovery_2".into(),

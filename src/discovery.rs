@@ -36,7 +36,12 @@ pub struct DiscoveryConfig {
 
 impl Default for DiscoveryConfig {
     fn default() -> Self {
-        Self { min_history_uses: 2, shell_history: true, ssh_config: true, known_hosts: true }
+        Self {
+            min_history_uses: 2,
+            shell_history: true,
+            ssh_config: true,
+            known_hosts: true,
+        }
     }
 }
 
@@ -499,8 +504,22 @@ mod tests {
     #[test]
     fn rank_orders_config_and_known_before_history() {
         let hosts = vec![
-            HostCandidate { host: "hist".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 9 },
-            HostCandidate { host: "cfg".into(), sources: SourceFlags { ssh_config: true, ..Default::default() }, count: 0 },
+            HostCandidate {
+                host: "hist".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 9,
+            },
+            HostCandidate {
+                host: "cfg".into(),
+                sources: SourceFlags {
+                    ssh_config: true,
+                    ..Default::default()
+                },
+                count: 0,
+            },
         ];
         let out = rank_and_filter(hosts, &DiscoveryConfig::default());
         assert_eq!(out[0].host, "cfg");
@@ -510,8 +529,22 @@ mod tests {
     #[test]
     fn rank_orders_history_by_count_desc() {
         let hosts = vec![
-            HostCandidate { host: "low".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 2 },
-            HostCandidate { host: "high".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 7 },
+            HostCandidate {
+                host: "low".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 2,
+            },
+            HostCandidate {
+                host: "high".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 7,
+            },
         ];
         let out = rank_and_filter(hosts, &DiscoveryConfig::default());
         assert_eq!(out[0].host, "high");
@@ -521,9 +554,31 @@ mod tests {
     #[test]
     fn filter_drops_history_only_below_threshold_but_keeps_config_hosts() {
         let hosts = vec![
-            HostCandidate { host: "oneoff".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 1 },
-            HostCandidate { host: "kept".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 2 },
-            HostCandidate { host: "incfg".into(), sources: SourceFlags { shell: true, ssh_config: true, ..Default::default() }, count: 1 },
+            HostCandidate {
+                host: "oneoff".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 1,
+            },
+            HostCandidate {
+                host: "kept".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 2,
+            },
+            HostCandidate {
+                host: "incfg".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ssh_config: true,
+                    ..Default::default()
+                },
+                count: 1,
+            },
         ];
         let out = rank_and_filter(hosts, &DiscoveryConfig::default());
         let names: Vec<_> = out.iter().map(|h| h.host.as_str()).collect();
@@ -553,6 +608,9 @@ mod tests {
     fn discovery_config_missing_section_is_default() {
         let yaml = "theme: dracula\ngroups: {}\n";
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
-        assert_eq!(DiscoveryConfig::from_wire(wire.discovery), DiscoveryConfig::default());
+        assert_eq!(
+            DiscoveryConfig::from_wire(wire.discovery),
+            DiscoveryConfig::default()
+        );
     }
 }

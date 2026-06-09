@@ -274,9 +274,15 @@ pub(super) fn build_host_rows(
 ) -> Vec<HostRow> {
     fn tag(h: &crate::discovery::HostCandidate) -> String {
         let mut t = Vec::new();
-        if h.sources.ssh_config { t.push("ssh-config".to_string()); }
-        if h.sources.known_hosts { t.push("known".to_string()); }
-        if h.sources.shell { t.push(format!("history \u{00d7}{}", h.count)); }
+        if h.sources.ssh_config {
+            t.push("ssh-config".to_string());
+        }
+        if h.sources.known_hosts {
+            t.push("known".to_string());
+        }
+        if h.sources.shell {
+            t.push(format!("history \u{00d7}{}", h.count));
+        }
         t.join(", ")
     }
     let lc_members: std::collections::BTreeMap<String, Vec<String>> = group_members
@@ -288,14 +294,25 @@ pub(super) fn build_host_rows(
     for h in &discovered {
         let key = h.host.to_lowercase();
         seen.insert(key.clone());
-        let groups = lc_members.get(&h.host.to_lowercase()).cloned().unwrap_or_default();
-        rows.push(HostRow { name: h.host.clone(), groups, source: tag(h) });
+        let groups = lc_members
+            .get(&h.host.to_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        rows.push(HostRow {
+            name: h.host.clone(),
+            groups,
+            source: tag(h),
+        });
     }
     for (host, groups) in &group_members {
         if seen.contains(&host.to_lowercase()) {
             continue;
         }
-        rows.push(HostRow { name: host.clone(), groups: groups.clone(), source: String::new() });
+        rows.push(HostRow {
+            name: host.clone(),
+            groups: groups.clone(),
+            source: String::new(),
+        });
     }
     rows
 }
@@ -756,14 +773,22 @@ mod tests {
     #[test]
     fn build_host_rows_matches_group_membership_case_insensitively() {
         use crate::discovery::{HostCandidate, SourceFlags};
-        let discovered = vec![
-            HostCandidate { host: "web1".into(), sources: SourceFlags { shell: true, ..Default::default() }, count: 5 },
-        ];
+        let discovered = vec![HostCandidate {
+            host: "web1".into(),
+            sources: SourceFlags {
+                shell: true,
+                ..Default::default()
+            },
+            count: 5,
+        }];
         let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         group_members.insert("Web1".into(), vec!["prod".into()]); // different casing than discovered
         let rows = build_host_rows(discovered, group_members);
         // exactly one row for web1 (deduped), and it carries the group
-        let web1: Vec<_> = rows.iter().filter(|r| r.name.eq_ignore_ascii_case("web1")).collect();
+        let web1: Vec<_> = rows
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case("web1"))
+            .collect();
         assert_eq!(web1.len(), 1);
         assert_eq!(web1[0].groups, vec!["prod".to_string()]);
     }
@@ -771,9 +796,14 @@ mod tests {
     #[test]
     fn build_host_rows_unions_discovered_and_group_members() {
         use crate::discovery::{HostCandidate, SourceFlags};
-        let discovered = vec![
-            HostCandidate { host: "web1".into(), sources: SourceFlags { ssh_config: true, ..Default::default() }, count: 0 },
-        ];
+        let discovered = vec![HostCandidate {
+            host: "web1".into(),
+            sources: SourceFlags {
+                ssh_config: true,
+                ..Default::default()
+            },
+            count: 0,
+        }];
         let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         group_members.insert("db1".into(), vec!["prod".into()]); // only in a group, not discovered
         let rows = build_host_rows(discovered, group_members);

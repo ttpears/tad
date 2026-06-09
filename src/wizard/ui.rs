@@ -599,7 +599,10 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &WizardState, filter_mode: bool
         _ if filter_mode => "/filter… Enter to apply · Esc cancel".to_string(),
         Stage::EditMode => "enter add group · d delete · t theme · q quit".to_string(),
         Stage::ThemePicker => "↑↓ pick · enter apply · esc back".to_string(),
-        Stage::BuildGroups => "tab fields · ←/→ layout · space toggle member · / filter · enter save · esc cancel".to_string(),
+        Stage::BuildGroups => {
+            "tab fields · ←/→ layout · space toggle member · / filter · enter save · esc cancel"
+                .to_string()
+        }
         Stage::Done => state.status_flash.clone().unwrap_or_default(),
         Stage::Cancelled => "cancelled".to_string(),
     };
@@ -709,7 +712,11 @@ fn draw_body(
                 }
                 Line::from(spans)
             } else if state.filter.is_empty() {
-                Line::from(if form_field == 2 { "Members ●" } else { "Members" })
+                Line::from(if form_field == 2 {
+                    "Members ●"
+                } else {
+                    "Members"
+                })
             } else {
                 Line::from(format!("Members (filter: {})", state.filter))
             };
