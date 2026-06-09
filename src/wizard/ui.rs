@@ -122,7 +122,11 @@ impl WizardState {
                 }
             }
             Stage::Hosts => {
-                if self.selected_hosts.is_empty() {
+                if self.host_candidates.is_empty() {
+                    // Nothing was discovered to choose from — don't trap the
+                    // user; let them move on to build groups by hand or finish.
+                    Ok(())
+                } else if self.selected_hosts.is_empty() {
                     Err("select at least one host")
                 } else {
                     Ok(())
@@ -1201,8 +1205,22 @@ mod tests {
     #[test]
     fn host_screen_requires_selection() {
         let mut s = WizardState::for_first_launch();
+        s.host_candidates.push(HostCandidate {
+            host: "h1".into(),
+            sources: SourceFlags::default(),
+        });
         assert!(s.can_advance(Stage::Hosts).is_err());
         s.selected_hosts.insert("h1".to_string());
+        assert!(s.can_advance(Stage::Hosts).is_ok());
+    }
+
+    #[test]
+    fn host_screen_advances_when_nothing_discovered() {
+        // Scan found no hosts at all — selection is impossible, so the user
+        // must still be able to proceed past the Hosts stage.
+        let s = WizardState::for_first_launch();
+        assert!(s.host_candidates.is_empty());
+        assert!(s.selected_hosts.is_empty());
         assert!(s.can_advance(Stage::Hosts).is_ok());
     }
 
