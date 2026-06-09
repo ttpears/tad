@@ -242,7 +242,7 @@ pub(super) struct AppData {
     pub(super) sessions: Vec<Session>,
     pub(super) groups: Vec<(String, config::Group)>,
     /// host → list of groups it belongs to
-    pub(super) hosts: Vec<(String, Vec<String>)>,
+    pub(super) hosts: Vec<HostRow>,
     /// Claude Code agents discovered across tmux panes.
     pub(super) agents: Vec<Agent>,
     /// Project (typically git repo) frame around everything else.
@@ -257,6 +257,43 @@ pub(super) struct AppData {
     /// `snoozes` — format_agent_line previously read `config.yaml`
     /// once per row per render.
     pub(super) ui: crate::ui_config::UiConfig,
+}
+
+/// One row in the Hosts view: a host name, the groups it belongs to (if
+/// any), and a pre-rendered source tag from discovery.
+#[derive(Debug, Clone)]
+pub(super) struct HostRow {
+    pub(super) name: String,
+    pub(super) groups: Vec<String>,
+    pub(super) source: String,
+}
+
+pub(super) fn build_host_rows(
+    discovered: Vec<crate::discovery::HostCandidate>,
+    group_members: std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<HostRow> {
+    fn tag(h: &crate::discovery::HostCandidate) -> String {
+        let mut t = Vec::new();
+        if h.sources.ssh_config { t.push("ssh-config".to_string()); }
+        if h.sources.known_hosts { t.push("known".to_string()); }
+        if h.sources.shell { t.push(format!("history \u{00d7}{}", h.count)); }
+        t.join(", ")
+    }
+    let mut rows: Vec<HostRow> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    for h in &discovered {
+        let key = h.host.to_lowercase();
+        seen.insert(key.clone());
+        let groups = group_members.get(&h.host).cloned().unwrap_or_default();
+        rows.push(HostRow { name: h.host.clone(), groups, source: tag(h) });
+    }
+    for (host, groups) in &group_members {
+        if seen.contains(&host.to_lowercase()) {
+            continue;
+        }
+        rows.push(HostRow { name: host.clone(), groups: groups.clone(), source: String::new() });
+    }
+    rows
 }
 
 impl AppData {
@@ -280,7 +317,8 @@ impl AppData {
         for (_, gs) in hosts_map.iter_mut() {
             gs.sort();
         }
-        let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
+        let discovered = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
+        let hosts = build_host_rows(discovered, hosts_map);
         let agents = agents::scan();
         // Projects are a pure aggregation over the same sessions+agents
         // — pass the slices in so we don't re-run the tmux subprocess
@@ -439,7 +477,7 @@ impl App {
             View::Projects => Box::new(self.data.projects.iter().map(|p| p.name.clone())),
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
-            View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
+            View::Hosts => Box::new(self.data.hosts.iter().map(|r| r.name.clone())),
             View::Agents => Box::new(agent_items_grouped_by_project(&self.data).into_iter()),
         };
         if self.filter.is_empty() {
@@ -709,6 +747,22 @@ mod tests {
             snoozes: crate::snooze::SnoozeState::default(),
             ui: crate::ui_config::UiConfig::default(),
         }
+    }
+
+    #[test]
+    fn build_host_rows_unions_discovered_and_group_members() {
+        use crate::discovery::{HostCandidate, SourceFlags};
+        let discovered = vec![
+            HostCandidate { host: "web1".into(), sources: SourceFlags { ssh_config: true, ..Default::default() }, count: 0 },
+        ];
+        let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        group_members.insert("db1".into(), vec!["prod".into()]); // only in a group, not discovered
+        let rows = build_host_rows(discovered, group_members);
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"web1"));
+        assert!(names.contains(&"db1")); // group member still shows
+        let web1 = rows.iter().find(|r| r.name == "web1").unwrap();
+        assert!(web1.source.contains("ssh-config"));
     }
 
     #[test]
