@@ -230,7 +230,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         return groups::open(name, host.as_deref());
     }
     if let Some(name) = cli.session {
-        return sessions::attach_or_create(&name);
+        return sessions::resolve_and_open(&name);
     }
     // No subcommand → TUI dashboard. `--select-agent <target>` opens the
     // Agents view with that row preselected (used by `tad watch`).

@@ -197,7 +197,6 @@ pub(crate) fn confirm_tty(prompt: &str, default_yes: bool) -> Option<bool> {
 
 /// What a bare `tad <name>` should do, given whether a live session and a
 /// known host by that name exist. Pure so it is unit-testable.
-#[allow(dead_code)] // used by resolve_and_open in the next change
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Resolution {
     Session,
@@ -205,7 +204,6 @@ pub(crate) enum Resolution {
     NewSession,
 }
 
-#[allow(dead_code)] // used by resolve_and_open in the next change
 pub(crate) fn resolve(has_session: bool, is_host: bool) -> Resolution {
     if has_session {
         Resolution::Session
@@ -213,6 +211,24 @@ pub(crate) fn resolve(has_session: bool, is_host: bool) -> Resolution {
         Resolution::Host
     } else {
         Resolution::NewSession
+    }
+}
+
+/// Resolve a bare positional name to the right action and run it:
+/// existing session → attach; else a known/discovered host → ssh; else
+/// create a new session.
+pub fn resolve_and_open(name: &str) -> Result<i32> {
+    let has_session = crate::tmux::has_session(name);
+    let is_host = if has_session {
+        false // session wins; skip the discovery scan entirely
+    } else {
+        crate::discovery::discover(&crate::discovery::DiscoveryConfig::load())
+            .iter()
+            .any(|h| h.host.eq_ignore_ascii_case(name))
+    };
+    match resolve(has_session, is_host) {
+        Resolution::Session | Resolution::NewSession => attach_or_create(name),
+        Resolution::Host => attach_or_create_remote(name),
     }
 }
 
