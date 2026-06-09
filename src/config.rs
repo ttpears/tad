@@ -135,6 +135,15 @@ fn default_meta() -> serde_yml::Value {
         "schema_continued".into(),
         "groups.<name>.hosts = [fqdn, ...]".into(),
     );
+    m.insert(
+        "discovery_1".into(),
+        "discovery.min_history_uses = N  (history-only hosts below N uses are hidden; default 2)"
+            .into(),
+    );
+    m.insert(
+        "discovery_2".into(),
+        "discovery.shell_history|ssh_config|known_hosts = true|false  (toggle sources; default true)".into(),
+    );
     serde_yml::Value::Mapping(m)
 }
 

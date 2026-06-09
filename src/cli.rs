@@ -38,14 +38,18 @@ pub enum Cmd {
     #[command(hide = true)]
     Complete,
 
+    /// List discovered hosts (name<TAB>source) for shell completion.
+    #[command(hide = true, name = "complete-hosts")]
+    CompleteHosts,
+
     /// Manage groups: list, show hosts, add, remove, edit.
     Groups {
         #[command(subcommand)]
         sub: Option<GroupsCmd>,
     },
 
-    /// Open the wizard / editor. First launch when no config exists,
-    /// otherwise opens edit mode with re-run-imports access.
+    /// Open the groups editor (TUI): add/edit/delete groups, picking
+    /// members from discovered hosts. Theme picker included.
     Config,
 
     /// One-line tmux status-line segment summarising running Claude Code
@@ -230,7 +234,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         return groups::open(name, host.as_deref());
     }
     if let Some(name) = cli.session {
-        return sessions::attach_or_create(&name);
+        return sessions::resolve_and_open(&name);
     }
     // No subcommand → TUI dashboard. `--select-agent <target>` opens the
     // Agents view with that row preselected (used by `tad watch`).
@@ -253,6 +257,10 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
     match cmd {
         Cmd::Complete => {
             sessions::print_completions()?;
+            Ok(0)
+        }
+        Cmd::CompleteHosts => {
+            sessions::print_host_completions()?;
             Ok(0)
         }
         Cmd::Groups { sub } => run_groups(sub.unwrap_or(GroupsCmd::List)),

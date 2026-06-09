@@ -118,19 +118,23 @@ pub(super) fn format_group_line(data: &AppData, name: &str, theme: &Theme) -> Li
 }
 
 pub(super) fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
-    let in_groups = data
-        .hosts
-        .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, g)| g.clone())
-        .unwrap_or_default();
+    let row = data.hosts.iter().find(|r| r.name == name);
+    let groups = row.map(|r| r.groups.join(", ")).unwrap_or_default();
+    let source = row.map(|r| r.source.clone()).unwrap_or_default();
+    let trailing = if groups.is_empty() {
+        source
+    } else if source.is_empty() {
+        groups
+    } else {
+        format!("{}  ·  {}", groups, source)
+    };
     Line::from(vec![
         Span::styled(
             format!("{:<45}", truncate(name, 45)),
             Style::default().fg(theme.accent),
         ),
         Span::raw("  "),
-        Span::styled(in_groups.join(", "), Style::default().fg(theme.muted)),
+        Span::styled(trailing, Style::default().fg(theme.muted)),
     ])
 }
 

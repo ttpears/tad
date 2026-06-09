@@ -5,6 +5,7 @@ mod agents;
 mod cli;
 mod config;
 mod dashboard;
+mod discovery;
 mod doctor;
 mod groups;
 mod install;

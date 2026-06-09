@@ -72,6 +72,7 @@ pub fn run() -> Result<i32> {
     check_legacy_ui_keys(&mut r);
     check_legacy_groups_yaml(&mut r);
     check_snooze_count(&mut r);
+    check_shell_completions(&mut r);
 
     println!();
     let (warns, fails) = r.print();
@@ -358,6 +359,60 @@ fn check_snooze_count(r: &mut Report) {
         r.add(
             "snooze file",
             Verdict::Pass(format!("{} active snooze(s)", s.snoozes.len())),
+        );
+    }
+}
+
+fn check_shell_completions(r: &mut Report) {
+    let home = dirs::home_dir();
+
+    let bash_paths: Vec<std::path::PathBuf> = {
+        let mut v = vec![
+            std::path::PathBuf::from("/usr/share/bash-completion/completions/tad"),
+            std::path::PathBuf::from("/etc/bash_completion.d/tad"),
+        ];
+        if let Some(ref h) = home {
+            v.push(h.join(".local/share/bash-completion/completions/tad"));
+        }
+        v
+    };
+
+    let zsh_dirs: Vec<std::path::PathBuf> = {
+        let mut v = vec![
+            std::path::PathBuf::from("/usr/share/zsh/site-functions"),
+            std::path::PathBuf::from("/usr/local/share/zsh/site-functions"),
+        ];
+        if let Some(ref h) = home {
+            v.push(h.join(".zsh/completions"));
+        }
+        v
+    };
+
+    let bash_found = bash_paths.iter().any(|p| p.exists());
+    let zsh_found = zsh_dirs.iter().any(|dir| {
+        std::fs::read_dir(dir)
+            .ok()
+            .and_then(|mut entries| {
+                entries.find(|e| e.as_ref().map(|e| e.file_name() == "_tad").unwrap_or(false))
+            })
+            .is_some()
+    });
+
+    if bash_found || zsh_found {
+        r.add("shell completions", Verdict::Pass("found".into()));
+    } else {
+        r.add(
+            "shell completions",
+            Verdict::Warn {
+                msg: "shell completions not found — install from completions/ (tad.bash, _tad) \
+                      or via your package for tab-completion of sessions/hosts/groups"
+                    .into(),
+                fix: Some(
+                    "copy completions/tad.bash to a bash-completion dir, or completions/_tad \
+                     to a zsh site-functions dir"
+                        .into(),
+                ),
+            },
         );
     }
 }

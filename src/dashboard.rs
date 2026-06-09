@@ -242,7 +242,7 @@ pub(super) struct AppData {
     pub(super) sessions: Vec<Session>,
     pub(super) groups: Vec<(String, config::Group)>,
     /// host → list of groups it belongs to
-    pub(super) hosts: Vec<(String, Vec<String>)>,
+    pub(super) hosts: Vec<HostRow>,
     /// Claude Code agents discovered across tmux panes.
     pub(super) agents: Vec<Agent>,
     /// Project (typically git repo) frame around everything else.
@@ -257,6 +257,51 @@ pub(super) struct AppData {
     /// `snoozes` — format_agent_line previously read `config.yaml`
     /// once per row per render.
     pub(super) ui: crate::ui_config::UiConfig,
+}
+
+/// One row in the Hosts view: a host name, the groups it belongs to (if
+/// any), and a pre-rendered source tag from discovery.
+#[derive(Debug, Clone)]
+pub(super) struct HostRow {
+    pub(super) name: String,
+    pub(super) groups: Vec<String>,
+    pub(super) source: String,
+}
+
+pub(super) fn build_host_rows(
+    discovered: Vec<crate::discovery::HostCandidate>,
+    group_members: std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<HostRow> {
+    let lc_members: std::collections::BTreeMap<String, Vec<String>> = group_members
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
+    let mut rows: Vec<HostRow> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    for h in &discovered {
+        let key = h.host.to_lowercase();
+        seen.insert(key.clone());
+        let groups = lc_members
+            .get(&h.host.to_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        rows.push(HostRow {
+            name: h.host.clone(),
+            groups,
+            source: crate::discovery::source_tag(h),
+        });
+    }
+    for (host, groups) in &group_members {
+        if seen.contains(&host.to_lowercase()) {
+            continue;
+        }
+        rows.push(HostRow {
+            name: host.clone(),
+            groups: groups.clone(),
+            source: String::new(),
+        });
+    }
+    rows
 }
 
 impl AppData {
@@ -280,7 +325,8 @@ impl AppData {
         for (_, gs) in hosts_map.iter_mut() {
             gs.sort();
         }
-        let hosts: Vec<(String, Vec<String>)> = hosts_map.into_iter().collect();
+        let discovered = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
+        let hosts = build_host_rows(discovered, hosts_map);
         let agents = agents::scan();
         // Projects are a pure aggregation over the same sessions+agents
         // — pass the slices in so we don't re-run the tmux subprocess
@@ -439,7 +485,7 @@ impl App {
             View::Projects => Box::new(self.data.projects.iter().map(|p| p.name.clone())),
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
-            View::Hosts => Box::new(self.data.hosts.iter().map(|(n, _)| n.clone())),
+            View::Hosts => Box::new(self.data.hosts.iter().map(|r| r.name.clone())),
             View::Agents => Box::new(agent_items_grouped_by_project(&self.data).into_iter()),
         };
         if self.filter.is_empty() {
@@ -581,10 +627,9 @@ pub struct RunOpts {
 }
 
 pub fn run_with(opts: RunOpts) -> Result<i32> {
-    // The setup wizard is opt-in: most users just want the dashboard, which
-    // works fine with no groups (sessions and agents still show). Users who
-    // want to define groups can run `tad config` — the empty Groups view
-    // points them there.
+    // The dashboard runs unconditionally. Sessions and agents show with no
+    // config needed; `tad config` opens the groups editor when the user
+    // wants to define groups.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -709,6 +754,50 @@ mod tests {
             snoozes: crate::snooze::SnoozeState::default(),
             ui: crate::ui_config::UiConfig::default(),
         }
+    }
+
+    #[test]
+    fn build_host_rows_matches_group_membership_case_insensitively() {
+        use crate::discovery::{HostCandidate, SourceFlags};
+        let discovered = vec![HostCandidate {
+            host: "web1".into(),
+            sources: SourceFlags {
+                shell: true,
+                ..Default::default()
+            },
+            count: 5,
+        }];
+        let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        group_members.insert("Web1".into(), vec!["prod".into()]); // different casing than discovered
+        let rows = build_host_rows(discovered, group_members);
+        // exactly one row for web1 (deduped), and it carries the group
+        let web1: Vec<_> = rows
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case("web1"))
+            .collect();
+        assert_eq!(web1.len(), 1);
+        assert_eq!(web1[0].groups, vec!["prod".to_string()]);
+    }
+
+    #[test]
+    fn build_host_rows_unions_discovered_and_group_members() {
+        use crate::discovery::{HostCandidate, SourceFlags};
+        let discovered = vec![HostCandidate {
+            host: "web1".into(),
+            sources: SourceFlags {
+                ssh_config: true,
+                ..Default::default()
+            },
+            count: 0,
+        }];
+        let mut group_members: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        group_members.insert("db1".into(), vec!["prod".into()]); // only in a group, not discovered
+        let rows = build_host_rows(discovered, group_members);
+        let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"web1"));
+        assert!(names.contains(&"db1")); // group member still shows
+        let web1 = rows.iter().find(|r| r.name == "web1").unwrap();
+        assert!(web1.source.contains("ssh-config"));
     }
 
     #[test]

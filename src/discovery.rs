@@ -1,10 +1,10 @@
-//! Local-only scanning for SSH hosts and importable tmux sessions.
+//! Local-only scanning for SSH hosts (shell history, ssh-config, known_hosts).
 
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
-use crate::wizard::SourceSet;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFlags {
@@ -17,22 +17,124 @@ pub struct SourceFlags {
 pub struct HostCandidate {
     pub host: String,
     pub sources: SourceFlags,
+    /// Number of times this host appeared in shell history. 0 for hosts
+    /// that came only from ssh-config / known_hosts.
+    pub count: usize,
 }
 
+/// Tunables for discovery. All fields default so a config file with no
+/// `discovery:` section behaves identically to all-on with threshold 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionCandidate {
-    pub name: String,
-    pub windows: Vec<String>,
-    pub usable: bool,
+pub struct DiscoveryConfig {
+    /// History-only hosts seen fewer than this many times are hidden
+    /// (unless they also appear in ssh-config / known_hosts).
+    pub min_history_uses: usize,
+    pub shell_history: bool,
+    pub ssh_config: bool,
+    pub known_hosts: bool,
 }
 
-pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            min_history_uses: 2,
+            shell_history: true,
+            ssh_config: true,
+            known_hosts: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct DiscoveryWire {
+    min_history_uses: Option<usize>,
+    shell_history: Option<bool>,
+    ssh_config: Option<bool>,
+    known_hosts: Option<bool>,
+}
+
+/// Top-level fragment: just the `discovery:` key. Other keys in the same
+/// file (theme, ui, groups, _meta) are ignored.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct Wire {
+    discovery: DiscoveryWire,
+}
+
+impl DiscoveryConfig {
+    pub fn load() -> Self {
+        let path = match dirs::config_dir() {
+            Some(p) => p.join("tad").join("config.yaml"),
+            None => return Self::default(),
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => return Self::default(),
+        };
+        let wire: Wire = serde_yml::from_str(&text).unwrap_or_default();
+        Self::from_wire(wire.discovery)
+    }
+
+    fn from_wire(w: DiscoveryWire) -> Self {
+        let d = Self::default();
+        Self {
+            min_history_uses: w.min_history_uses.unwrap_or(d.min_history_uses),
+            shell_history: w.shell_history.unwrap_or(d.shell_history),
+            ssh_config: w.ssh_config.unwrap_or(d.ssh_config),
+            known_hosts: w.known_hosts.unwrap_or(d.known_hosts),
+        }
+    }
+}
+
+/// Human-readable source tag for a discovered host, e.g.
+/// "ssh-config, known" or "history ×7". Empty if no sources set.
+pub fn source_tag(h: &HostCandidate) -> String {
+    let mut t = Vec::new();
+    if h.sources.ssh_config {
+        t.push("ssh-config".to_string());
+    }
+    if h.sources.known_hosts {
+        t.push("known".to_string());
+    }
+    if h.sources.shell {
+        t.push(format!("history \u{00d7}{}", h.count));
+    }
+    t.join(", ")
+}
+
+fn is_high_signal(h: &HostCandidate) -> bool {
+    h.sources.ssh_config || h.sources.known_hosts
+}
+
+/// Drop low-signal noise, then order by signal: config/known first, then
+/// shell hosts by frequency (desc), then case-insensitive name.
+pub fn rank_and_filter(mut hosts: Vec<HostCandidate>, cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+    hosts.retain(|h| is_high_signal(h) || h.count >= cfg.min_history_uses);
+    hosts.sort_by(|a, b| {
+        (is_high_signal(b) as u8)
+            .cmp(&(is_high_signal(a) as u8))
+            .then(b.count.cmp(&a.count))
+            .then(a.host.to_lowercase().cmp(&b.host.to_lowercase()))
+    });
+    hosts
+}
+
+/// The one entry point for live discovery: scan enabled sources, rank,
+/// filter. Scan errors are swallowed here (callers that want them use
+/// `scan_hosts` directly).
+pub fn discover(cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+    let (hosts, _errors) = scan_hosts(cfg);
+    rank_and_filter(hosts, cfg)
+}
+
+pub fn scan_hosts(cfg: &DiscoveryConfig) -> (Vec<HostCandidate>, Vec<String>) {
     let mut shell = Vec::new();
     let mut ssh_cfg = Vec::new();
     let mut khosts = Vec::new();
     let mut errors = Vec::new();
 
-    if sources.shell {
+    if cfg.shell_history {
         let paths = shell_history_paths();
         let mut any_ok = false;
         for (label, path) in &paths {
@@ -50,7 +152,7 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
         }
     }
 
-    if sources.ssh_config {
+    if cfg.ssh_config {
         if let Some(home) = dirs::home_dir() {
             let path = home.join(".ssh").join("config");
             match std::fs::read_to_string(&path) {
@@ -74,7 +176,7 @@ pub fn scan_hosts(sources: SourceSet) -> (Vec<HostCandidate>, Vec<String>) {
         }
     }
 
-    if sources.known_hosts {
+    if cfg.known_hosts {
         if let Some(home) = dirs::home_dir() {
             let path = home.join(".ssh").join("known_hosts");
             match std::fs::read_to_string(&path) {
@@ -120,53 +222,6 @@ pub(crate) fn parse_ssh_config_includes(text: &str) -> Vec<String> {
         }
     }
     out
-}
-
-pub fn scan_tmux_sessions() -> Vec<SessionCandidate> {
-    use crate::tmux;
-    let out = match tmux::run(["list-sessions", "-F", "#{session_name}"]) {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    let mut raw = Vec::new();
-    for name in names {
-        let wins = match tmux::run(["list-windows", "-t", &name, "-F", "#{window_name}"]) {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        raw.push((name, wins));
-    }
-    scan_tmux_sessions_from(raw)
-}
-
-pub(crate) fn scan_tmux_sessions_from(raw: Vec<(String, Vec<String>)>) -> Vec<SessionCandidate> {
-    raw.into_iter()
-        .map(|(name, windows)| {
-            let usable = windows.iter().any(|w| is_usable_window_name(w));
-            SessionCandidate {
-                name,
-                windows,
-                usable,
-            }
-        })
-        .collect()
-}
-
-fn is_usable_window_name(name: &str) -> bool {
-    let n = name.trim();
-    if n.is_empty() {
-        return false;
-    }
-    !matches!(n, "bash" | "zsh" | "sh" | "fish") && !n.chars().all(|c| c.is_ascii_digit())
 }
 
 pub(crate) fn parse_bash_zsh_history(text: &str) -> Vec<String> {
@@ -294,27 +349,34 @@ pub(crate) fn aggregate(
     ssh_config: Vec<String>,
     known_hosts: Vec<String>,
 ) -> Vec<HostCandidate> {
-    let mut map: BTreeMap<String, (String, SourceFlags)> = BTreeMap::new();
-    let mut record = |host: String, set: fn(&mut SourceFlags)| {
-        let key = host.to_lowercase();
+    let mut map: BTreeMap<String, (String, SourceFlags, usize)> = BTreeMap::new();
+    for h in shell {
+        let key = h.to_lowercase();
         let entry = map
             .entry(key)
-            .or_insert((host.clone(), SourceFlags::default()));
-        set(&mut entry.1);
-    };
-    for h in shell {
-        record(h, |f| f.shell = true);
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.shell = true;
+        entry.2 += 1;
     }
     for h in ssh_config {
-        record(h, |f| f.ssh_config = true);
+        let key = h.to_lowercase();
+        let entry = map
+            .entry(key)
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.ssh_config = true;
     }
     for h in known_hosts {
-        record(h, |f| f.known_hosts = true);
+        let key = h.to_lowercase();
+        let entry = map
+            .entry(key)
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.known_hosts = true;
     }
     map.into_iter()
-        .map(|(_, (display, sources))| HostCandidate {
-            host: display,
+        .map(|(_, (host, sources, count))| HostCandidate {
+            host,
             sources,
+            count,
         })
         .collect()
 }
@@ -324,8 +386,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_tag_formats_all_combinations() {
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags {
+                ssh_config: true,
+                known_hosts: true,
+                shell: false,
+            },
+            count: 0,
+        };
+        assert_eq!(source_tag(&h), "ssh-config, known");
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags {
+                shell: true,
+                ..Default::default()
+            },
+            count: 7,
+        };
+        assert_eq!(source_tag(&h), "history \u{00d7}7");
+        let h = HostCandidate {
+            host: "x".into(),
+            sources: SourceFlags::default(),
+            count: 0,
+        };
+        assert_eq!(source_tag(&h), "");
+    }
+
+    #[test]
     fn bash_history_extracts_hosts_strips_users_and_flags() {
-        let text = include_str!("../../tests/fixtures/wizard/shell_history_bash.txt");
+        let text = include_str!("../tests/fixtures/wizard/shell_history_bash.txt");
         let hosts = parse_bash_zsh_history(text);
         assert!(hosts.contains(&"prod-web1.example.com".to_string()));
         assert!(hosts.contains(&"db1".to_string()));
@@ -337,7 +428,7 @@ mod tests {
 
     #[test]
     fn bash_history_rejects_non_ssh_and_garbage() {
-        let text = include_str!("../../tests/fixtures/wizard/shell_history_bash.txt");
+        let text = include_str!("../tests/fixtures/wizard/shell_history_bash.txt");
         let hosts = parse_bash_zsh_history(text);
         assert!(!hosts.iter().any(|h| h.contains("nfs")));
         assert!(!hosts.iter().any(|h| h.starts_with("-")));
@@ -347,7 +438,7 @@ mod tests {
 
     #[test]
     fn fish_history_extracts_hosts() {
-        let text = include_str!("../../tests/fixtures/wizard/shell_history_fish.txt");
+        let text = include_str!("../tests/fixtures/wizard/shell_history_fish.txt");
         let hosts = parse_fish_history(text);
         assert!(hosts.contains(&"fish-host1.example.com".to_string()));
         assert!(hosts.contains(&"fish-db.example.com".to_string()));
@@ -356,7 +447,7 @@ mod tests {
 
     #[test]
     fn ssh_config_extracts_concrete_hosts() {
-        let text = include_str!("../../tests/fixtures/wizard/ssh_config.txt");
+        let text = include_str!("../tests/fixtures/wizard/ssh_config.txt");
         let hosts = parse_ssh_config(text);
         assert!(hosts.contains(&"bastion.example.com".to_string()));
         assert!(hosts.contains(&"db1".to_string()));
@@ -366,7 +457,7 @@ mod tests {
 
     #[test]
     fn ssh_config_skips_wildcards() {
-        let text = include_str!("../../tests/fixtures/wizard/ssh_config.txt");
+        let text = include_str!("../tests/fixtures/wizard/ssh_config.txt");
         let hosts = parse_ssh_config(text);
         assert!(!hosts.iter().any(|h| h.contains('*')));
         assert!(!hosts.iter().any(|h| h.contains('?')));
@@ -375,7 +466,7 @@ mod tests {
 
     #[test]
     fn known_hosts_parses_plain_and_comma_lists() {
-        let text = include_str!("../../tests/fixtures/wizard/known_hosts.txt");
+        let text = include_str!("../tests/fixtures/wizard/known_hosts.txt");
         let hosts = parse_known_hosts(text);
         assert!(hosts.contains(&"host1.example.com".to_string()));
         assert!(hosts.contains(&"host2.example.com".to_string()));
@@ -386,7 +477,7 @@ mod tests {
 
     #[test]
     fn known_hosts_strips_brackets_and_skips_hashed_and_ca() {
-        let text = include_str!("../../tests/fixtures/wizard/known_hosts.txt");
+        let text = include_str!("../tests/fixtures/wizard/known_hosts.txt");
         let hosts = parse_known_hosts(text);
         assert!(hosts.contains(&"bracketed.example.com".to_string()));
         assert!(!hosts.iter().any(|h| h.starts_with('|')));
@@ -428,8 +519,27 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_counts_shell_frequency() {
+        let result = aggregate(
+            vec!["a".into(), "a".into(), "a".into(), "b".into()],
+            vec![],
+            vec![],
+        );
+        let a = result.iter().find(|c| c.host == "a").unwrap();
+        let b = result.iter().find(|c| c.host == "b").unwrap();
+        assert_eq!(a.count, 3);
+        assert_eq!(b.count, 1);
+    }
+
+    #[test]
+    fn aggregate_count_is_zero_for_non_shell_sources() {
+        let result = aggregate(vec![], vec!["x".into()], vec!["y".into()]);
+        assert!(result.iter().all(|c| c.count == 0));
+    }
+
+    #[test]
     fn scan_hosts_reports_missing_files_as_errors_not_panics() {
-        let (candidates, errors) = scan_hosts(SourceSet::ALL);
+        let (candidates, errors) = scan_hosts(&DiscoveryConfig::default());
         for e in &errors {
             assert!(!e.is_empty());
         }
@@ -437,31 +547,115 @@ mod tests {
     }
 
     #[test]
-    fn tmux_sessions_marks_unusable_when_all_windows_are_shell_names() {
-        let raw = vec![
-            (
-                "prod-web".to_string(),
-                vec!["host1".to_string(), "host2".to_string()],
-            ),
-            (
-                "just-shell".to_string(),
-                vec!["bash".to_string(), "zsh".to_string()],
-            ),
-            (
-                "numbers".to_string(),
-                vec!["1".to_string(), "2".to_string()],
-            ),
-            (
-                "mixed".to_string(),
-                vec!["bash".to_string(), "realhost".to_string()],
-            ),
+    fn rank_orders_config_and_known_before_history() {
+        let hosts = vec![
+            HostCandidate {
+                host: "hist".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 9,
+            },
+            HostCandidate {
+                host: "cfg".into(),
+                sources: SourceFlags {
+                    ssh_config: true,
+                    ..Default::default()
+                },
+                count: 0,
+            },
         ];
-        let candidates = scan_tmux_sessions_from(raw);
-        let by_name: std::collections::HashMap<_, _> =
-            candidates.iter().map(|c| (c.name.clone(), c)).collect();
-        assert!(by_name["prod-web"].usable);
-        assert!(!by_name["just-shell"].usable);
-        assert!(!by_name["numbers"].usable);
-        assert!(by_name["mixed"].usable);
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        assert_eq!(out[0].host, "cfg");
+        assert_eq!(out[1].host, "hist");
+    }
+
+    #[test]
+    fn rank_orders_history_by_count_desc() {
+        let hosts = vec![
+            HostCandidate {
+                host: "low".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 2,
+            },
+            HostCandidate {
+                host: "high".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 7,
+            },
+        ];
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        assert_eq!(out[0].host, "high");
+        assert_eq!(out[1].host, "low");
+    }
+
+    #[test]
+    fn filter_drops_history_only_below_threshold_but_keeps_config_hosts() {
+        let hosts = vec![
+            HostCandidate {
+                host: "oneoff".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 1,
+            },
+            HostCandidate {
+                host: "kept".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ..Default::default()
+                },
+                count: 2,
+            },
+            HostCandidate {
+                host: "incfg".into(),
+                sources: SourceFlags {
+                    shell: true,
+                    ssh_config: true,
+                    ..Default::default()
+                },
+                count: 1,
+            },
+        ];
+        let out = rank_and_filter(hosts, &DiscoveryConfig::default());
+        let names: Vec<_> = out.iter().map(|h| h.host.as_str()).collect();
+        assert!(!names.contains(&"oneoff"));
+        assert!(names.contains(&"kept"));
+        assert!(names.contains(&"incfg"));
+    }
+
+    #[test]
+    fn discovery_config_defaults() {
+        let d = DiscoveryConfig::default();
+        assert_eq!(d.min_history_uses, 2);
+        assert!(d.shell_history && d.ssh_config && d.known_hosts);
+    }
+
+    #[test]
+    fn discovery_config_from_wire_overrides_and_defaults() {
+        let yaml = "discovery:\n  min_history_uses: 5\n  shell_history: false\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = DiscoveryConfig::from_wire(wire.discovery);
+        assert_eq!(cfg.min_history_uses, 5);
+        assert!(!cfg.shell_history);
+        assert!(cfg.ssh_config);
+    }
+
+    #[test]
+    fn discovery_config_missing_section_is_default() {
+        let yaml = "theme: dracula\ngroups: {}\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(
+            DiscoveryConfig::from_wire(wire.discovery),
+            DiscoveryConfig::default()
+        );
     }
 }

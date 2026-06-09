@@ -6,19 +6,21 @@ function _tad_complete() {
    # All known hosts across all groups — used to suggest hosts when adding a
    # new group, since tad doesn't otherwise track a host inventory.
    _tad_all_hosts() {
-      local g
-      for g in $(tad groups list 2>/dev/null | cut -d: -f1); do
-         tad groups hosts "$g" 2>/dev/null
-      done | sort -u
+      { local g
+        for g in $(tad groups list 2>/dev/null | cut -d: -f1); do
+           tad groups hosts "$g" 2>/dev/null
+        done
+        tad complete-hosts 2>/dev/null | cut -f1
+      } | sort -u
    }
 
    # ---- top-level (position 1) ----
    if (( COMP_CWORD == 1 )); then
       local subs="groups config status tmux-keybind watch -g"
-      local sessions groups
+      local sessions hosts
       sessions=$(tad complete 2>/dev/null | cut -f2 | cut -d: -f1)
-      groups=$(tad groups list 2>/dev/null | cut -d: -f1)
-      COMPREPLY=( $(compgen -W "$subs $sessions $groups" -- "$cur") )
+      hosts=$(tad complete-hosts 2>/dev/null | cut -f1)
+      COMPREPLY=( $(compgen -W "$subs $sessions $hosts" -- "$cur") )
       compopt -o nosort 2>/dev/null
       return
    fi

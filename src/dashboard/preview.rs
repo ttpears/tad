@@ -273,8 +273,8 @@ pub(super) fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Lin
     let in_groups: Vec<String> = data
         .hosts
         .iter()
-        .find(|(n, _)| n == name)
-        .map(|(_, g)| g.clone())
+        .find(|r| r.name == name)
+        .map(|r| r.groups.clone())
         .unwrap_or_default();
     let mut lines = vec![
         Line::from(vec![
@@ -293,6 +293,19 @@ pub(super) fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Lin
             format!("  {}", g),
             Style::default().fg(theme.fg),
         )));
+    }
+    if let Some(src) = data
+        .hosts
+        .iter()
+        .find(|r| r.name == name)
+        .map(|r| r.source.clone())
+    {
+        if !src.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("source: {}", src),
+                Style::default().fg(theme.muted),
+            )));
+        }
     }
     lines
 }

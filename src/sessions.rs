@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
 
-use crate::{config, groups, tmux};
+use crate::tmux;
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -51,6 +51,17 @@ pub fn list() -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// Print discovered hosts for shell completion, one per line as
+/// `name<TAB>source-tag`. Mirrors `print_completions` (sessions) but for
+/// the live host inventory.
+pub fn print_host_completions() -> Result<()> {
+    let hosts = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
+    for h in &hosts {
+        println!("{}\t{}", h.host, crate::discovery::source_tag(h));
+    }
+    Ok(())
+}
+
 /// Print `state<TAB>name:description` for shell completion.
 pub fn print_completions() -> Result<()> {
     let mut sessions = list()?;
@@ -84,14 +95,6 @@ pub fn print_completions() -> Result<()> {
 pub fn attach_or_create(name: &str) -> Result<i32> {
     if tmux::has_session(name) {
         return tmux::enter(name);
-    }
-    // No live session — if a group by this name is defined, offer to open it.
-    if let Ok(doc) = config::load() {
-        if doc.groups.contains_key(name) {
-            if let Some(true) = confirm_tty(&format!("Open group '{}'?", name), true) {
-                return groups::open(name, None);
-            }
-        }
     }
     if !confirm(&format!("Create new tmux session named {}?", name)) {
         return Ok(1);
@@ -195,10 +198,60 @@ pub(crate) fn confirm_tty(prompt: &str, default_yes: bool) -> Option<bool> {
     Some(v.starts_with('y'))
 }
 
+/// What a bare `tad <name>` should do, given whether a live session and a
+/// known host by that name exist. Pure so it is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    Session,
+    Host,
+    NewSession,
+}
+
+pub(crate) fn resolve(has_session: bool, is_host: bool) -> Resolution {
+    if has_session {
+        Resolution::Session
+    } else if is_host {
+        Resolution::Host
+    } else {
+        Resolution::NewSession
+    }
+}
+
+/// Resolve a bare positional name to the right action and run it:
+/// existing session → attach; else a known/discovered host → ssh; else
+/// create a new session.
+pub fn resolve_and_open(name: &str) -> Result<i32> {
+    let has_session = crate::tmux::has_session(name);
+    let is_host = if has_session {
+        false // session wins; skip the discovery scan entirely
+    } else {
+        crate::discovery::discover(&crate::discovery::DiscoveryConfig::load())
+            .iter()
+            .any(|h| h.host.eq_ignore_ascii_case(name))
+    };
+    match resolve(has_session, is_host) {
+        Resolution::Session | Resolution::NewSession => attach_or_create(name),
+        Resolution::Host => attach_or_create_remote(name),
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_prefers_session_then_host_then_new() {
+        assert_eq!(resolve(true, true), Resolution::Session);
+        assert_eq!(resolve(true, false), Resolution::Session);
+        assert_eq!(resolve(false, true), Resolution::Host);
+        assert_eq!(resolve(false, false), Resolution::NewSession);
     }
 }
