@@ -1199,6 +1199,7 @@ mod tests {
         s.host_candidates.push(HostCandidate {
             host: "h1".into(),
             sources: SourceFlags::default(),
+            count: 0,
         });
         assert!(s.can_advance(Stage::Hosts).is_err());
         s.selected_hosts.insert("h1".to_string());
@@ -1301,6 +1302,7 @@ mod tests {
                     shell: true,
                     ..Default::default()
                 },
+                count: 0,
             },
             HostCandidate {
                 host: "h2".into(),
@@ -1308,6 +1310,7 @@ mod tests {
                     ssh_config: true,
                     ..Default::default()
                 },
+                count: 0,
             },
         ];
         s.session_candidates = vec![SessionCandidate {

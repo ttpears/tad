@@ -17,6 +17,9 @@ pub struct SourceFlags {
 pub struct HostCandidate {
     pub host: String,
     pub sources: SourceFlags,
+    /// Number of times this host appeared in shell history. 0 for hosts
+    /// that came only from ssh-config / known_hosts.
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,27 +297,34 @@ pub(crate) fn aggregate(
     ssh_config: Vec<String>,
     known_hosts: Vec<String>,
 ) -> Vec<HostCandidate> {
-    let mut map: BTreeMap<String, (String, SourceFlags)> = BTreeMap::new();
-    let mut record = |host: String, set: fn(&mut SourceFlags)| {
-        let key = host.to_lowercase();
+    let mut map: BTreeMap<String, (String, SourceFlags, usize)> = BTreeMap::new();
+    for h in shell {
+        let key = h.to_lowercase();
         let entry = map
             .entry(key)
-            .or_insert((host.clone(), SourceFlags::default()));
-        set(&mut entry.1);
-    };
-    for h in shell {
-        record(h, |f| f.shell = true);
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.shell = true;
+        entry.2 += 1;
     }
     for h in ssh_config {
-        record(h, |f| f.ssh_config = true);
+        let key = h.to_lowercase();
+        let entry = map
+            .entry(key)
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.ssh_config = true;
     }
     for h in known_hosts {
-        record(h, |f| f.known_hosts = true);
+        let key = h.to_lowercase();
+        let entry = map
+            .entry(key)
+            .or_insert((h.clone(), SourceFlags::default(), 0));
+        entry.1.known_hosts = true;
     }
     map.into_iter()
-        .map(|(_, (display, sources))| HostCandidate {
-            host: display,
+        .map(|(_, (host, sources, count))| HostCandidate {
+            host,
             sources,
+            count,
         })
         .collect()
 }
@@ -425,6 +435,25 @@ mod tests {
         assert!(hosts.contains(&"host.example.com".to_string()));
         assert!(hosts.contains(&"realdest".to_string()));
         assert!(!hosts.iter().any(|h| h == "--" || h == "-ignored"));
+    }
+
+    #[test]
+    fn aggregate_counts_shell_frequency() {
+        let result = aggregate(
+            vec!["a".into(), "a".into(), "a".into(), "b".into()],
+            vec![],
+            vec![],
+        );
+        let a = result.iter().find(|c| c.host == "a").unwrap();
+        let b = result.iter().find(|c| c.host == "b").unwrap();
+        assert_eq!(a.count, 3);
+        assert_eq!(b.count, 1);
+    }
+
+    #[test]
+    fn aggregate_count_is_zero_for_non_shell_sources() {
+        let result = aggregate(vec![], vec!["x".into()], vec!["y".into()]);
+        assert!(result.iter().all(|c| c.count == 0));
     }
 
     #[test]
