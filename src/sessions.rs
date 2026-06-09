@@ -195,10 +195,44 @@ pub(crate) fn confirm_tty(prompt: &str, default_yes: bool) -> Option<bool> {
     Some(v.starts_with('y'))
 }
 
+/// What a bare `tad <name>` should do, given whether a live session and a
+/// known host by that name exist. Pure so it is unit-testable.
+#[allow(dead_code)] // used by resolve_and_open in the next change
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    Session,
+    Host,
+    NewSession,
+}
+
+#[allow(dead_code)] // used by resolve_and_open in the next change
+pub(crate) fn resolve(has_session: bool, is_host: bool) -> Resolution {
+    if has_session {
+        Resolution::Session
+    } else if is_host {
+        Resolution::Host
+    } else {
+        Resolution::NewSession
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_prefers_session_then_host_then_new() {
+        assert_eq!(resolve(true, true), Resolution::Session);
+        assert_eq!(resolve(true, false), Resolution::Session);
+        assert_eq!(resolve(false, true), Resolution::Host);
+        assert_eq!(resolve(false, false), Resolution::NewSession);
     }
 }
