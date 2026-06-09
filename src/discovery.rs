@@ -1,4 +1,4 @@
-//! Local-only scanning for SSH hosts and importable tmux sessions.
+//! Local-only scanning for SSH hosts (shell history, ssh-config, known_hosts).
 
 #![allow(dead_code)]
 

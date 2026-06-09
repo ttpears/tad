@@ -34,18 +34,24 @@ pub struct WizardState {
     pub form: GroupForm,
     pub config_exists: bool,
     pub status_flash: Option<String>,
+    /// Discovered host names cached on entry to BuildGroups, so the
+    /// filesystem is not re-scanned on every keypress.
+    pub member_candidates: Vec<String>,
 }
 
 impl WizardState {
     pub fn for_first_launch() -> Self {
-        Self {
+        let mut s = Self {
             stage: Stage::BuildGroups,
             filter: String::new(),
             built: Vec::new(),
             form: GroupForm::default(),
             config_exists: false,
             status_flash: None,
-        }
+            member_candidates: Vec::new(),
+        };
+        s.load_member_candidates();
+        s
     }
 
     pub fn for_config(config_exists: bool) -> Self {
@@ -56,7 +62,20 @@ impl WizardState {
         } else {
             Stage::BuildGroups
         };
+        // If we're starting in BuildGroups, candidates were loaded by
+        // for_first_launch; if starting in EditMode they will be loaded
+        // when the user first enters BuildGroups.
+        if s.stage != Stage::BuildGroups {
+            s.member_candidates = Vec::new();
+        }
         s
+    }
+
+    /// Cache the discovered host names for the BuildGroups member picker.
+    /// Called once each time the editor enters BuildGroups so the filesystem
+    /// is not re-scanned on every keypress.
+    fn load_member_candidates(&mut self) {
+        self.member_candidates = discovered_host_names();
     }
 
     pub fn next_stage_from(&self, current: Stage) -> Option<Stage> {
@@ -66,12 +85,6 @@ impl WizardState {
             Stage::ThemePicker => Some(Stage::EditMode),
             Stage::Done | Stage::Cancelled => None,
         }
-    }
-
-    pub fn can_advance(&self, _stage: Stage) -> Result<(), &'static str> {
-        // BuildGroups validation is delegated to `commit_form`'s checks; no
-        // other stage gates advancement.
-        Ok(())
     }
 
     pub fn commit_form(&mut self) -> Result<(), &'static str> {
@@ -262,6 +275,7 @@ pub fn run() -> Result<()> {
             break;
         }
 
+        let prev_stage = state.stage;
         match state.stage {
             Stage::EditMode => {
                 handle_edit_mode(&mut state, key, &mut cursors.edit, &mut cursors.theme)
@@ -277,6 +291,16 @@ pub fn run() -> Result<()> {
                 &mut filter_mode,
             ),
             Stage::Done | Stage::Cancelled => break,
+        }
+
+        // On any transition *into* BuildGroups, reset form-level UI state
+        // so re-entering the add-group form always starts fresh.
+        if prev_stage != Stage::BuildGroups && state.stage == Stage::BuildGroups {
+            form_field = 0;
+            filter_mode = false;
+            state.filter.clear();
+            cursors.filter = 0;
+            state.load_member_candidates();
         }
     }
 
@@ -294,9 +318,11 @@ fn discovered_host_names() -> Vec<String> {
 
 fn filtered_member_hosts(state: &WizardState) -> Vec<String> {
     let f = state.filter.to_lowercase();
-    discovered_host_names()
-        .into_iter()
+    state
+        .member_candidates
+        .iter()
         .filter(|h| f.is_empty() || h.to_lowercase().contains(&f))
+        .cloned()
         .collect()
 }
 
@@ -410,9 +436,15 @@ fn handle_build_groups(
                 *name_cursor = 0;
                 let mut doc = config::load().unwrap_or_default();
                 let incoming = state.built.drain(..).collect::<Vec<_>>();
-                let _renames = merge_into_doc(&mut doc, incoming);
+                let renames = merge_into_doc(&mut doc, incoming);
                 match config::save(&doc) {
-                    Ok(()) => state.status_flash = Some("group saved".into()),
+                    Ok(()) => {
+                        state.status_flash = Some(if let Some((from, to)) = renames.first() {
+                            format!("saved as \"{}\" (name \"{}\" was taken)", to, from)
+                        } else {
+                            "group saved".into()
+                        });
+                    }
                     Err(e) => state.status_flash = Some(format!("save failed: {:#}", e)),
                 }
                 state.stage = Stage::EditMode;
