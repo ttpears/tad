@@ -51,6 +51,27 @@ pub fn list() -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// Print discovered hosts for shell completion, one per line as
+/// `name<TAB>source-tag`. Mirrors `print_completions` (sessions) but for
+/// the live host inventory.
+pub fn print_host_completions() -> Result<()> {
+    let hosts = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
+    for h in &hosts {
+        let mut tags: Vec<String> = Vec::new();
+        if h.sources.ssh_config {
+            tags.push("ssh-config".into());
+        }
+        if h.sources.known_hosts {
+            tags.push("known".into());
+        }
+        if h.sources.shell {
+            tags.push(format!("history \u{00d7}{}", h.count));
+        }
+        println!("{}\t{}", h.host, tags.join(", "));
+    }
+    Ok(())
+}
+
 /// Print `state<TAB>name:description` for shell completion.
 pub fn print_completions() -> Result<()> {
     let mut sessions = list()?;

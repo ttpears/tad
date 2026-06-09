@@ -38,6 +38,10 @@ pub enum Cmd {
     #[command(hide = true)]
     Complete,
 
+    /// List discovered hosts (name<TAB>source) for shell completion.
+    #[command(hide = true, name = "complete-hosts")]
+    CompleteHosts,
+
     /// Manage groups: list, show hosts, add, remove, edit.
     Groups {
         #[command(subcommand)]
@@ -253,6 +257,10 @@ fn run_subcommand(cmd: Cmd) -> Result<i32> {
     match cmd {
         Cmd::Complete => {
             sessions::print_completions()?;
+            Ok(0)
+        }
+        Cmd::CompleteHosts => {
+            sessions::print_host_completions()?;
             Ok(0)
         }
         Cmd::Groups { sub } => run_groups(sub.unwrap_or(GroupsCmd::List)),
