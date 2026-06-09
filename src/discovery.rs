@@ -1,20 +1,18 @@
 //! Local-only scanning for SSH hosts (shell history, ssh-config, known_hosts).
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SourceFlags {
+pub(crate) struct SourceFlags {
     pub shell: bool,
     pub ssh_config: bool,
     pub known_hosts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostCandidate {
+pub(crate) struct HostCandidate {
     pub host: String,
     pub sources: SourceFlags,
     /// Number of times this host appeared in shell history. 0 for hosts
@@ -25,7 +23,7 @@ pub struct HostCandidate {
 /// Tunables for discovery. All fields default so a config file with no
 /// `discovery:` section behaves identically to all-on with threshold 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveryConfig {
+pub(crate) struct DiscoveryConfig {
     /// History-only hosts seen fewer than this many times are hidden
     /// (unless they also appear in ssh-config / known_hosts).
     pub min_history_uses: usize,
@@ -63,7 +61,7 @@ struct Wire {
 }
 
 impl DiscoveryConfig {
-    pub fn load() -> Self {
+    pub(crate) fn load() -> Self {
         let path = match dirs::config_dir() {
             Some(p) => p.join("tad").join("config.yaml"),
             None => return Self::default(),
@@ -89,7 +87,7 @@ impl DiscoveryConfig {
 
 /// Human-readable source tag for a discovered host, e.g.
 /// "ssh-config, known" or "history ×7". Empty if no sources set.
-pub fn source_tag(h: &HostCandidate) -> String {
+pub(crate) fn source_tag(h: &HostCandidate) -> String {
     let mut t = Vec::new();
     if h.sources.ssh_config {
         t.push("ssh-config".to_string());
@@ -109,7 +107,10 @@ fn is_high_signal(h: &HostCandidate) -> bool {
 
 /// Drop low-signal noise, then order by signal: config/known first, then
 /// shell hosts by frequency (desc), then case-insensitive name.
-pub fn rank_and_filter(mut hosts: Vec<HostCandidate>, cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+pub(crate) fn rank_and_filter(
+    mut hosts: Vec<HostCandidate>,
+    cfg: &DiscoveryConfig,
+) -> Vec<HostCandidate> {
     hosts.retain(|h| is_high_signal(h) || h.count >= cfg.min_history_uses);
     hosts.sort_by(|a, b| {
         (is_high_signal(b) as u8)
@@ -121,14 +122,14 @@ pub fn rank_and_filter(mut hosts: Vec<HostCandidate>, cfg: &DiscoveryConfig) -> 
 }
 
 /// The one entry point for live discovery: scan enabled sources, rank,
-/// filter. Scan errors are swallowed here (callers that want them use
-/// `scan_hosts` directly).
-pub fn discover(cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
+/// and filter. Per-source read errors from `scan_hosts` are ignored here —
+/// discovery is best-effort and never blocks on an unreadable file.
+pub(crate) fn discover(cfg: &DiscoveryConfig) -> Vec<HostCandidate> {
     let (hosts, _errors) = scan_hosts(cfg);
     rank_and_filter(hosts, cfg)
 }
 
-pub fn scan_hosts(cfg: &DiscoveryConfig) -> (Vec<HostCandidate>, Vec<String>) {
+pub(crate) fn scan_hosts(cfg: &DiscoveryConfig) -> (Vec<HostCandidate>, Vec<String>) {
     let mut shell = Vec::new();
     let mut ssh_cfg = Vec::new();
     let mut khosts = Vec::new();
