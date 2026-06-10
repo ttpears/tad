@@ -14,15 +14,19 @@ use crate::tmux;
 use super::format::{cwd_for_display, truncate};
 use super::AppData;
 
+/// How many trailing lines of the active pane the session preview shows.
+const PANE_PREVIEW_LINES: usize = 12;
+
 pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
     // Per-pane breakdown so the preview shows what's actually running where,
     // not just a window count. We cross-reference data.agents so panes
     // hosting a claude process get a marker — the Sessions view now hints
     // at the Agents view rather than feeling disconnected from it.
+    let target = tmux::exact_target(name);
     let panes_raw = tmux::run([
         "list-panes",
         "-t",
-        name,
+        &target,
         "-aF",
         // session\twindow_idx\twindow_name\tpane_idx\tpane_current_command\tpane_current_path
         "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}",
@@ -33,14 +37,20 @@ pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<
         "display-message",
         "-p",
         "-t",
-        name,
+        &target,
         "created: #{t:session_created}\nactivity: #{t:session_activity}",
     ])
     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     .unwrap_or_default();
-    let attached = tmux::run(["display-message", "-p", "-t", name, "#{session_attached}"])
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    let attached = tmux::run([
+        "display-message",
+        "-p",
+        "-t",
+        &target,
+        "#{session_attached}",
+    ])
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
 
     let mut lines = vec![Line::from(vec![
         Span::styled("session: ", Style::default().fg(theme.muted)),
@@ -127,6 +137,56 @@ pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<
                 Span::styled(cwd_short, Style::default().fg(theme.muted)),
             ]));
         }
+    }
+
+    // Live look at the session's active pane so the user sees what's
+    // on screen before attaching. capture-pane with a session target
+    // captures that session's active pane.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "── active pane ───────────────".to_string(),
+        Style::default().fg(theme.border),
+    )));
+    let capture = tmux::run(["capture-pane", "-p", "-t", &target])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    match capture {
+        Some(text) => {
+            // Strip trailing blank lines first — a mostly-empty pane
+            // would otherwise preview as 12 blank rows.
+            let all: Vec<&str> = text.lines().collect();
+            let end = all
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let shown = &all[end.saturating_sub(PANE_PREVIEW_LINES)..end];
+            if shown.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "(pane is blank)".to_string(),
+                    Style::default().fg(theme.muted),
+                )));
+            } else {
+                for l in shown {
+                    // capture-pane -p strips colours but not all control
+                    // chars (\r, \x08, …) — drop them so ratatui doesn't
+                    // render garbage; keep \t.
+                    let clean: String = l
+                        .chars()
+                        .filter(|c| !c.is_control() || *c == '\t')
+                        .collect();
+                    lines.push(Line::from(Span::styled(
+                        clean,
+                        Style::default().fg(theme.muted),
+                    )));
+                }
+            }
+        }
+        None => lines.push(Line::from(Span::styled(
+            "no capture — pane gone?".to_string(),
+            Style::default().fg(theme.muted),
+        ))),
     }
 
     lines.push(Line::from(""));
