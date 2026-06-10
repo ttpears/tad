@@ -15,7 +15,6 @@ use super::modal::{
     render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
     render_snooze_modal,
 };
-use super::preview::{preview_agent, preview_group, preview_host, preview_session};
 use super::{App, InputMode, View};
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
@@ -180,24 +179,12 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, area, state);
 }
 
-fn render_preview(f: &mut Frame, area: Rect, app: &App) {
+fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(" preview ");
-    let lines: Vec<Line> = match app.selected() {
-        Some(name) => match app.view {
-            View::Sessions => preview_session(&app.data, &name, &app.theme),
-            View::Groups => preview_group(&app.data, &name, &app.theme),
-            View::Hosts => preview_host(&app.data, &name, &app.theme),
-            View::Agents => preview_agent(&app.data, &name, &app.theme),
-        },
-        None => vec![Line::from(Span::styled(
-            "no selection",
-            Style::default().fg(app.theme.muted),
-        ))],
-    };
-    let para = Paragraph::new(lines)
+    let para = Paragraph::new(app.preview_lines())
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(para, area);

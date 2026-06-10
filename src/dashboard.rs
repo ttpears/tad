@@ -30,6 +30,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::{backend::CrosstermBackend, widgets::ListState, Terminal};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -233,6 +235,18 @@ fn save_last_view(view: View) {
     let _ = std::fs::write(path, view.slug());
 }
 
+/// Single-entry cache for the preview pane. Building a preview can
+/// shell out to tmux and read transcript files, and the draw loop runs
+/// several times a second — without this the selected row's preview
+/// would redo that IO every frame. Keyed by (view, row, refresh
+/// generation): selection moves and data refreshes miss naturally,
+/// every other frame hits.
+#[derive(Default)]
+pub(super) struct PreviewCache {
+    pub(super) key: Option<(View, String, u64)>,
+    pub(super) lines: Vec<Line<'static>>,
+}
+
 pub(super) struct AppData {
     pub(super) sessions: Vec<Session>,
     pub(super) groups: Vec<(String, config::Group)>,
@@ -399,6 +413,11 @@ pub(super) struct App {
     pub(super) should_quit: bool,
     pub(super) open_after: Option<OpenTarget>,
     pub(super) theme: Theme,
+    /// See [`PreviewCache`].
+    pub(super) preview_cache: PreviewCache,
+    /// Bumped by `refresh()`; part of the preview-cache key so cached
+    /// preview lines never outlive the data they were built from.
+    pub(super) refresh_generation: u64,
 }
 
 impl App {
@@ -451,6 +470,8 @@ impl App {
             should_quit: false,
             open_after: None,
             theme: theme::load(),
+            preview_cache: PreviewCache::default(),
+            refresh_generation: 0,
         }
     }
 
@@ -498,6 +519,7 @@ impl App {
     }
 
     pub(super) fn refresh(&mut self) {
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
         self.data = AppData::load();
         // Clamp selections to new list sizes. The Agents view uses a
         // grouped list (session header rows interleaved with agent
@@ -522,6 +544,34 @@ impl App {
         // row (would happen on first load and after a refresh narrows
         // the list).
         snap_agents_selection_to_data_row(&mut self.list_state_agents, &self.data);
+    }
+
+    /// Preview lines for the current selection, via the single-entry
+    /// cache. Builders only run on a cache miss (selection moved or
+    /// the data refreshed).
+    pub(super) fn preview_lines(&mut self) -> Vec<Line<'static>> {
+        let Some(name) = self.selected() else {
+            return vec![Line::from(Span::styled(
+                "no selection",
+                Style::default().fg(self.theme.muted),
+            ))];
+        };
+        let key = (self.view, name.clone(), self.refresh_generation);
+        if self.preview_cache.key.as_ref() != Some(&key) {
+            let lines = match self.view {
+                View::Sessions => preview::preview_session(&self.data, &name, &self.theme),
+                View::Groups => preview::preview_group(&self.data, &name, &self.theme),
+                View::Hosts => preview::preview_host(&self.data, &name, &self.theme),
+                View::Agents => preview::preview_agent(&self.data, &name, &self.theme),
+            };
+            self.preview_cache = PreviewCache {
+                key: Some(key),
+                lines,
+            };
+        }
+        // Intentional per-frame clone: tens of Lines at ~5fps is noise,
+        // and returning a borrow would tie Paragraph's lifetime to App.
+        self.preview_cache.lines.clone()
     }
 }
 
@@ -764,6 +814,8 @@ pub(super) mod testutil {
             should_quit: false,
             open_after: None,
             theme: crate::theme::load(),
+            preview_cache: PreviewCache::default(),
+            refresh_generation: 0,
         }
     }
 }
@@ -772,6 +824,60 @@ pub(super) mod testutil {
 mod tests {
     use super::testutil::{mk_agent, mk_data};
     use super::*;
+
+    fn mk_data_with_group(layout: &str) -> AppData {
+        let mut data = mk_data(vec![], vec![]);
+        data.groups = vec![(
+            "prod".to_string(),
+            crate::config::Group {
+                layout: layout.to_string(),
+                hosts: vec!["web1".to_string()],
+            },
+        )];
+        data
+    }
+
+    #[test]
+    fn preview_cache_serves_stale_until_generation_bumps() {
+        let mut app = testutil::mk_app(View::Groups, mk_data_with_group("panes"));
+        let first = format!("{:?}", app.preview_lines());
+        // Mutate underlying data WITHOUT bumping the generation — the
+        // cache must serve the stale lines (that's the point: no
+        // rebuild per frame).
+        app.data.groups[0].1.layout = "windows".to_string();
+        let cached = format!("{:?}", app.preview_lines());
+        assert_eq!(first, cached);
+        // What refresh() does each ~1.5s tick:
+        app.refresh_generation = app.refresh_generation.wrapping_add(1);
+        let rebuilt = format!("{:?}", app.preview_lines());
+        assert_ne!(cached, rebuilt);
+        assert!(rebuilt.contains("windows"));
+    }
+
+    #[test]
+    fn preview_cache_misses_on_selection_change() {
+        let mut app = testutil::mk_app(View::Groups, mk_data_with_group("panes"));
+        app.data.groups.push((
+            "staging".to_string(),
+            crate::config::Group {
+                layout: "browse".to_string(),
+                hosts: vec![],
+            },
+        ));
+        let first = format!("{:?}", app.preview_lines());
+        app.list_state_groups.select(Some(1));
+        let second = format!("{:?}", app.preview_lines());
+        assert_ne!(first, second);
+        assert!(second.contains("staging"));
+    }
+
+    #[test]
+    fn preview_lines_without_selection_says_so() {
+        let mut app = testutil::mk_app(View::Hosts, mk_data(vec![], vec![]));
+        // mk_app leaves list_state_hosts unselected.
+        let lines = format!("{:?}", app.preview_lines());
+        assert!(lines.contains("no selection"));
+    }
 
     #[test]
     fn grouped_items_emit_header_then_agents_per_session() {
