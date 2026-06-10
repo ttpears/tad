@@ -427,7 +427,7 @@ impl App {
         } else {
             Some(0)
         });
-        // The Agents view's items() injects project-header rows; the
+        // The Agents view's items() injects session-header rows; the
         // initial index 0 may land on a header. Snap to the next data
         // row so the first thing the user sees highlighted is an
         // actual agent, not a synthetic separator.
@@ -486,7 +486,7 @@ impl App {
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|r| r.name.clone())),
-            View::Agents => Box::new(agent_items_grouped_by_project(&self.data).into_iter()),
+            View::Agents => Box::new(agent_items_grouped_by_session(&self.data).into_iter()),
         };
         if self.filter.is_empty() {
             iter.collect()
@@ -519,11 +519,11 @@ impl App {
     pub(super) fn refresh(&mut self) {
         self.data = AppData::load();
         // Clamp selections to new list sizes. The Agents view uses a
-        // grouped list (project header rows interleaved with agent
+        // grouped list (session header rows interleaved with agent
         // rows), so the row count there comes from the grouped items()
         // helper rather than data.agents.len(), and the clamp needs
         // to land on a non-header row.
-        let agents_view_len = agent_items_grouped_by_project(&self.data).len();
+        let agents_view_len = agent_items_grouped_by_session(&self.data).len();
         for (state, len) in [
             (&mut self.list_state_projects, self.data.projects.len()),
             (&mut self.list_state_sessions, self.data.sessions.len()),
@@ -549,7 +549,7 @@ impl App {
 /// it forward to the next data row. No-op if the selection is already
 /// on data, or if no agents exist at all.
 pub(super) fn snap_agents_selection_to_data_row(state: &mut ListState, data: &AppData) {
-    let items = agent_items_grouped_by_project(data);
+    let items = agent_items_grouped_by_session(data);
     if items.is_empty() {
         return;
     }
@@ -561,8 +561,8 @@ pub(super) fn snap_agents_selection_to_data_row(state: &mut ListState, data: &Ap
     while is_agent_header(&items[idx]) {
         idx = (idx + 1) % items.len();
         if idx == start {
-            // Pathological all-headers case (can't happen since we
-            // skip empty projects, but be safe).
+            // Pathological all-headers case (can't happen since a
+            // session only appears when at least one agent belongs to it, but be safe).
             return;
         }
     }
@@ -570,7 +570,7 @@ pub(super) fn snap_agents_selection_to_data_row(state: &mut ListState, data: &Ap
 }
 
 /// Sentinel that prefixes Agents-view "header" rows — synthetic
-/// non-selectable entries inserted between project groups to visually
+/// non-selectable entries inserted between session groups to visually
 /// separate them. Chosen as ASCII bell + a leading sigil because no
 /// tmux target / agent name will ever contain those characters; the
 /// `§` is the visible part of the rendered header.
@@ -580,24 +580,31 @@ pub(super) fn is_agent_header(item: &str) -> bool {
     item.starts_with(AGENT_HEADER_SIGIL)
 }
 
-/// Build the Agents-view item list: for each project (in the order
-/// projects::scan already sorted them — most-recently-active first),
-/// emit one header row followed by that project's agent target rows.
-/// Projects with zero agents are skipped. The header row carries the
-/// project name and an at-a-glance summary (`N agents · M awaiting`)
-/// so the heaviest projects sort and read first.
-fn agent_items_grouped_by_project(data: &AppData) -> Vec<String> {
-    let mut items = Vec::new();
-    for project in &data.projects {
-        if project.agents.is_empty() {
-            continue;
+/// Build the Agents-view item list: group agents by their tmux session,
+/// most-recently-active session first, then emit one header row followed
+/// by that session's agent target rows (most-recent agent first). The
+/// header carries the session name and an at-a-glance summary
+/// (`N agents · M awaiting`) so the busiest sessions read first.
+fn agent_items_grouped_by_session(data: &AppData) -> Vec<String> {
+    let mut by_session: Vec<(String, Vec<&Agent>)> = Vec::new();
+    for a in &data.agents {
+        match by_session.iter_mut().find(|(s, _)| s == &a.session) {
+            Some((_, v)) => v.push(a),
+            None => by_session.push((a.session.clone(), vec![a])),
         }
-        let awaiting = project
-            .agents
+    }
+    // Most-recently-active session first; None activity sorts last.
+    by_session.sort_by_key(|(_, agents)| {
+        std::cmp::Reverse(agents.iter().filter_map(|a| a.last_activity).max())
+    });
+    let mut items = Vec::new();
+    for (session, mut agents) in by_session {
+        agents.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
+        let awaiting = agents
             .iter()
             .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
             .count();
-        let plural = if project.agents.len() == 1 { "" } else { "s" };
+        let plural = if agents.len() == 1 { "" } else { "s" };
         let suffix = if awaiting > 0 {
             format!(" · {awaiting} awaiting")
         } else {
@@ -605,10 +612,10 @@ fn agent_items_grouped_by_project(data: &AppData) -> Vec<String> {
         };
         items.push(format!(
             "{AGENT_HEADER_SIGIL} {} · {} agent{plural}{suffix}",
-            project.name,
-            project.agents.len()
+            session,
+            agents.len()
         ));
-        for a in &project.agents {
+        for a in agents {
             items.push(a.target.clone());
         }
     }
@@ -724,36 +731,77 @@ fn app_loop<B: ratatui::backend::Backend>(
 mod tests {
     use super::*;
     use crate::agents::Agent;
-    use crate::projects::Project;
     use std::path::PathBuf;
-    use std::time::SystemTime;
 
-    fn mk_agent(target: &str, cwd: &str) -> Agent {
+    fn mk_agent(target: &str, session: &str, secs: u64) -> Agent {
         Agent {
             target: target.into(),
-            session: target.split(':').next().unwrap_or("").into(),
+            session: session.into(),
             window_index: "0".into(),
             window_name: "w".into(),
             pane_index: "0".into(),
-            cwd: PathBuf::from(cwd),
+            cwd: PathBuf::from("/repo"),
             agent_pid: 1,
             provider_id: "claude",
-            last_activity: Some(SystemTime::now()),
+            last_activity: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
             transcript_path: None,
             attention: crate::transcript::Attention::Unknown,
         }
     }
 
-    fn mk_data(projects: Vec<Project>, agents: Vec<Agent>) -> AppData {
+    fn mk_data(agents: Vec<Agent>) -> AppData {
         AppData {
             sessions: vec![],
             groups: vec![],
             hosts: vec![],
             agents,
-            projects,
+            projects: vec![],
             snoozes: crate::snooze::SnoozeState::default(),
             ui: crate::ui_config::UiConfig::default(),
         }
+    }
+
+    #[test]
+    fn grouped_items_emit_header_then_agents_per_session() {
+        // cops has the most recent activity (300) so it sorts first;
+        // salt's agents sort most-recent-first within the session.
+        let data = mk_data(vec![
+            mk_agent("salt:1.0", "salt", 100),
+            mk_agent("salt:2.0", "salt", 200),
+            mk_agent("cops:1.0", "cops", 300),
+        ]);
+        let items = agent_items_grouped_by_session(&data);
+        // header, agent, header, agent, agent
+        assert_eq!(items.len(), 5);
+        assert!(is_agent_header(&items[0]));
+        assert!(items[0].contains("cops"));
+        assert!(items[0].contains("1 agent"));
+        assert!(!items[0].contains("1 agents")); // singular wording
+        assert_eq!(items[1], "cops:1.0");
+        assert!(is_agent_header(&items[2]));
+        assert!(items[2].contains("salt"));
+        assert!(items[2].contains("2 agents"));
+        assert_eq!(items[3], "salt:2.0"); // most-recent agent first
+        assert_eq!(items[4], "salt:1.0");
+    }
+
+    #[test]
+    fn header_summary_includes_awaiting_count_when_nonzero() {
+        let mut a = mk_agent("salt:1.0", "salt", 100);
+        a.attention = crate::transcript::Attention::AwaitingInput;
+        let data = mk_data(vec![a]);
+        let items = agent_items_grouped_by_session(&data);
+        assert!(items[0].contains("1 awaiting"));
+    }
+
+    #[test]
+    fn snap_skips_a_header_at_the_initial_position() {
+        let data = mk_data(vec![mk_agent("salt:1.0", "salt", 100)]);
+        let mut state = ListState::default();
+        state.select(Some(0)); // would land on the header
+        snap_agents_selection_to_data_row(&mut state, &data);
+        // Snapped forward past the header to the agent row.
+        assert_eq!(state.selected(), Some(1));
     }
 
     #[test]
@@ -800,112 +848,4 @@ mod tests {
         assert!(web1.source.contains("ssh-config"));
     }
 
-    #[test]
-    fn grouped_items_emit_header_then_agents_per_project() {
-        let a1 = mk_agent("salt:1.0", "/repo/salt");
-        let a2 = mk_agent("salt:2.0", "/repo/salt");
-        let a3 = mk_agent("cops:1.0", "/repo/cops");
-        let data = mk_data(
-            vec![
-                Project {
-                    root: PathBuf::from("/repo/salt"),
-                    name: "salt".into(),
-                    sessions: vec![],
-                    agents: vec![a1.clone(), a2.clone()],
-                    last_activity: a1.last_activity,
-                },
-                Project {
-                    root: PathBuf::from("/repo/cops"),
-                    name: "cops".into(),
-                    sessions: vec![],
-                    agents: vec![a3.clone()],
-                    last_activity: a3.last_activity,
-                },
-            ],
-            vec![a1, a2, a3],
-        );
-
-        let items = agent_items_grouped_by_project(&data);
-        // header, agent, agent, header, agent
-        assert_eq!(items.len(), 5);
-        assert!(is_agent_header(&items[0]));
-        assert!(items[0].contains("salt"));
-        assert!(items[0].contains("2 agents"));
-        assert_eq!(items[1], "salt:1.0");
-        assert_eq!(items[2], "salt:2.0");
-        assert!(is_agent_header(&items[3]));
-        assert!(items[3].contains("cops"));
-        assert!(items[3].contains("1 agent"));
-        assert!(!items[3].contains("1 agents")); // singular wording
-        assert_eq!(items[4], "cops:1.0");
-    }
-
-    #[test]
-    fn grouped_items_skip_projects_with_no_agents() {
-        let a = mk_agent("salt:1.0", "/repo/salt");
-        let data = mk_data(
-            vec![
-                Project {
-                    root: PathBuf::from("/repo/salt"),
-                    name: "salt".into(),
-                    sessions: vec![],
-                    agents: vec![a.clone()],
-                    last_activity: a.last_activity,
-                },
-                // Empty project (in projects list because it has a
-                // tmux session but no live claude in any pane) — must
-                // not emit a header.
-                Project {
-                    root: PathBuf::from("/repo/dormant"),
-                    name: "dormant".into(),
-                    sessions: vec![],
-                    agents: vec![],
-                    last_activity: None,
-                },
-            ],
-            vec![a],
-        );
-        let items = agent_items_grouped_by_project(&data);
-        assert_eq!(items.len(), 2);
-        assert!(is_agent_header(&items[0]));
-        assert!(!items.iter().any(|i| i.contains("dormant")));
-    }
-
-    #[test]
-    fn header_summary_includes_awaiting_count_when_nonzero() {
-        let mut a = mk_agent("salt:1.0", "/repo/salt");
-        a.attention = crate::transcript::Attention::AwaitingInput;
-        let data = mk_data(
-            vec![Project {
-                root: PathBuf::from("/repo/salt"),
-                name: "salt".into(),
-                sessions: vec![],
-                agents: vec![a.clone()],
-                last_activity: a.last_activity,
-            }],
-            vec![a],
-        );
-        let items = agent_items_grouped_by_project(&data);
-        assert!(items[0].contains("1 awaiting"));
-    }
-
-    #[test]
-    fn snap_skips_a_header_at_the_initial_position() {
-        let a = mk_agent("salt:1.0", "/repo/salt");
-        let data = mk_data(
-            vec![Project {
-                root: PathBuf::from("/repo/salt"),
-                name: "salt".into(),
-                sessions: vec![],
-                agents: vec![a.clone()],
-                last_activity: a.last_activity,
-            }],
-            vec![a],
-        );
-        let mut state = ListState::default();
-        state.select(Some(0)); // would land on the header
-        snap_agents_selection_to_data_row(&mut state, &data);
-        // Snapped forward past the header to the agent row.
-        assert_eq!(state.selected(), Some(1));
-    }
 }
