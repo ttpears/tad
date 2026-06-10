@@ -173,15 +173,8 @@ pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<
                 )));
             } else {
                 for l in shown {
-                    // capture-pane -p strips colours but not all control
-                    // chars (\r, \x08, …) — drop them so ratatui doesn't
-                    // render garbage; keep \t.
-                    let clean: String = l
-                        .chars()
-                        .filter(|c| !c.is_control() || *c == '\t')
-                        .collect();
                     lines.push(Line::from(Span::styled(
-                        clean,
+                        clean_capture_line(l),
                         Style::default().fg(theme.muted),
                     )));
                 }
@@ -447,6 +440,17 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
     lines
 }
 
+/// Make one line of `capture-pane -p` output safe for ratatui.
+/// capture-pane strips colours but returns the pane's cells verbatim:
+/// real tabs survive (ratatui renders them as garbage — expand to
+/// spaces) and other control chars (\r, \x08, \x07, …) are dropped.
+fn clean_capture_line(l: &str) -> String {
+    l.replace('\t', "    ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// Does a tmux session already exist for this host? Matches on the
 /// host's short name (FQDN stripped) — the same normalization the
 /// Hosts-view `n` prefill uses to name new sessions.
@@ -588,5 +592,23 @@ mod tests {
         let data = mk_data(vec![], vec![]);
         let text = lines_text(&preview_agent(&data, "nope:0.0", &theme()));
         assert!(text.contains("gone"));
+    }
+
+    /// Real tabs survive capture-pane (tmux returns the pane's cells
+    /// verbatim) and ratatui renders them as garbage — they must be
+    /// expanded to spaces, not kept.
+    #[test]
+    fn capture_line_expands_tabs_to_spaces() {
+        assert_eq!(clean_capture_line("a\tb"), "a    b");
+    }
+
+    #[test]
+    fn capture_line_strips_other_control_chars() {
+        assert_eq!(clean_capture_line("a\rb\x08c\x07d"), "abcd");
+    }
+
+    #[test]
+    fn capture_line_passes_plain_text_through() {
+        assert_eq!(clean_capture_line("plain · text"), "plain · text");
     }
 }
