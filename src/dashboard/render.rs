@@ -13,7 +13,7 @@ use crate::agents;
 use super::format::{
     format_agent_line, format_group_line, format_host_line, format_session_line,
 };
-use super::modal::{render_new_session_modal, render_rename_agent_modal, render_snooze_modal};
+use super::modal::{render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal, render_snooze_modal};
 use super::preview::{preview_agent, preview_group, preview_host, preview_session};
 use super::{App, InputMode, View};
 
@@ -40,6 +40,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     }
     if app.input_mode == InputMode::RenameAgent {
         render_rename_agent_modal(f, area, app);
+    }
+    if app.input_mode == InputMode::ConfirmKill {
+        render_confirm_kill_modal(f, area, app);
     }
 }
 
@@ -238,6 +241,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         )),
         InputMode::RenameAgent => Line::from(Span::styled(
             "type new window name   ↵ rename   Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
+        InputMode::ConfirmKill => Line::from(Span::styled(
+            "y/↵ confirm kill   Esc/n cancel",
             Style::default().fg(theme.muted),
         )),
         InputMode::None => {

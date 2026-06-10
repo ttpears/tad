@@ -1,4 +1,4 @@
-//! Modal overlays: new-session, snooze-picker, rename-agent. Pure render
+//! Modal overlays: new-session, snooze-picker, rename-agent, confirm-kill. Pure render
 //! functions over `&App` — the corresponding `handle_*_key` lives in
 //! `keys.rs` and they coordinate via `app.input_mode`.
 
@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::snooze;
 
-use super::{App, NewSessionField, TextInput};
+use super::{App, ConfirmKillTarget, NewSessionField, TextInput};
 
 pub(super) fn render_rename_agent_modal(f: &mut Frame, area: Rect, app: &App) {
     let target = app.rename_agent_target.clone().unwrap_or_default();
@@ -236,6 +236,48 @@ pub(super) fn render_new_session_modal(f: &mut Frame, area: Rect, app: &App) {
 
     let inner = Paragraph::new(lines).block(block);
     f.render_widget(inner, popup);
+}
+
+pub(super) fn render_confirm_kill_modal(f: &mut Frame, area: Rect, app: &App) {
+    // Defensive: input_mode and confirm_kill are always set together,
+    // so this never fires; render nothing rather than a blank modal.
+    let Some(target) = &app.confirm_kill else {
+        return;
+    };
+    let (title, question) = match target {
+        ConfirmKillTarget::Session { name } => (
+            " kill session ",
+            format!("  Kill session {name}? This closes every pane in it."),
+        ),
+        ConfirmKillTarget::Agent { window_name, .. } => (
+            " interrupt agent ",
+            format!("  Interrupt agent {window_name}? Sends SIGINT to the agent."),
+        ),
+    };
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = 7;
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+    let theme = app.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.error))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(question, Style::default().fg(theme.fg))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  y/↵ confirm   Esc/n cancel   (any other key cancels)",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

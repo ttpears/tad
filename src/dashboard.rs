@@ -333,7 +333,23 @@ impl AppData {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Victim captured when the user pressed `d`, so the ~1.5s background
+/// refresh can't swap what gets killed between arming and confirming.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum ConfirmKillTarget {
+    /// `tmux kill-session` — drops every pane in the session.
+    Session { name: String },
+    /// SIGINT to the agent's PID — gentle; pane and shell survive.
+    /// The kill only needs `pid`; `target` records which row was
+    /// armed and `window_name` feeds the modal text.
+    Agent {
+        target: String,
+        pid: u32,
+        window_name: String,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum InputMode {
     None,
     Filter,
@@ -343,6 +359,9 @@ pub(super) enum InputMode {
     /// agent's current window name. Enter renames the window in place
     /// (no dashboard exit; the next refresh shows the new name).
     RenameAgent,
+    /// `d` on a Sessions/Agents row: y/N confirmation before the kill.
+    /// Default is No — only y/Y/Enter confirm.
+    ConfirmKill,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -365,6 +384,8 @@ pub(super) struct App {
     /// `session:window.pane` of the agent being renamed (captured at
     /// modal-open time so a mid-modal refresh doesn't drift the target).
     pub(super) rename_agent_target: Option<String>,
+    /// Victim of the pending confirm-kill modal (captured at arm time).
+    pub(super) confirm_kill: Option<ConfirmKillTarget>,
     /// Set when launched via `--select-agent`. The caller is scripting
     /// a "look at this one agent" flow, so after the user snoozes or
     /// otherwise resolves the row we exit so they return to wherever
@@ -420,6 +441,7 @@ impl App {
             snooze_cursor: 0,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
+            confirm_kill: None,
             from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
@@ -658,6 +680,7 @@ fn app_loop<B: ratatui::backend::Backend>(
                     InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
+                    InputMode::ConfirmKill => keys::handle_confirm_kill_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
                 }
             }
