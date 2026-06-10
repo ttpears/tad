@@ -48,7 +48,6 @@ pub(crate) trait Provider: Send + Sync {
     /// cached internally by [`crate::transcript::classify_file`] so
     /// the steady-state cost is one `stat`.
     fn classify_attention(&self, transcript: &Path) -> Attention;
-
 }
 
 // ---- Claude Code provider ----
@@ -120,9 +119,8 @@ pub(crate) fn providers() -> &'static [&'static dyn Provider] {
     SLICE
 }
 
-/// Fallback provider when an agent's `provider_id` can't be matched
-/// against the registry (e.g. the id is absent or unknown). Today
-/// there's only one provider so this is always `ClaudeProvider`.
+/// The canonical default provider. Today there's only one provider
+/// so this is always `ClaudeProvider`.
 pub(crate) fn default_provider() -> &'static dyn Provider {
     &CLAUDE_PROVIDER
 }
@@ -164,5 +162,4 @@ mod tests {
         let s = dir.to_string_lossy();
         assert!(s.contains("/.claude/projects/-home-me-git-tad-github"));
     }
-
 }

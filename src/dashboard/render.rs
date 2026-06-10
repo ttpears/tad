@@ -10,10 +10,11 @@ use ratatui::Frame;
 
 use crate::agents;
 
-use super::format::{
-    format_agent_line, format_group_line, format_host_line, format_session_line,
+use super::format::{format_agent_line, format_group_line, format_host_line, format_session_line};
+use super::modal::{
+    render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
+    render_snooze_modal,
 };
-use super::modal::{render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal, render_snooze_modal};
 use super::preview::{preview_agent, preview_group, preview_host, preview_session};
 use super::{App, InputMode, View};
 

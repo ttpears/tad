@@ -822,5 +822,4 @@ mod tests {
         let web1 = rows.iter().find(|r| r.name == "web1").unwrap();
         assert!(web1.source.contains("ssh-config"));
     }
-
 }

@@ -411,7 +411,9 @@ fn move_selection(app: &mut App, delta: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboard::{App, AppData, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View};
+    use crate::dashboard::{
+        App, AppData, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View,
+    };
     use ratatui::widgets::ListState;
 
     fn mk_agent(target: &str, session: &str, pid: u32) -> crate::agents::Agent {
@@ -456,7 +458,10 @@ mod tests {
         }
     }
 
-    fn mk_data(sessions: Vec<crate::sessions::Session>, agents: Vec<crate::agents::Agent>) -> AppData {
+    fn mk_data(
+        sessions: Vec<crate::sessions::Session>,
+        agents: Vec<crate::agents::Agent>,
+    ) -> AppData {
         AppData {
             sessions,
             groups: vec![],
@@ -487,7 +492,9 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::ConfirmKill);
         assert_eq!(
             app.confirm_kill,
-            Some(ConfirmKillTarget::Session { name: "work".into() })
+            Some(ConfirmKillTarget::Session {
+                name: "work".into()
+            })
         );
     }
 
@@ -538,11 +545,10 @@ mod tests {
     fn cancel_clears_modal_without_side_effects() {
         let mut app = mk_app(View::Sessions, mk_data(vec![mk_session("work")], vec![]));
         app.input_mode = InputMode::ConfirmKill;
-        app.confirm_kill = Some(ConfirmKillTarget::Session { name: "work".into() });
-        handle_confirm_kill_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
+        app.confirm_kill = Some(ConfirmKillTarget::Session {
+            name: "work".into(),
+        });
+        handle_confirm_kill_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
         assert!(app.confirm_kill.is_none());
         // The session list is untouched — cancel returned before any
