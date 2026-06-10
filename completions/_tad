@@ -1,5 +1,6 @@
 #compdef tad
 # zsh completion for tad. Source of truth: `tad complete` and `tad groups list`.
+# tad-completions: v2  (checked by `tad doctor` — bump when this file changes)
 
 _tad() {
    # ---- top-level (position 2) ----
