@@ -23,11 +23,15 @@ pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<
     // hosting a claude process get a marker — the Sessions view now hints
     // at the Agents view rather than feeling disconnected from it.
     let target = tmux::exact_target(name);
+    // `-s` scopes to every pane in the targeted session. The previous
+    // `-a` listed every pane on the SERVER (ignoring -t), so with 2+
+    // sessions the breakdown showed other sessions' windows too.
     let panes_raw = tmux::run([
         "list-panes",
+        "-s",
         "-t",
         &target,
-        "-aF",
+        "-F",
         // session\twindow_idx\twindow_name\tpane_idx\tpane_current_command\tpane_current_path
         "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}",
     ])
