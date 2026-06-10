@@ -700,7 +700,12 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    let app = result?;
+    let mut app = result?;
+    // Every clean exit (q/Esc/Ctrl-C/Enter dispatch) sends a pulled
+    // pane home before tad leaves the building.
+    if let Some(p) = app.pulled_pane.take() {
+        dispatch::return_pane(&p);
+    }
     match app.open_after {
         Some(OpenTarget::AttachExisting(name)) => sessions::attach_or_create_silent(&name, None),
         Some(OpenTarget::CreateNew { name, host }) => {

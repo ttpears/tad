@@ -83,17 +83,29 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(tabs, area);
 }
 
+/// 40/60 list/preview normally; the list takes everything while a pane
+/// is pulled — the real pane sits where the preview was. The preview
+/// carries the live content (transcript tail, pane capture) so it gets
+/// the bigger share; the list's widest rows (Agents, ~66 cols) still
+/// fit at 40% of a wide terminal and clip gracefully on narrow ones.
+fn main_constraints(pulled: bool) -> [Constraint; 2] {
+    if pulled {
+        [Constraint::Percentage(100), Constraint::Percentage(0)]
+    } else {
+        [Constraint::Percentage(40), Constraint::Percentage(60)]
+    }
+}
+
 fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
-    // The preview carries the live content (transcript tail, pane
-    // capture) so it gets the bigger share; the list's widest rows
-    // (Agents, ~66 cols) still fit at 40% of a wide terminal and clip
-    // gracefully on narrow ones.
+    let pulled = app.pulled_pane.is_some();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints(main_constraints(pulled))
         .split(area);
     render_list(f, chunks[0], app);
-    render_preview(f, chunks[1], app);
+    if !pulled {
+        render_preview(f, chunks[1], app);
+    }
 }
 
 fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
@@ -290,4 +302,21 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_takes_everything_while_a_pane_is_pulled() {
+        assert_eq!(
+            main_constraints(true),
+            [Constraint::Percentage(100), Constraint::Percentage(0)]
+        );
+        assert_eq!(
+            main_constraints(false),
+            [Constraint::Percentage(40), Constraint::Percentage(60)]
+        );
+    }
 }
