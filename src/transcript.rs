@@ -220,8 +220,6 @@ const TAIL_TEXT_CAP: usize = 2000;
 /// most the final 256KB of the file (same bounded-IO approach as
 /// `classify_file`). None when the file is unreadable or no assistant
 /// text appears in that window.
-// Called by the preview pane (next task); allow until wired up.
-#[allow(dead_code)]
 pub fn last_assistant_text(path: &Path) -> Option<String> {
     let meta = fs::metadata(path).ok()?;
     let start = meta.len().saturating_sub(TAIL_WINDOW_BYTES);

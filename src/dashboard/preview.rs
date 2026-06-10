@@ -7,7 +7,6 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::agents;
 use crate::snooze;
 use crate::theme::Theme;
 use crate::tmux;
@@ -221,22 +220,33 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
             Style::default().fg(theme.muted),
         ))];
     };
-    let active_window = std::time::Duration::from_secs(30);
-    let status = match agent.activity_status(active_window) {
-        agents::ActivityStatus::Active(d) => {
-            format!("● active ({})", agents::format_elapsed(d))
+    let (marker_text, marker_style, status_text, status_style) =
+        super::format::agent_status(data, agent, theme);
+
+    // Compact header: who, then status · cwd · [snoozed].
+    let mut status_spans = vec![
+        Span::styled(marker_text, marker_style),
+        Span::styled(status_text, status_style),
+        Span::styled(
+            format!(" · {}", cwd_for_display(&agent.cwd)),
+            Style::default().fg(theme.muted),
+        ),
+    ];
+    if let Some(until) = data.snoozes.snoozes.get(target) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if *until > now_secs {
+            status_spans.push(Span::styled(
+                format!(
+                    " · snoozed {}",
+                    snooze::format_duration(std::time::Duration::from_secs(*until - now_secs))
+                ),
+                Style::default().fg(theme.warning),
+            ));
         }
-        agents::ActivityStatus::Idle(d) => {
-            format!("○ idle for {}", agents::format_elapsed(d))
-        }
-        agents::ActivityStatus::NoTranscript => "? no transcript on disk".to_string(),
-    };
-    let kv = |k: &str, v: String| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
-            Span::styled(v, Style::default().fg(theme.fg)),
-        ])
-    };
+    }
     let mut lines = vec![
         Line::from(vec![
             Span::styled("agent: ", Style::default().fg(theme.muted)),
@@ -247,48 +257,150 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
+        Line::from(status_spans),
         Line::from(""),
-        kv("status", status),
-        kv("session", agent.session.clone()),
-        kv(
+    ];
+
+    // Body: the last thing the agent said. When awaiting input this is
+    // naturally the question / approval it's blocked on. Falls back to
+    // the old metadata card so the pane is never bare.
+    // Build the fallback metadata card once; both no-tail arms use it.
+    let push_card = |lines: &mut Vec<Line<'static>>, why: &str| {
+        lines.push(Line::from(Span::styled(
+            why.to_string(),
+            Style::default().fg(theme.muted),
+        )));
+        lines.push(Line::from(""));
+        let kv = |k: &str, v: String| -> Line<'static> {
+            Line::from(vec![
+                Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
+                Span::styled(v, Style::default().fg(theme.fg)),
+            ])
+        };
+        lines.push(kv("session", agent.session.clone()));
+        lines.push(kv(
             "window",
             format!("{} ({})", agent.window_name, agent.window_index),
-        ),
-        kv("pane", agent.pane_index.clone()),
-        kv("cwd", agent.cwd.display().to_string()),
-        kv("pid", agent.agent_pid.to_string()),
-        kv(
+        ));
+        lines.push(kv("pane", agent.pane_index.clone()));
+        lines.push(kv("pid", agent.agent_pid.to_string()));
+        lines.push(kv(
             "provider",
             crate::provider::by_id(agent.provider_id)
                 .map(|p| p.label().to_string())
                 .unwrap_or_else(|| agent.provider_id.to_string()),
-        ),
-    ];
-    if let Some(tp) = &agent.transcript_path {
-        let short = tp.file_name().map(|s| s.to_string_lossy().into_owned());
-        if let Some(name) = short {
-            lines.push(kv("transcript", name));
+        ));
+    };
+    let tail = agent
+        .transcript_path
+        .as_deref()
+        .map(crate::transcript::last_assistant_text);
+    match tail {
+        Some(Some(text)) => {
+            lines.push(Line::from(Span::styled(
+                "── last message ──────────────".to_string(),
+                Style::default().fg(theme.border),
+            )));
+            // str::lines() drops a trailing newline's empty element —
+            // intentional; messages often end with a bare newline.
+            for l in text.lines() {
+                lines.push(Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(theme.fg),
+                )));
+            }
         }
+        // Transcript exists but no assistant text in the tail window.
+        Some(None) => push_card(&mut lines, "no recent message"),
+        // Agent has no transcript on disk at all.
+        None => push_card(&mut lines, "no transcript — can't show last message"),
     }
-    // Surface an active snooze in the preview alongside the line badge,
-    // so a user previewing a row knows the watcher is suppressing it.
-    // Read from the per-refresh AppData cache, not the on-disk file.
-    if let Some(until) = data.snoozes.snoozes.get(target) {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if *until > now_secs {
-            lines.push(kv(
-                "snoozed",
-                snooze::format_duration(std::time::Duration::from_secs(*until - now_secs)),
-            ));
-        }
-    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "↵ jump to pane   s snooze   S clear snooze".to_string(),
         Style::default().fg(theme.muted),
     )));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dashboard::testutil::{mk_agent, mk_data};
+
+    fn theme() -> crate::theme::Theme {
+        crate::theme::load()
+    }
+
+    fn lines_text(lines: &[ratatui::text::Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn write_temp_transcript(content: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "tad-preview-test-{}-{nanos}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn agent_preview_shows_transcript_tail() {
+        let path = write_temp_transcript(
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"shall I deploy?\"}]}}\n",
+        );
+        let mut a = mk_agent("work:1.0", "work", 100);
+        a.transcript_path = Some(path.clone());
+        let data = mk_data(vec![], vec![a]);
+        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
+        assert!(text.contains("last message"));
+        assert!(text.contains("shall I deploy?"));
+        // The metadata card is gone in the tail case.
+        assert!(!text.contains("provider"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn agent_preview_without_transcript_falls_back_to_card() {
+        let data = mk_data(vec![], vec![mk_agent("work:1.0", "work", 100)]);
+        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
+        assert!(text.contains("no transcript"));
+        // Card facts still present so the pane isn't bare.
+        assert!(text.contains("session"));
+        assert!(text.contains("pid"));
+    }
+
+    #[test]
+    fn agent_preview_with_empty_transcript_says_no_recent_message() {
+        let path = write_temp_transcript("{\"type\":\"agent-name\",\"name\":\"alpha\"}\n");
+        let mut a = mk_agent("work:1.0", "work", 100);
+        a.transcript_path = Some(path.clone());
+        let data = mk_data(vec![], vec![a]);
+        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
+        assert!(text.contains("no recent message"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn agent_preview_gone_agent_degrades() {
+        let data = mk_data(vec![], vec![]);
+        let text = lines_text(&preview_agent(&data, "nope:0.0", &theme()));
+        assert!(text.contains("gone"));
+    }
 }

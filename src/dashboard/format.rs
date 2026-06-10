@@ -85,32 +85,15 @@ pub(super) fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Lin
     ])
 }
 
-pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
-    // Session-header rows (emitted by the Agents view's grouped items
-    // list) are visually distinct dividers — bold session name in the
-    // accent colour, with the inline count summary. The sigil isn't
-    // shown; it's just an in-band marker for `is_agent_header`.
-    if let Some(rest) = target.strip_prefix(super::AGENT_HEADER_SIGIL) {
-        let label = rest.trim_start();
-        return Line::from(vec![
-            Span::styled("── ", Style::default().fg(theme.border)),
-            Span::styled(
-                label.to_string(),
-                Style::default()
-                    .fg(theme.accent_bold)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ─────────────", Style::default().fg(theme.border)),
-        ]);
-    }
-    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
-        return Line::from(target.to_string());
-    };
+/// Marker + status for an agent row, shared by the Agents-view row
+/// formatter and the agent preview header so the two never disagree.
+pub(super) fn agent_status(
+    data: &AppData,
+    agent: &crate::agents::Agent,
+    theme: &Theme,
+) -> (&'static str, Style, String, Style) {
     let active_window = std::time::Duration::from_secs(30);
-    // Prefer the precise transcript signal when we have one — that's
-    // the "is this agent actually waiting for me right now" answer,
-    // independent of mtime. Fall back to mtime otherwise.
-    let (marker_text, marker_style, status_text, status_style) = match agent.attention {
+    match agent.attention {
         transcript::Attention::AwaitingInput => {
             // Distinguish fresh-waiting (the loud signal: agent finished
             // just now, you should respond) from stale-waiting (the
@@ -184,7 +167,34 @@ pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> 
                 Style::default().fg(theme.warning),
             ),
         },
+    }
+}
+
+pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
+    // Session-header rows (emitted by the Agents view's grouped items
+    // list) are visually distinct dividers — bold session name in the
+    // accent colour, with the inline count summary. The sigil isn't
+    // shown; it's just an in-band marker for `is_agent_header`.
+    if let Some(rest) = target.strip_prefix(super::AGENT_HEADER_SIGIL) {
+        let label = rest.trim_start();
+        return Line::from(vec![
+            Span::styled("── ", Style::default().fg(theme.border)),
+            Span::styled(
+                label.to_string(),
+                Style::default()
+                    .fg(theme.accent_bold)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ─────────────", Style::default().fg(theme.border)),
+        ]);
+    }
+    let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
+        return Line::from(target.to_string());
     };
+    // Prefer the precise transcript signal when we have one — that's
+    // the "is this agent actually waiting for me right now" answer,
+    // independent of mtime. Fall back to mtime otherwise.
+    let (marker_text, marker_style, status_text, status_style) = agent_status(data, agent, theme);
     let cwd_short = cwd_for_display(&agent.cwd);
 
     // If this target has an active snooze, append a "snoozed in Xm" badge
