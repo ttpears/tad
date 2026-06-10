@@ -1,6 +1,6 @@
 [package]
 name = "tad"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 authors = ["ttpears <ttpears@gmail.com>"]
 description = "Tmux session/group manager with native TUI dashboard"
