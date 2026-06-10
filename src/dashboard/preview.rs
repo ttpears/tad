@@ -11,7 +11,7 @@ use crate::snooze;
 use crate::theme::Theme;
 use crate::tmux;
 
-use super::format::{cwd_for_display, truncate};
+use super::format::{cwd_for_display, short_name, truncate};
 use super::AppData;
 
 /// How many trailing lines of the active pane the session preview shows.
@@ -218,16 +218,27 @@ pub(super) fn preview_group(data: &AppData, name: &str, theme: &Theme) -> Vec<Li
             Span::styled("layout: ", Style::default().fg(theme.muted)),
             Span::styled(g.layout.clone(), Style::default().fg(theme.warning)),
         ]),
-        Line::from(Span::styled(
-            format!("hosts ({}):", g.hosts.len()),
-            Style::default().fg(theme.fg),
-        )),
     ];
+    let with_sessions = g.hosts.iter().filter(|h| host_has_session(data, h)).count();
+    lines.push(Line::from(Span::styled(
+        format!("{} of {} hosts have sessions", with_sessions, g.hosts.len()),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("hosts ({}):", g.hosts.len()),
+        Style::default().fg(theme.fg),
+    )));
     for h in &g.hosts {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", h),
-            Style::default().fg(theme.fg),
-        )));
+        let (marker, marker_style) = if host_has_session(data, h) {
+            ("● ", Style::default().fg(theme.success))
+        } else {
+            ("· ", Style::default().fg(theme.muted))
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(marker, marker_style),
+            Span::styled(h.clone(), Style::default().fg(theme.fg)),
+        ]));
     }
     lines
 }
@@ -268,6 +279,54 @@ pub(super) fn preview_host(data: &AppData, name: &str, theme: &Theme) -> Vec<Lin
                 format!("source: {}", src),
                 Style::default().fg(theme.muted),
             )));
+        }
+    }
+    let short = short_name(name);
+    let matching: Vec<_> = data
+        .sessions
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(&short))
+        .collect();
+    lines.push(Line::from(""));
+    if matching.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no session for this host yet — ↵ to create one".to_string(),
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for s in matching {
+            let (marker, marker_style) = if s.attached {
+                ("● ", Style::default().fg(theme.success))
+            } else {
+                ("  ", Style::default().fg(theme.muted))
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::styled(
+                    s.name.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", s.activity_str),
+                    Style::default().fg(theme.muted),
+                ),
+            ]));
+            // Exact match on purpose: Agent.session is the tmux session
+            // name verbatim, same source as s.name — only the host →
+            // session-name hop above needs the case-insensitive compare.
+            for a in data.agents.iter().filter(|a| a.session == s.name) {
+                let (marker_text, marker_style, status_text, status_style) =
+                    super::format::agent_status(data, a, theme);
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(marker_text, marker_style),
+                    Span::styled(a.target.clone(), Style::default().fg(theme.fg)),
+                    Span::raw("  "),
+                    Span::styled(status_text, status_style),
+                ]));
+            }
         }
     }
     lines
@@ -384,10 +443,20 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
     lines
 }
 
+/// Does a tmux session already exist for this host? Matches on the
+/// host's short name (FQDN stripped) — the same normalization the
+/// Hosts-view `n` prefill uses to name new sessions.
+fn host_has_session(data: &AppData, host: &str) -> bool {
+    let short = short_name(host);
+    data.sessions
+        .iter()
+        .any(|s| s.name.eq_ignore_ascii_case(&short))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboard::testutil::{mk_agent, mk_data};
+    use crate::dashboard::testutil::{mk_agent, mk_data, mk_session};
 
     fn theme() -> crate::theme::Theme {
         crate::theme::load()
@@ -418,6 +487,59 @@ mod tests {
         ));
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    fn data_with_group(hosts: Vec<&str>, sessions: Vec<&str>) -> crate::dashboard::AppData {
+        let mut data = mk_data(sessions.iter().map(|s| mk_session(s)).collect(), vec![]);
+        data.groups = vec![(
+            "prod".to_string(),
+            crate::config::Group {
+                layout: "panes".to_string(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            },
+        )];
+        data
+    }
+
+    #[test]
+    fn group_preview_marks_hosts_with_sessions() {
+        // web1.example.com matches session "web1" via short-name; db1 has none.
+        let data = data_with_group(vec!["web1.example.com", "db1"], vec!["web1"]);
+        let text = lines_text(&preview_group(&data, "prod", &theme()));
+        assert!(text.contains("1 of 2 hosts have sessions"));
+        assert!(text.contains("● web1.example.com"));
+        assert!(text.contains("· db1"));
+    }
+
+    #[test]
+    fn host_preview_lists_sessions_and_their_agents() {
+        let mut data = mk_data(
+            vec![mk_session("web1")],
+            vec![mk_agent("web1:1.0", "web1", 100)],
+        );
+        data.hosts = vec![crate::dashboard::HostRow {
+            name: "web1.example.com".to_string(),
+            groups: vec!["prod".to_string()],
+            source: String::new(),
+        }];
+        let text = lines_text(&preview_host(&data, "web1.example.com", &theme()));
+        // "1m" is the session's activity_str — proves the session ROW
+        // rendered (the host header also contains "web1").
+        assert!(text.contains("1m"));
+        assert!(text.contains("web1:1.0"));
+        assert!(text.contains("prod"));
+    }
+
+    #[test]
+    fn host_preview_without_session_offers_to_create() {
+        let mut data = mk_data(vec![], vec![]);
+        data.hosts = vec![crate::dashboard::HostRow {
+            name: "db1".to_string(),
+            groups: vec![],
+            source: String::new(),
+        }];
+        let text = lines_text(&preview_host(&data, "db1", &theme()));
+        assert!(text.contains("no session for this host yet"));
     }
 
     #[test]
