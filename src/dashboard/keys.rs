@@ -7,9 +7,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{snooze, tmux};
 
-use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
+use super::dispatch::{
+    kill_agent, pull_pane, rename_agent_window, resolve_pane, return_pane, tad_window_id,
+    OpenTarget, ResolvedPane,
+};
 use super::format::short_name;
-use super::{App, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View};
+use super::{App, ConfirmKillTarget, InputMode, NewSessionField, PulledPane, TextInput, View};
 
 pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -201,6 +204,7 @@ pub(super) fn handle_new_session_key(app: &mut App, key: KeyEvent) {
 }
 
 pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    app.flash = None;
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Tab => app.view = app.view.next(),
@@ -252,6 +256,41 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 if let Some(t) = target {
                     app.open_after = Some(t);
                     app.should_quit = true;
+                }
+            }
+        }
+        KeyCode::Char('o') => {
+            let env = PullEnv {
+                inside_tmux: std::env::var_os("TMUX").is_some(),
+                tad_window_id: tad_window_id(),
+            };
+            // Resolve the selected row to stable ids first; the decision
+            // function never touches tmux itself.
+            let row = match (app.view, app.selected()) {
+                (View::Sessions, Some(name)) => resolve_pane(&tmux::exact_target(&name)),
+                (View::Agents, Some(target)) => resolve_pane(&tmux::exact_target(&target)),
+                _ => None,
+            };
+            match decide_pull(app.view, row.as_ref(), app.pulled_pane.as_ref(), &env) {
+                PullAction::None => {}
+                PullAction::Refuse(msg) => app.flash = Some(msg.to_string()),
+                PullAction::ReturnCurrent => {
+                    if let Some(p) = app.pulled_pane.take() {
+                        return_pane(&p);
+                    }
+                    app.refresh();
+                }
+                PullAction::Pull(r) => {
+                    let _ = execute_pull(app, r);
+                }
+                PullAction::SwapTo(r) => {
+                    if let Some(p) = app.pulled_pane.take() {
+                        return_pane(&p);
+                    }
+                    if !execute_pull(app, r) {
+                        app.flash =
+                            Some("swap failed — new pane vanished, original returned".to_string());
+                    }
                 }
             }
         }
@@ -383,6 +422,80 @@ pub(super) fn handle_confirm_kill_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Everything `decide_pull` needs about the environment, gathered by
+/// the caller so the decision stays pure.
+pub(super) struct PullEnv {
+    pub(super) inside_tmux: bool,
+    /// None = not in a regular pane (popup, or resolution failed).
+    pub(super) tad_window_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) enum PullAction {
+    None,
+    Refuse(&'static str),
+    ReturnCurrent,
+    Pull(ResolvedPane),
+    SwapTo(ResolvedPane),
+}
+
+/// What should `o` do? Pure — all tmux state arrives pre-resolved.
+fn decide_pull(
+    view: View,
+    row: Option<&ResolvedPane>,
+    pulled: Option<&PulledPane>,
+    env: &PullEnv,
+) -> PullAction {
+    if !env.inside_tmux {
+        return PullAction::Refuse("pull needs tad inside tmux");
+    }
+    let Some(tad_win) = env.tad_window_id.as_deref() else {
+        return PullAction::Refuse("pull doesn't work in the popup — run tad in a regular pane");
+    };
+    // Something's already out: `o` is primarily the way home, from any
+    // view. Selecting a different pullable row swaps instead.
+    if let Some(p) = pulled {
+        return match row {
+            Some(r) if r.pane_id != p.pane_id && r.window_id != tad_win => {
+                PullAction::SwapTo(r.clone())
+            }
+            _ => PullAction::ReturnCurrent,
+        };
+    }
+    match (view, row) {
+        (View::Sessions | View::Agents, Some(r)) => {
+            if r.window_id == tad_win {
+                PullAction::Refuse("that pane is already here")
+            } else {
+                PullAction::Pull(r.clone())
+            }
+        }
+        _ => PullAction::None,
+    }
+}
+
+/// Run the join and record the pulled state; flash on failure (the
+/// pane can vanish between resolution and join).
+/// Returns true if the join succeeded.
+fn execute_pull(app: &mut App, r: ResolvedPane) -> bool {
+    let label = format!("{}:{}", r.session, r.window_name);
+    if pull_pane(&r) {
+        app.pulled_pane = Some(PulledPane {
+            pane_id: r.pane_id,
+            origin_window_id: r.window_id,
+            origin_session: r.session,
+            origin_window_name: r.window_name,
+            origin_window_index: r.window_index,
+            label,
+        });
+        app.refresh();
+        true
+    } else {
+        app.flash = Some("pull failed — pane vanished?".to_string());
+        false
+    }
+}
+
 fn move_selection(app: &mut App, delta: i32) {
     let items = app.items();
     let len = items.len() as i32;
@@ -413,6 +526,138 @@ mod tests {
     use super::*;
     use crate::dashboard::testutil::{mk_agent, mk_app, mk_data, mk_session};
     use crate::dashboard::{ConfirmKillTarget, InputMode, View};
+
+    use super::super::dispatch::ResolvedPane;
+    use crate::dashboard::PulledPane;
+
+    fn rp(pane: &str, win: &str) -> ResolvedPane {
+        ResolvedPane {
+            pane_id: pane.into(),
+            window_id: win.into(),
+            session: "origin".into(),
+            window_name: "work".into(),
+            window_index: "1".into(),
+        }
+    }
+
+    fn pulled(pane: &str) -> PulledPane {
+        PulledPane {
+            pane_id: pane.into(),
+            origin_window_id: "@9".into(),
+            origin_session: "origin".into(),
+            origin_window_name: "work".into(),
+            origin_window_index: "1".into(),
+            label: "origin:work".into(),
+        }
+    }
+
+    fn env_ok() -> PullEnv {
+        PullEnv {
+            inside_tmux: true,
+            tad_window_id: Some("@1".into()),
+        }
+    }
+
+    #[test]
+    fn pull_refused_outside_tmux() {
+        let env = PullEnv {
+            inside_tmux: false,
+            tad_window_id: None,
+        };
+        assert!(matches!(
+            decide_pull(View::Sessions, Some(&rp("%5", "@2")), None, &env),
+            PullAction::Refuse(m) if m.contains("inside tmux")
+        ));
+    }
+
+    #[test]
+    fn pull_refused_in_popup() {
+        let env = PullEnv {
+            inside_tmux: true,
+            tad_window_id: None,
+        };
+        assert!(matches!(
+            decide_pull(View::Sessions, Some(&rp("%5", "@2")), None, &env),
+            PullAction::Refuse(m) if m.contains("popup")
+        ));
+    }
+
+    #[test]
+    fn pull_noop_on_groups_and_hosts() {
+        for view in [View::Groups, View::Hosts] {
+            assert!(matches!(
+                decide_pull(view, None, None, &env_ok()),
+                PullAction::None
+            ));
+        }
+    }
+
+    #[test]
+    fn pull_noop_without_selection() {
+        assert!(matches!(
+            decide_pull(View::Sessions, None, None, &env_ok()),
+            PullAction::None
+        ));
+    }
+
+    #[test]
+    fn pull_refused_when_pane_already_in_tads_window() {
+        // tad's window is @1; the row's pane lives in @1 too.
+        assert!(matches!(
+            decide_pull(View::Sessions, Some(&rp("%5", "@1")), None, &env_ok()),
+            PullAction::Refuse(m) if m.contains("already here")
+        ));
+    }
+
+    #[test]
+    fn pull_plain_pull_when_nothing_out() {
+        let row = rp("%5", "@2");
+        match decide_pull(View::Agents, Some(&row), None, &env_ok()) {
+            PullAction::Pull(r) => assert_eq!(r, row),
+            other => panic!("expected Pull, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_same_row_again_returns_it() {
+        assert!(matches!(
+            decide_pull(
+                View::Sessions,
+                Some(&rp("%5", "@2")),
+                Some(&pulled("%5")),
+                &env_ok()
+            ),
+            PullAction::ReturnCurrent
+        ));
+    }
+
+    #[test]
+    fn pull_different_row_swaps() {
+        let row = rp("%6", "@3");
+        match decide_pull(View::Agents, Some(&row), Some(&pulled("%5")), &env_ok()) {
+            PullAction::SwapTo(r) => assert_eq!(r, row),
+            other => panic!("expected SwapTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_returns_from_any_view_when_something_is_out() {
+        // `o` always offers the way home, even from Groups/Hosts.
+        for view in [View::Groups, View::Hosts] {
+            assert!(matches!(
+                decide_pull(view, None, Some(&pulled("%5")), &env_ok()),
+                PullAction::ReturnCurrent
+            ));
+        }
+    }
+
+    #[test]
+    fn flash_clears_on_next_keypress() {
+        let mut app = mk_app(View::Sessions, mk_data(vec![], vec![]));
+        app.flash = Some("pull needs tad inside tmux".into());
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(app.flash.is_none());
+    }
 
     #[test]
     fn d_on_sessions_arms_confirm_instead_of_killing() {
@@ -470,6 +715,22 @@ mod tests {
         assert!(!confirm_kill_accepts(KeyCode::Char('d')));
         assert!(!confirm_kill_accepts(KeyCode::Char(' ')));
         assert!(!confirm_kill_accepts(KeyCode::Down));
+    }
+
+    /// Something is out and the newly-selected row's pane is (somehow)
+    /// already in tad's window: can't pull it, so `o` falls back to
+    /// returning the current pane — safe, pinned here on purpose.
+    #[test]
+    fn pull_with_target_in_tads_window_returns_current() {
+        assert!(matches!(
+            decide_pull(
+                View::Sessions,
+                Some(&rp("%6", "@1")), // different pane, but in tad's window @1
+                Some(&pulled("%5")),
+                &env_ok()
+            ),
+            PullAction::ReturnCurrent
+        ));
     }
 
     #[test]

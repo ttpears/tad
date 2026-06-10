@@ -240,30 +240,53 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme.muted),
         )),
         InputMode::None => {
-            let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
-                vec![
-                    Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
-                    Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
-                ]
-            };
-            let mut spans = Vec::new();
-            spans.extend(bind("↑↓/jk", "nav"));
-            spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3/4", "jump"));
-            spans.extend(bind("↵", "open"));
-            spans.extend(bind("n", "new"));
-            if app.view == View::Sessions {
-                spans.extend(bind("d", "kill"));
+            // A transient flash (guard refusal) owns the whole line
+            // until the next keypress clears it.
+            if let Some(msg) = &app.flash {
+                Line::from(Span::styled(
+                    msg.clone(),
+                    Style::default().fg(theme.warning),
+                ))
+            } else {
+                let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
+                    vec![
+                        Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
+                        Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
+                    ]
+                };
+                let mut spans = Vec::new();
+                if let Some(p) = &app.pulled_pane {
+                    spans.push(Span::styled(
+                        format!("◀ {} pulled  ", p.label),
+                        Style::default()
+                            .fg(theme.accent_bold)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    spans.extend(bind("o", "return"));
+                }
+                spans.extend(bind("↑↓/jk", "nav"));
+                spans.extend(bind("⇥", "view"));
+                spans.extend(bind("1/2/3/4", "jump"));
+                spans.extend(bind("↵", "open"));
+                spans.extend(bind("n", "new"));
+                if app.pulled_pane.is_none()
+                    && (app.view == View::Sessions || app.view == View::Agents)
+                {
+                    spans.extend(bind("o", "pull"));
+                }
+                if app.view == View::Sessions {
+                    spans.extend(bind("d", "kill"));
+                }
+                if app.view == View::Agents {
+                    spans.extend(bind("d", "kill"));
+                    spans.extend(bind("R", "rename"));
+                    spans.extend(bind("s", "snooze"));
+                }
+                spans.extend(bind("/", "filter"));
+                spans.extend(bind("r", "refresh"));
+                spans.extend(bind("q", "quit"));
+                Line::from(spans)
             }
-            if app.view == View::Agents {
-                spans.extend(bind("d", "kill"));
-                spans.extend(bind("R", "rename"));
-                spans.extend(bind("s", "snooze"));
-            }
-            spans.extend(bind("/", "filter"));
-            spans.extend(bind("r", "refresh"));
-            spans.extend(bind("q", "quit"));
-            Line::from(spans)
         }
     };
     f.render_widget(Paragraph::new(line), area);

@@ -347,6 +347,20 @@ impl AppData {
     }
 }
 
+/// The one pane currently pulled beside tad, with everything needed to
+/// send it home. All ids are tmux's stable handles (`%pane`, `@window`),
+/// resolved at pull time so renames/shuffles can't misroute the return.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct PulledPane {
+    pub(super) pane_id: String,
+    pub(super) origin_window_id: String,
+    pub(super) origin_session: String,
+    pub(super) origin_window_name: String,
+    pub(super) origin_window_index: String,
+    /// Row label for the status line (`session:window`).
+    pub(super) label: String,
+}
+
 /// Victim captured when the user pressed `d`, so the ~1.5s background
 /// refresh can't swap what gets killed between arming and confirming.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -400,6 +414,11 @@ pub(super) struct App {
     pub(super) rename_agent_target: Option<String>,
     /// Victim of the pending confirm-kill modal (captured at arm time).
     pub(super) confirm_kill: Option<ConfirmKillTarget>,
+    /// Pane currently pulled beside tad, if any. See [`PulledPane`].
+    pub(super) pulled_pane: Option<PulledPane>,
+    /// Transient one-line status message (guard refusals). Cleared on
+    /// the next keypress.
+    pub(super) flash: Option<String>,
     /// Set when launched via `--select-agent`. The caller is scripting
     /// a "look at this one agent" flow, so after the user snoozes or
     /// otherwise resolves the row we exit so they return to wherever
@@ -461,6 +480,8 @@ impl App {
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
             confirm_kill: None,
+            pulled_pane: None,
+            flash: None,
             from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
@@ -805,6 +826,8 @@ pub(super) mod testutil {
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
             confirm_kill: None,
+            pulled_pane: None,
+            flash: None,
             from_popup: false,
             filter: TextInput::new(),
             input_mode: InputMode::None,
