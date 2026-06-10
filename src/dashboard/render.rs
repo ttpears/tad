@@ -84,9 +84,13 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
+    // The preview carries the live content (transcript tail, pane
+    // capture) so it gets the bigger share; the list's widest rows
+    // (Agents, ~66 cols) still fit at 40% of a wide terminal and clip
+    // gracefully on narrow ones.
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
     render_list(f, chunks[0], app);
     render_preview(f, chunks[1], app);

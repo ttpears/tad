@@ -1,3 +1,4 @@
+# tad-completions: v2  (checked by `tad doctor` — bump when this file changes)
 function _tad_complete() {
    local cur prev
    cur="${COMP_WORDS[COMP_CWORD]}"

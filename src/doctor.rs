@@ -363,44 +363,38 @@ fn check_snooze_count(r: &mut Report) {
     }
 }
 
+/// Version the shipped completion scripts declare (the `# tad-completions:
+/// vN` marker). Bump together with the marker lines in completions/ when
+/// either script changes, so `tad doctor` can flag stale installed copies —
+/// package upgrades replace them, but manual installs linger forever.
+const COMPLETIONS_VERSION: u32 = 2;
+
+/// Parse the `# tad-completions: vN` marker out of a completion script.
+/// None = unmarked, i.e. a pre-v0.14.1 copy.
+fn completion_file_version(text: &str) -> Option<u32> {
+    let idx = text.find("# tad-completions: v")?;
+    let rest = &text[idx + "# tad-completions: v".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 fn check_shell_completions(r: &mut Report) {
     let home = dirs::home_dir();
 
-    let bash_paths: Vec<std::path::PathBuf> = {
-        let mut v = vec![
-            std::path::PathBuf::from("/usr/share/bash-completion/completions/tad"),
-            std::path::PathBuf::from("/etc/bash_completion.d/tad"),
-        ];
-        if let Some(ref h) = home {
-            v.push(h.join(".local/share/bash-completion/completions/tad"));
-        }
-        v
-    };
+    let mut candidates: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/usr/share/bash-completion/completions/tad"),
+        std::path::PathBuf::from("/etc/bash_completion.d/tad"),
+        std::path::PathBuf::from("/usr/share/zsh/site-functions/_tad"),
+        std::path::PathBuf::from("/usr/local/share/zsh/site-functions/_tad"),
+    ];
+    if let Some(ref h) = home {
+        candidates.push(h.join(".local/share/bash-completion/completions/tad"));
+        candidates.push(h.join(".local/share/zsh/site-functions/_tad"));
+        candidates.push(h.join(".zsh/completions/_tad"));
+    }
 
-    let zsh_dirs: Vec<std::path::PathBuf> = {
-        let mut v = vec![
-            std::path::PathBuf::from("/usr/share/zsh/site-functions"),
-            std::path::PathBuf::from("/usr/local/share/zsh/site-functions"),
-        ];
-        if let Some(ref h) = home {
-            v.push(h.join(".zsh/completions"));
-        }
-        v
-    };
-
-    let bash_found = bash_paths.iter().any(|p| p.exists());
-    let zsh_found = zsh_dirs.iter().any(|dir| {
-        std::fs::read_dir(dir)
-            .ok()
-            .and_then(|mut entries| {
-                entries.find(|e| e.as_ref().map(|e| e.file_name() == "_tad").unwrap_or(false))
-            })
-            .is_some()
-    });
-
-    if bash_found || zsh_found {
-        r.add("shell completions", Verdict::Pass("found".into()));
-    } else {
+    let found: Vec<&std::path::PathBuf> = candidates.iter().filter(|p| p.is_file()).collect();
+    if found.is_empty() {
         r.add(
             "shell completions",
             Verdict::Warn {
@@ -410,6 +404,43 @@ fn check_shell_completions(r: &mut Report) {
                 fix: Some(
                     "copy completions/tad.bash to a bash-completion dir, or completions/_tad \
                      to a zsh site-functions dir"
+                        .into(),
+                ),
+            },
+        );
+        return;
+    }
+
+    // Stale = installed copy older than what this binary shipped with.
+    // Unmarked files predate the version marker entirely (≤ v0.14.0,
+    // which includes the zsh host-completion bug).
+    let stale: Vec<String> = found
+        .iter()
+        .filter(|p| {
+            let text = std::fs::read_to_string(p).unwrap_or_default();
+            completion_file_version(&text).unwrap_or(0) < COMPLETIONS_VERSION
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+
+    if stale.is_empty() {
+        r.add(
+            "shell completions",
+            Verdict::Pass(format!("found, current (v{COMPLETIONS_VERSION})")),
+        );
+    } else {
+        r.add(
+            "shell completions",
+            Verdict::Warn {
+                msg: format!(
+                    "outdated completion script(s): {} — package upgrades replace \
+                     these automatically, but manually-installed copies keep old \
+                     bugs (e.g. zsh host completion leaking the tab separator)",
+                    stale.join(", ")
+                ),
+                fix: Some(
+                    "replace with completions/_tad and completions/tad.bash from the \
+                     current release, then start a new shell"
                         .into(),
                 ),
             },
@@ -433,5 +464,39 @@ mod tests {
         assert_eq!(parse_tmux_version("nope"), None);
         assert_eq!(parse_tmux_version("tmux"), None);
         assert_eq!(parse_tmux_version("tmux master"), None);
+    }
+
+    #[test]
+    fn completion_version_parses_marker() {
+        assert_eq!(
+            completion_file_version("#compdef tad\n# tad-completions: v2  (notes)\n"),
+            Some(2)
+        );
+        assert_eq!(
+            completion_file_version("# tad-completions: v17\n"),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn completion_version_none_for_unmarked_legacy_files() {
+        assert_eq!(completion_file_version("#compdef tad\n_tad() { }\n"), None);
+        assert_eq!(completion_file_version("# tad-completions: vX\n"), None);
+    }
+
+    /// The scripts this repo ships must carry the version doctor expects —
+    /// fails when someone edits completions/ without bumping both the
+    /// marker and COMPLETIONS_VERSION.
+    #[test]
+    fn shipped_completion_scripts_match_expected_version() {
+        for f in ["completions/_tad", "completions/tad.bash"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                completion_file_version(&text),
+                Some(COMPLETIONS_VERSION),
+                "{f} marker out of sync with doctor::COMPLETIONS_VERSION"
+            );
+        }
     }
 }
