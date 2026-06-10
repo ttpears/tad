@@ -411,79 +411,8 @@ fn move_selection(app: &mut App, delta: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboard::{
-        App, AppData, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View,
-    };
-    use ratatui::widgets::ListState;
-
-    fn mk_agent(target: &str, session: &str, pid: u32) -> crate::agents::Agent {
-        crate::agents::Agent {
-            target: target.into(),
-            session: session.into(),
-            window_index: "0".into(),
-            window_name: "w".into(),
-            pane_index: "0".into(),
-            cwd: std::path::PathBuf::from("/repo"),
-            agent_pid: pid,
-            provider_id: "claude",
-            last_activity: Some(std::time::UNIX_EPOCH),
-            transcript_path: None,
-            attention: crate::transcript::Attention::Unknown,
-        }
-    }
-
-    fn mk_app(view: View, data: AppData) -> App {
-        let mut list = ListState::default();
-        list.select(Some(0));
-        App {
-            view,
-            data,
-            list_state_sessions: list.clone(),
-            list_state_groups: ListState::default(),
-            list_state_hosts: ListState::default(),
-            list_state_agents: list,
-            snooze_cursor: 0,
-            rename_agent_text: TextInput::new(),
-            rename_agent_target: None,
-            confirm_kill: None,
-            from_popup: false,
-            filter: TextInput::new(),
-            input_mode: InputMode::None,
-            new_session_name: TextInput::new(),
-            new_session_host: TextInput::new(),
-            new_session_field: NewSessionField::Name,
-            should_quit: false,
-            open_after: None,
-            theme: crate::theme::load(),
-        }
-    }
-
-    fn mk_data(
-        sessions: Vec<crate::sessions::Session>,
-        agents: Vec<crate::agents::Agent>,
-    ) -> AppData {
-        AppData {
-            sessions,
-            groups: vec![],
-            hosts: vec![],
-            agents,
-            snoozes: crate::snooze::SnoozeState::default(),
-            ui: crate::ui_config::UiConfig::default(),
-        }
-    }
-
-    fn mk_session(name: &str) -> crate::sessions::Session {
-        crate::sessions::Session {
-            name: name.into(),
-            windows: 1,
-            attached: false,
-            active_window: "w".into(),
-            active_path: "/repo".into(),
-            created_ts: 0,
-            activity_ts: 0,
-            activity_str: "1m".into(),
-        }
-    }
+    use crate::dashboard::testutil::{mk_agent, mk_app, mk_data, mk_session};
+    use crate::dashboard::{ConfirmKillTarget, InputMode, View};
 
     #[test]
     fn d_on_sessions_arms_confirm_instead_of_killing() {
@@ -501,7 +430,9 @@ mod tests {
     #[test]
     fn d_on_agents_arms_confirm_with_captured_pid() {
         // pid 0 so even a buggy confirm path could never signal anything.
-        let agents = vec![mk_agent("work:1.0", "work", 0)];
+        let mut a = mk_agent("work:1.0", "work", 0);
+        a.agent_pid = 0;
+        let agents = vec![a];
         let mut app = mk_app(View::Agents, mk_data(vec![], agents));
         // Index 0 is the session header; select the agent row.
         app.list_state_agents.select(Some(1));

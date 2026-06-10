@@ -695,13 +695,13 @@ fn app_loop<B: ratatui::backend::Backend>(
     }
 }
 
+/// Shared test fixtures for the dashboard tree's test modules
+/// (dashboard.rs, keys.rs, preview.rs). Compiled only for tests.
 #[cfg(test)]
-mod tests {
+pub(super) mod testutil {
     use super::*;
-    use crate::agents::Agent;
-    use std::path::PathBuf;
 
-    fn mk_agent(target: &str, session: &str, secs: u64) -> Agent {
+    pub(super) fn mk_agent(target: &str, session: &str, secs: u64) -> Agent {
         Agent {
             target: target.into(),
             session: session.into(),
@@ -711,15 +711,28 @@ mod tests {
             cwd: PathBuf::from("/repo"),
             agent_pid: 1,
             provider_id: "claude",
-            last_activity: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
+            last_activity: Some(std::time::UNIX_EPOCH + Duration::from_secs(secs)),
             transcript_path: None,
             attention: crate::transcript::Attention::Unknown,
         }
     }
 
-    fn mk_data(agents: Vec<Agent>) -> AppData {
+    pub(super) fn mk_session(name: &str) -> Session {
+        Session {
+            name: name.into(),
+            windows: 1,
+            attached: false,
+            active_window: "w".into(),
+            active_path: "/repo".into(),
+            created_ts: 0,
+            activity_ts: 0,
+            activity_str: "1m".into(),
+        }
+    }
+
+    pub(super) fn mk_data(sessions: Vec<Session>, agents: Vec<Agent>) -> AppData {
         AppData {
-            sessions: vec![],
+            sessions,
             groups: vec![],
             hosts: vec![],
             agents,
@@ -728,15 +741,50 @@ mod tests {
         }
     }
 
+    pub(super) fn mk_app(view: View, data: AppData) -> App {
+        let mut list = ListState::default();
+        list.select(Some(0));
+        App {
+            view,
+            data,
+            list_state_sessions: list.clone(),
+            list_state_groups: list.clone(),
+            list_state_hosts: ListState::default(),
+            list_state_agents: list,
+            snooze_cursor: 0,
+            rename_agent_text: TextInput::new(),
+            rename_agent_target: None,
+            confirm_kill: None,
+            from_popup: false,
+            filter: TextInput::new(),
+            input_mode: InputMode::None,
+            new_session_name: TextInput::new(),
+            new_session_host: TextInput::new(),
+            new_session_field: NewSessionField::Name,
+            should_quit: false,
+            open_after: None,
+            theme: crate::theme::load(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::{mk_agent, mk_data};
+    use super::*;
+
     #[test]
     fn grouped_items_emit_header_then_agents_per_session() {
         // cops has the most recent activity (300) so it sorts first;
         // salt's agents sort most-recent-first within the session.
-        let data = mk_data(vec![
-            mk_agent("salt:1.0", "salt", 100),
-            mk_agent("salt:2.0", "salt", 200),
-            mk_agent("cops:1.0", "cops", 300),
-        ]);
+        let data = mk_data(
+            vec![],
+            vec![
+                mk_agent("salt:1.0", "salt", 100),
+                mk_agent("salt:2.0", "salt", 200),
+                mk_agent("cops:1.0", "cops", 300),
+            ],
+        );
         let items = agent_items_grouped_by_session(&data);
         // header, agent, header, agent, agent
         assert_eq!(items.len(), 5);
@@ -756,14 +804,14 @@ mod tests {
     fn header_summary_includes_awaiting_count_when_nonzero() {
         let mut a = mk_agent("salt:1.0", "salt", 100);
         a.attention = crate::transcript::Attention::AwaitingInput;
-        let data = mk_data(vec![a]);
+        let data = mk_data(vec![], vec![a]);
         let items = agent_items_grouped_by_session(&data);
         assert!(items[0].contains("1 awaiting"));
     }
 
     #[test]
     fn snap_skips_a_header_at_the_initial_position() {
-        let data = mk_data(vec![mk_agent("salt:1.0", "salt", 100)]);
+        let data = mk_data(vec![], vec![mk_agent("salt:1.0", "salt", 100)]);
         let mut state = ListState::default();
         state.select(Some(0)); // would land on the header
         snap_agents_selection_to_data_row(&mut state, &data);
