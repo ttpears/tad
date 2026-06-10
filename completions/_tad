@@ -19,8 +19,19 @@ _tad() {
             detached) detached+=("$rest") ;;
          esac
       done < <(tad complete 2>/dev/null)
+      # `tad complete-hosts` emits `name<TAB>source-tag`; _describe wants
+      # `name:description`, so split on the tab and escape colons in the
+      # name (feeding raw lines made the tab part of the candidate word).
       local -a hosts
-      hosts=("${(@f)$(tad complete-hosts 2>/dev/null)}")
+      local hname hdesc
+      while IFS=$'\t' read -r hname hdesc; do
+         [[ -n $hname ]] || continue
+         if [[ -n $hdesc ]]; then
+            hosts+=("${hname//:/\\:}:${hdesc}")
+         else
+            hosts+=("${hname//:/\\:}")
+         fi
+      done < <(tad complete-hosts 2>/dev/null)
       _describe -t commands 'command' subs
       _describe -t attached 'attached session' attached
       _describe -t detached 'detached session' detached
