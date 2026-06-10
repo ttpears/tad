@@ -7,9 +7,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{snooze, tmux};
 
-use super::dispatch::{kill_agent, project_enter_target, rename_agent_window, OpenTarget};
+use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
 use super::format::short_name;
-use super::{App, InputMode, NewSessionField, TextInput, View};
+use super::{App, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View};
 
 pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -26,7 +26,6 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
                 let target = match app.view {
-                    View::Projects => project_enter_target(&app.data, &name),
                     View::Sessions => Some(OpenTarget::AttachExisting(name)),
                     View::Groups => Some(OpenTarget::Group(name)),
                     View::Hosts => Some(OpenTarget::Host(name)),
@@ -103,44 +102,6 @@ pub(super) fn handle_rename_agent_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if ctrl => app.rename_agent_text.home(),
         KeyCode::Char('e') if ctrl => app.rename_agent_text.end(),
         KeyCode::Char(c) if !ctrl => app.rename_agent_text.insert(c),
-        _ => {}
-    }
-}
-
-pub(super) fn handle_new_agent_key(app: &mut App, key: KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::None;
-            app.new_agent_prompt.clear();
-            app.new_agent_project = None;
-        }
-        KeyCode::Enter => {
-            if let Some(project) = app.new_agent_project.take() {
-                let prompt = app.new_agent_prompt.as_str().trim().to_string();
-                app.new_agent_prompt.clear();
-                app.open_after = Some(OpenTarget::SpawnAgent {
-                    project_name: project,
-                    prompt: if prompt.is_empty() {
-                        None
-                    } else {
-                        Some(prompt)
-                    },
-                });
-                app.input_mode = InputMode::None;
-                app.should_quit = true;
-            }
-        }
-        KeyCode::Backspace => app.new_agent_prompt.backspace(),
-        KeyCode::Delete => app.new_agent_prompt.delete(),
-        KeyCode::Left => app.new_agent_prompt.left(),
-        KeyCode::Right => app.new_agent_prompt.right(),
-        KeyCode::Home => app.new_agent_prompt.home(),
-        KeyCode::End => app.new_agent_prompt.end(),
-        KeyCode::Char('u') if ctrl => app.new_agent_prompt.clear(),
-        KeyCode::Char('a') if ctrl => app.new_agent_prompt.home(),
-        KeyCode::Char('e') if ctrl => app.new_agent_prompt.end(),
-        KeyCode::Char(c) if !ctrl => app.new_agent_prompt.insert(c),
         _ => {}
     }
 }
@@ -244,11 +205,10 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Tab => app.view = app.view.next(),
         KeyCode::BackTab => app.view = app.view.prev(),
-        KeyCode::Char('1') => app.view = View::Projects,
-        KeyCode::Char('2') => app.view = View::Sessions,
-        KeyCode::Char('3') => app.view = View::Groups,
-        KeyCode::Char('4') => app.view = View::Hosts,
-        KeyCode::Char('5') => app.view = View::Agents,
+        KeyCode::Char('1') => app.view = View::Sessions,
+        KeyCode::Char('2') => app.view = View::Groups,
+        KeyCode::Char('3') => app.view = View::Hosts,
+        KeyCode::Char('4') => app.view = View::Agents,
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
@@ -257,7 +217,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let items = app.items();
             if !items.is_empty() {
                 // First non-header (Agents view has interleaved
-                // project headers; other views never do).
+                // session headers; other views never do).
                 let first = items
                     .iter()
                     .position(|i| !super::is_agent_header(i))
@@ -270,7 +230,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if !items.is_empty() {
                 // Last non-header (Agents view: headers always
                 // precede their agents, so the last row is an agent
-                // unless the project list is pathological).
+                // unless the session list is pathological).
                 let last = items
                     .iter()
                     .enumerate()
@@ -284,7 +244,6 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
                 let target = match app.view {
-                    View::Projects => project_enter_target(&app.data, &name),
                     View::Sessions => Some(OpenTarget::AttachExisting(name)),
                     View::Groups => Some(OpenTarget::Group(name)),
                     View::Hosts => Some(OpenTarget::Host(name)),
@@ -297,7 +256,9 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('d') => {
-            // `d` semantics depend on view:
+            // Arm the confirm-kill modal — nothing dies until the user
+            // confirms with y/Enter. The victim is captured here so a
+            // background refresh can't change what gets killed.
             //   * Sessions → tmux kill-session (heavy: drops every pane
             //     in the session)
             //   * Agents   → SIGINT to the agent's claude PID (gentle:
@@ -305,13 +266,17 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             //     its shell so you can verify what happened)
             match (app.view, app.selected()) {
                 (View::Sessions, Some(name)) => {
-                    tmux::kill_session(&name);
-                    app.refresh();
+                    app.confirm_kill = Some(ConfirmKillTarget::Session { name });
+                    app.input_mode = InputMode::ConfirmKill;
                 }
                 (View::Agents, Some(target)) => {
                     if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
-                        let _ = kill_agent(agent.agent_pid);
-                        app.refresh();
+                        app.confirm_kill = Some(ConfirmKillTarget::Agent {
+                            target: target.clone(),
+                            pid: agent.agent_pid,
+                            window_name: agent.window_name.clone(),
+                        });
+                        app.input_mode = InputMode::ConfirmKill;
                     }
                 }
                 _ => {}
@@ -362,17 +327,10 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Char('n') => {
             // `n` semantics depend on which view you're in:
-            //   * Projects → spawn a new claude agent inside the selected
-            //     project (optional initial prompt modal)
-            //   * Hosts    → new tmux session prefilled with the host as
+            //   * Hosts  → new tmux session prefilled with the host as
             //     the SSH target
-            //   * others   → blank new tmux session
+            //   * others → blank new tmux session
             match (app.view, app.selected()) {
-                (View::Projects, Some(name)) => {
-                    app.new_agent_project = Some(name);
-                    app.new_agent_prompt = TextInput::new();
-                    app.input_mode = InputMode::NewAgent;
-                }
                 (View::Hosts, Some(h)) => {
                     app.new_session_name = TextInput::pristine(short_name(&h));
                     app.new_session_host = TextInput::pristine(h);
@@ -393,6 +351,38 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+/// True when `code` confirms the pending kill. Everything else —
+/// Esc, n, even a habitual second `d` — cancels. Default is No.
+fn confirm_kill_accepts(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+    )
+}
+
+pub(super) fn handle_confirm_kill_key(app: &mut App, key: KeyEvent) {
+    let target = app.confirm_kill.take();
+    app.input_mode = InputMode::None;
+    if !confirm_kill_accepts(key.code) {
+        return;
+    }
+    // The victim may have died on its own while the modal was open
+    // (session killed elsewhere, agent exited). Both kill paths are
+    // benign on a stale target: tmux errors are ignored and the
+    // SIGINT result is discarded, so confirming just refreshes.
+    match target {
+        Some(ConfirmKillTarget::Session { name }) => {
+            tmux::kill_session(&name);
+            app.refresh();
+        }
+        Some(ConfirmKillTarget::Agent { pid, .. }) => {
+            let _ = kill_agent(pid);
+            app.refresh();
+        }
+        None => {}
+    }
+}
+
 fn move_selection(app: &mut App, delta: i32) {
     let items = app.items();
     let len = items.len() as i32;
@@ -402,11 +392,11 @@ fn move_selection(app: &mut App, delta: i32) {
     let cur = app.list_state_mut().selected().unwrap_or(0) as i32;
     let mut next = (cur + delta).rem_euclid(len);
 
-    // The Agents view interleaves project-header rows (non-selectable
+    // The Agents view interleaves session-header rows (non-selectable
     // separators) with agent rows. Skip past any header we'd otherwise
     // land on, continuing in the same direction as `delta`. Wrap once;
     // if all rows are headers (shouldn't happen — we don't emit
-    // headers for empty projects) we leave the cursor put.
+    // headers for sessions with no agents) we leave the cursor put.
     if app.view == View::Agents {
         let step: i32 = if delta >= 0 { 1 } else { -1 };
         let mut hops = 0;
@@ -416,4 +406,153 @@ fn move_selection(app: &mut App, delta: i32) {
         }
     }
     app.list_state_mut().select(Some(next as usize));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dashboard::{
+        App, AppData, ConfirmKillTarget, InputMode, NewSessionField, TextInput, View,
+    };
+    use ratatui::widgets::ListState;
+
+    fn mk_agent(target: &str, session: &str, pid: u32) -> crate::agents::Agent {
+        crate::agents::Agent {
+            target: target.into(),
+            session: session.into(),
+            window_index: "0".into(),
+            window_name: "w".into(),
+            pane_index: "0".into(),
+            cwd: std::path::PathBuf::from("/repo"),
+            agent_pid: pid,
+            provider_id: "claude",
+            last_activity: Some(std::time::UNIX_EPOCH),
+            transcript_path: None,
+            attention: crate::transcript::Attention::Unknown,
+        }
+    }
+
+    fn mk_app(view: View, data: AppData) -> App {
+        let mut list = ListState::default();
+        list.select(Some(0));
+        App {
+            view,
+            data,
+            list_state_sessions: list.clone(),
+            list_state_groups: ListState::default(),
+            list_state_hosts: ListState::default(),
+            list_state_agents: list,
+            snooze_cursor: 0,
+            rename_agent_text: TextInput::new(),
+            rename_agent_target: None,
+            confirm_kill: None,
+            from_popup: false,
+            filter: TextInput::new(),
+            input_mode: InputMode::None,
+            new_session_name: TextInput::new(),
+            new_session_host: TextInput::new(),
+            new_session_field: NewSessionField::Name,
+            should_quit: false,
+            open_after: None,
+            theme: crate::theme::load(),
+        }
+    }
+
+    fn mk_data(
+        sessions: Vec<crate::sessions::Session>,
+        agents: Vec<crate::agents::Agent>,
+    ) -> AppData {
+        AppData {
+            sessions,
+            groups: vec![],
+            hosts: vec![],
+            agents,
+            snoozes: crate::snooze::SnoozeState::default(),
+            ui: crate::ui_config::UiConfig::default(),
+        }
+    }
+
+    fn mk_session(name: &str) -> crate::sessions::Session {
+        crate::sessions::Session {
+            name: name.into(),
+            windows: 1,
+            attached: false,
+            active_window: "w".into(),
+            active_path: "/repo".into(),
+            created_ts: 0,
+            activity_ts: 0,
+            activity_str: "1m".into(),
+        }
+    }
+
+    #[test]
+    fn d_on_sessions_arms_confirm_instead_of_killing() {
+        let mut app = mk_app(View::Sessions, mk_data(vec![mk_session("work")], vec![]));
+        handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::ConfirmKill);
+        assert_eq!(
+            app.confirm_kill,
+            Some(ConfirmKillTarget::Session {
+                name: "work".into()
+            })
+        );
+    }
+
+    #[test]
+    fn d_on_agents_arms_confirm_with_captured_pid() {
+        // pid 0 so even a buggy confirm path could never signal anything.
+        let agents = vec![mk_agent("work:1.0", "work", 0)];
+        let mut app = mk_app(View::Agents, mk_data(vec![], agents));
+        // Index 0 is the session header; select the agent row.
+        app.list_state_agents.select(Some(1));
+        handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::ConfirmKill);
+        assert_eq!(
+            app.confirm_kill,
+            Some(ConfirmKillTarget::Agent {
+                target: "work:1.0".into(),
+                pid: 0,
+                window_name: "w".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn d_on_groups_and_hosts_does_nothing() {
+        for view in [View::Groups, View::Hosts] {
+            let mut app = mk_app(view, mk_data(vec![mk_session("work")], vec![]));
+            handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+            assert_eq!(app.input_mode, InputMode::None);
+            assert!(app.confirm_kill.is_none());
+        }
+    }
+
+    #[test]
+    fn only_y_and_enter_confirm() {
+        assert!(confirm_kill_accepts(KeyCode::Char('y')));
+        assert!(confirm_kill_accepts(KeyCode::Char('Y')));
+        assert!(confirm_kill_accepts(KeyCode::Enter));
+        // Everything else cancels — including d itself (a habitual
+        // double-tap must not kill) and random keys.
+        assert!(!confirm_kill_accepts(KeyCode::Esc));
+        assert!(!confirm_kill_accepts(KeyCode::Char('n')));
+        assert!(!confirm_kill_accepts(KeyCode::Char('d')));
+        assert!(!confirm_kill_accepts(KeyCode::Char(' ')));
+        assert!(!confirm_kill_accepts(KeyCode::Down));
+    }
+
+    #[test]
+    fn cancel_clears_modal_without_side_effects() {
+        let mut app = mk_app(View::Sessions, mk_data(vec![mk_session("work")], vec![]));
+        app.input_mode = InputMode::ConfirmKill;
+        app.confirm_kill = Some(ConfirmKillTarget::Session {
+            name: "work".into(),
+        });
+        handle_confirm_kill_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.confirm_kill.is_none());
+        // The session list is untouched — cancel returned before any
+        // kill or refresh.
+        assert_eq!(app.data.sessions.len(), 1);
+    }
 }

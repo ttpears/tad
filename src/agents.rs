@@ -9,8 +9,8 @@
 //!
 //! Provider-agnostic by design — today there's exactly one provider
 //! (Claude Code), but everything that varies between agent tools
-//! (process name, transcript location, attention parsing, spawn
-//! command) lives behind the trait, not here.
+//! (process name, transcript location, attention parsing) lives
+//! behind the trait, not here.
 //!
 //! Linux-only: process-tree walking reads `/proc/<pid>/task/<tid>/children`.
 //! tad's release artifacts are Linux x86_64, so this is in line with
@@ -37,7 +37,7 @@ pub struct Agent {
     pub agent_pid: u32,
     /// Id of the [`Provider`] that matched this process (e.g.
     /// `"claude"`). Use [`crate::provider::by_id`] to look up the
-    /// provider impl for spawn / classify / transcript-path operations
+    /// provider impl for classify / transcript-path operations
     /// you want to do later — the registry may have changed between
     /// scan time and lookup, so handle `None`.
     pub provider_id: &'static str,
