@@ -1,4 +1,4 @@
-//! Modal overlays: new-session, snooze-picker, new-agent. Pure render
+//! Modal overlays: new-session, snooze-picker, rename-agent. Pure render
 //! functions over `&App` — the corresponding `handle_*_key` lives in
 //! `keys.rs` and they coordinate via `app.input_mode`.
 
@@ -81,68 +81,6 @@ pub(super) fn render_rename_agent_modal(f: &mut Frame, area: Rect, app: &App) {
         Line::from(""),
         Line::from(Span::styled(
             "  ↵ rename   Esc cancel   (renames the tmux window, not the session)",
-            Style::default().fg(theme.muted),
-        )),
-    ];
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, popup);
-}
-
-pub(super) fn render_new_agent_modal(f: &mut Frame, area: Rect, app: &App) {
-    let project = app.new_agent_project.clone().unwrap_or_default();
-    let width = 78.min(area.width.saturating_sub(4));
-    let height = 7;
-    let popup = centered_rect(width, height, area);
-    f.render_widget(Clear, popup);
-    let theme = app.theme;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
-        .title(Span::styled(
-            format!(" new agent in {project} "),
-            Style::default()
-                .fg(theme.accent_bold)
-                .add_modifier(Modifier::BOLD),
-        ));
-    // Render the prompt as a single field. Empty = "just spawn claude
-    // with no prompt"; non-empty = "spawn claude with this as the
-    // initial message."
-    let value = app.new_agent_prompt.as_str();
-    let cur = app.new_agent_prompt.cursor.min(value.len());
-    let (pre, post) = value.split_at(cur);
-    let mut field_spans = vec![Span::styled(
-        format!("  {:<8}", "prompt:"),
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if value.is_empty() {
-        field_spans.push(Span::styled(
-            "(empty — just spawn claude)".to_string(),
-            Style::default().fg(theme.muted),
-        ));
-        field_spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-    } else if post.is_empty() {
-        field_spans.push(Span::styled(pre.to_string(), Style::default().fg(theme.fg)));
-        field_spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-    } else {
-        let mut chars = post.chars();
-        let cursor_char = chars.next().unwrap_or(' ');
-        let after: String = chars.collect();
-        field_spans.push(Span::styled(pre.to_string(), Style::default().fg(theme.fg)));
-        field_spans.push(Span::styled(
-            cursor_char.to_string(),
-            Style::default().bg(theme.accent).fg(theme.fg),
-        ));
-        field_spans.push(Span::styled(after, Style::default().fg(theme.fg)));
-    }
-    let lines = vec![
-        Line::from(""),
-        Line::from(field_spans),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ↵ spawn   Esc cancel   (claude opens in a new window in the project's root)"
-                .to_string(),
             Style::default().fg(theme.muted),
         )),
     ];

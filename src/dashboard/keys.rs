@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{snooze, tmux};
 
-use super::dispatch::{kill_agent, project_enter_target, rename_agent_window, OpenTarget};
+use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
 use super::format::short_name;
 use super::{App, InputMode, NewSessionField, TextInput, View};
 
@@ -26,7 +26,6 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
                 let target = match app.view {
-                    View::Projects => project_enter_target(&app.data, &name),
                     View::Sessions => Some(OpenTarget::AttachExisting(name)),
                     View::Groups => Some(OpenTarget::Group(name)),
                     View::Hosts => Some(OpenTarget::Host(name)),
@@ -103,44 +102,6 @@ pub(super) fn handle_rename_agent_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('a') if ctrl => app.rename_agent_text.home(),
         KeyCode::Char('e') if ctrl => app.rename_agent_text.end(),
         KeyCode::Char(c) if !ctrl => app.rename_agent_text.insert(c),
-        _ => {}
-    }
-}
-
-pub(super) fn handle_new_agent_key(app: &mut App, key: KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::None;
-            app.new_agent_prompt.clear();
-            app.new_agent_project = None;
-        }
-        KeyCode::Enter => {
-            if let Some(project) = app.new_agent_project.take() {
-                let prompt = app.new_agent_prompt.as_str().trim().to_string();
-                app.new_agent_prompt.clear();
-                app.open_after = Some(OpenTarget::SpawnAgent {
-                    project_name: project,
-                    prompt: if prompt.is_empty() {
-                        None
-                    } else {
-                        Some(prompt)
-                    },
-                });
-                app.input_mode = InputMode::None;
-                app.should_quit = true;
-            }
-        }
-        KeyCode::Backspace => app.new_agent_prompt.backspace(),
-        KeyCode::Delete => app.new_agent_prompt.delete(),
-        KeyCode::Left => app.new_agent_prompt.left(),
-        KeyCode::Right => app.new_agent_prompt.right(),
-        KeyCode::Home => app.new_agent_prompt.home(),
-        KeyCode::End => app.new_agent_prompt.end(),
-        KeyCode::Char('u') if ctrl => app.new_agent_prompt.clear(),
-        KeyCode::Char('a') if ctrl => app.new_agent_prompt.home(),
-        KeyCode::Char('e') if ctrl => app.new_agent_prompt.end(),
-        KeyCode::Char(c) if !ctrl => app.new_agent_prompt.insert(c),
         _ => {}
     }
 }
@@ -244,11 +205,10 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Tab => app.view = app.view.next(),
         KeyCode::BackTab => app.view = app.view.prev(),
-        KeyCode::Char('1') => app.view = View::Projects,
-        KeyCode::Char('2') => app.view = View::Sessions,
-        KeyCode::Char('3') => app.view = View::Groups,
-        KeyCode::Char('4') => app.view = View::Hosts,
-        KeyCode::Char('5') => app.view = View::Agents,
+        KeyCode::Char('1') => app.view = View::Sessions,
+        KeyCode::Char('2') => app.view = View::Groups,
+        KeyCode::Char('3') => app.view = View::Hosts,
+        KeyCode::Char('4') => app.view = View::Agents,
         KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
         KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
@@ -257,7 +217,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let items = app.items();
             if !items.is_empty() {
                 // First non-header (Agents view has interleaved
-                // project headers; other views never do).
+                // session headers; other views never do).
                 let first = items
                     .iter()
                     .position(|i| !super::is_agent_header(i))
@@ -270,7 +230,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if !items.is_empty() {
                 // Last non-header (Agents view: headers always
                 // precede their agents, so the last row is an agent
-                // unless the project list is pathological).
+                // unless the session list is pathological).
                 let last = items
                     .iter()
                     .enumerate()
@@ -284,7 +244,6 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter => {
             if let Some(name) = app.selected() {
                 let target = match app.view {
-                    View::Projects => project_enter_target(&app.data, &name),
                     View::Sessions => Some(OpenTarget::AttachExisting(name)),
                     View::Groups => Some(OpenTarget::Group(name)),
                     View::Hosts => Some(OpenTarget::Host(name)),
@@ -362,17 +321,10 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Char('n') => {
             // `n` semantics depend on which view you're in:
-            //   * Projects → spawn a new claude agent inside the selected
-            //     project (optional initial prompt modal)
-            //   * Hosts    → new tmux session prefilled with the host as
+            //   * Hosts  → new tmux session prefilled with the host as
             //     the SSH target
-            //   * others   → blank new tmux session
+            //   * others → blank new tmux session
             match (app.view, app.selected()) {
-                (View::Projects, Some(name)) => {
-                    app.new_agent_project = Some(name);
-                    app.new_agent_prompt = TextInput::new();
-                    app.input_mode = InputMode::NewAgent;
-                }
                 (View::Hosts, Some(h)) => {
                     app.new_session_name = TextInput::pristine(short_name(&h));
                     app.new_session_host = TextInput::pristine(h);
@@ -402,11 +354,11 @@ fn move_selection(app: &mut App, delta: i32) {
     let cur = app.list_state_mut().selected().unwrap_or(0) as i32;
     let mut next = (cur + delta).rem_euclid(len);
 
-    // The Agents view interleaves project-header rows (non-selectable
+    // The Agents view interleaves session-header rows (non-selectable
     // separators) with agent rows. Skip past any header we'd otherwise
     // land on, continuing in the same direction as `delta`. Wrap once;
     // if all rows are headers (shouldn't happen — we don't emit
-    // headers for empty projects) we leave the cursor put.
+    // headers for sessions with no agents) we leave the cursor put.
     if app.view == View::Agents {
         let step: i32 = if delta >= 0 { 1 } else { -1 };
         let mut hops = 0;

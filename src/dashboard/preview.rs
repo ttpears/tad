@@ -8,108 +8,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::agents;
-use crate::projects;
 use crate::snooze;
 use crate::theme::Theme;
 use crate::tmux;
-use crate::transcript;
 
 use super::format::{cwd_for_display, truncate};
 use super::AppData;
-
-pub(super) fn preview_project(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(p) = data.projects.iter().find(|pr| pr.name == name) else {
-        return vec![Line::from(Span::styled(
-            "project gone — refresh",
-            Style::default().fg(theme.muted),
-        ))];
-    };
-    let kv = |k: &str, v: String| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
-            Span::styled(v, Style::default().fg(theme.fg)),
-        ])
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("project: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                name.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        kv("root", p.root.display().to_string()),
-    ];
-    // Branch + dirty count: lazy subprocess, fine for the preview pane.
-    if let Some(status) = projects::git_status(&p.root) {
-        let dirty = if status.dirty == 0 {
-            "clean".to_string()
-        } else {
-            format!("{} dirty", status.dirty)
-        };
-        lines.push(kv("branch", format!("{} · {}", status.branch, dirty)));
-    }
-    if !p.sessions.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("sessions ({})", p.sessions.len()),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for s in &p.sessions {
-            let marker = if s.attached { "● " } else { "  " };
-            let marker_style = if s.attached {
-                Style::default().fg(theme.success)
-            } else {
-                Style::default().fg(theme.muted)
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(marker, marker_style),
-                Span::styled(s.name.clone(), Style::default().fg(theme.fg)),
-                Span::raw("  "),
-                Span::styled(s.activity_str.clone(), Style::default().fg(theme.muted)),
-            ]));
-        }
-    }
-    if !p.agents.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("agents ({})", p.agents.len()),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for a in &p.agents {
-            let (marker, marker_style) = match a.attention {
-                transcript::Attention::AwaitingInput => (
-                    "! ",
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                transcript::Attention::Working => ("● ", Style::default().fg(theme.success)),
-                transcript::Attention::Away => ("· ", Style::default().fg(theme.muted)),
-                transcript::Attention::Unknown => ("· ", Style::default().fg(theme.muted)),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(marker, marker_style),
-                Span::styled(a.target.clone(), Style::default().fg(theme.fg)),
-            ]));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↵ attach to most-recent session  (or jump to most-recent agent pane)",
-        Style::default().fg(theme.muted),
-    )));
-    lines
-}
 
 pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<Line<'static>> {
     // Per-pane breakdown so the preview shows what's actually running where,

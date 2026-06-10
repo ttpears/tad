@@ -10,7 +10,7 @@
 //!   * `render`   — `ui()` + tabs / main / status composition
 //!   * `format`   — per-view row formatters + cwd/truncate helpers
 //!   * `preview`  — per-view preview-pane builders
-//!   * `modal`    — new-session / snooze / new-agent overlays
+//!   * `modal`    — new-session / snooze / rename / confirm-kill overlays
 //!   * `dispatch` — `OpenTarget` + post-dashboard tmux side effects
 //!
 //! Submodule items are `pub(super)` — visible across the dashboard
@@ -37,7 +37,6 @@ use std::time::{Duration, Instant};
 use crate::{
     agents::{self, Agent},
     config, groups,
-    projects::{self, Project},
     sessions::{self, Session},
     theme::{self, Theme},
 };
@@ -159,7 +158,6 @@ impl TextInput {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum View {
-    Projects,
     Sessions,
     Groups,
     Hosts,
@@ -169,17 +167,15 @@ pub(super) enum View {
 impl View {
     pub(super) fn next(self) -> Self {
         match self {
-            View::Projects => View::Sessions,
             View::Sessions => View::Groups,
             View::Groups => View::Hosts,
             View::Hosts => View::Agents,
-            View::Agents => View::Projects,
+            View::Agents => View::Sessions,
         }
     }
     pub(super) fn prev(self) -> Self {
         match self {
-            View::Projects => View::Agents,
-            View::Sessions => View::Projects,
+            View::Sessions => View::Agents,
             View::Groups => View::Sessions,
             View::Hosts => View::Groups,
             View::Agents => View::Hosts,
@@ -187,7 +183,6 @@ impl View {
     }
     pub(super) fn title(self) -> &'static str {
         match self {
-            View::Projects => "Projects",
             View::Sessions => "Sessions",
             View::Groups => "Groups",
             View::Hosts => "Hosts",
@@ -196,25 +191,25 @@ impl View {
     }
     pub(super) fn index(self) -> usize {
         match self {
-            View::Projects => 0,
-            View::Sessions => 1,
-            View::Groups => 2,
-            View::Hosts => 3,
-            View::Agents => 4,
+            View::Sessions => 0,
+            View::Groups => 1,
+            View::Hosts => 2,
+            View::Agents => 3,
         }
     }
     pub(super) fn slug(self) -> &'static str {
         match self {
-            View::Projects => "projects",
             View::Sessions => "sessions",
             View::Groups => "groups",
             View::Hosts => "hosts",
             View::Agents => "agents",
         }
     }
+    /// Unrecognized slugs — including the legacy `"projects"` persisted
+    /// by pre-removal versions — return None; the caller falls back to
+    /// Sessions so an old state file can't strand the user.
     pub(super) fn from_slug(s: &str) -> Option<Self> {
         match s.trim() {
-            "projects" => Some(View::Projects),
             "sessions" => Some(View::Sessions),
             "groups" => Some(View::Groups),
             "hosts" => Some(View::Hosts),
@@ -245,9 +240,6 @@ pub(super) struct AppData {
     pub(super) hosts: Vec<HostRow>,
     /// Claude Code agents discovered across tmux panes.
     pub(super) agents: Vec<Agent>,
-    /// Project (typically git repo) frame around everything else.
-    /// Derived from session/agent cwds — the primary noun.
-    pub(super) projects: Vec<Project>,
     /// Snooze map loaded once per refresh (~1.5s) so the per-row
     /// formatters don't each re-open the snooze file. Cheap to load
     /// (one small YAML), but multiplied by every visible Agents row
@@ -328,10 +320,6 @@ impl AppData {
         let discovered = crate::discovery::discover(&crate::discovery::DiscoveryConfig::load());
         let hosts = build_host_rows(discovered, hosts_map);
         let agents = agents::scan();
-        // Projects are a pure aggregation over the same sessions+agents
-        // — pass the slices in so we don't re-run the tmux subprocess
-        // and /proc walk a second time per refresh.
-        let project_list = projects::from_scanned(&sessions, &agents);
         let snoozes = crate::snooze::load(std::time::SystemTime::now());
         let ui = crate::ui_config::load();
         Self {
@@ -339,7 +327,6 @@ impl AppData {
             groups,
             hosts,
             agents,
-            projects: project_list,
             snoozes,
             ui,
         }
@@ -352,10 +339,6 @@ pub(super) enum InputMode {
     Filter,
     NewSession,
     SnoozeSelect,
-    /// `n` on a Projects row: one-field modal collecting an optional
-    /// initial prompt, then spawning `claude` in a new tmux window in
-    /// the project's root.
-    NewAgent,
     /// `R` on an Agents row: one-field modal prefilled with the
     /// agent's current window name. Enter renames the window in place
     /// (no dashboard exit; the next refresh shows the new name).
@@ -371,23 +354,16 @@ pub(super) enum NewSessionField {
 pub(super) struct App {
     pub(super) view: View,
     pub(super) data: AppData,
-    pub(super) list_state_projects: ListState,
     pub(super) list_state_sessions: ListState,
     pub(super) list_state_groups: ListState,
     pub(super) list_state_hosts: ListState,
     pub(super) list_state_agents: ListState,
     /// Cursor over `data.ui.snooze_intervals` in the snooze modal.
     pub(super) snooze_cursor: usize,
-    /// Initial prompt text input for the new-agent modal. Optional —
-    /// empty just spawns `claude` with no preset prompt.
-    pub(super) new_agent_prompt: TextInput,
-    /// Project the new-agent modal is targeting (captured when the
-    /// modal opens, so a mid-modal refresh doesn't drift the target).
-    pub(super) new_agent_project: Option<String>,
     /// New window name being typed in the rename-agent modal.
     pub(super) rename_agent_text: TextInput,
     /// `session:window.pane` of the agent being renamed (captured at
-    /// modal-open time for the same reason as `new_agent_project`).
+    /// modal-open time so a mid-modal refresh doesn't drift the target).
     pub(super) rename_agent_target: Option<String>,
     /// Set when launched via `--select-agent`. The caller is scripting
     /// a "look at this one agent" flow, so after the user snoozes or
@@ -432,26 +408,16 @@ impl App {
         // row so the first thing the user sees highlighted is an
         // actual agent, not a synthetic separator.
         snap_agents_selection_to_data_row(&mut a, &data);
-        let mut p = ListState::default();
-        p.select(if data.projects.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
         App {
-            // Default to Projects — the user-facing primary noun for
-            // the cockpit. Old `dashboard.state` still wins when present
-            // so power users who lived on Sessions stay there.
-            view: load_last_view().unwrap_or(View::Projects),
+            // Default to Sessions. Old `dashboard.state` still wins when
+            // present; a legacy "projects" value falls back here too.
+            view: load_last_view().unwrap_or(View::Sessions),
             data,
-            list_state_projects: p,
             list_state_sessions: s,
             list_state_groups: g,
             list_state_hosts: h,
             list_state_agents: a,
             snooze_cursor: 0,
-            new_agent_prompt: TextInput::new(),
-            new_agent_project: None,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
             from_popup: false,
@@ -468,7 +434,6 @@ impl App {
 
     pub(super) fn list_state_mut(&mut self) -> &mut ListState {
         match self.view {
-            View::Projects => &mut self.list_state_projects,
             View::Sessions => &mut self.list_state_sessions,
             View::Groups => &mut self.list_state_groups,
             View::Hosts => &mut self.list_state_hosts,
@@ -477,12 +442,7 @@ impl App {
     }
 
     pub(super) fn items(&self) -> Vec<String> {
-        // Projects are keyed by their `name` (basename of root); when
-        // two roots collide on name the latter shadows the former in
-        // the list, which is acceptable for a v1 (caller can rename
-        // its directory or we can disambiguate with the parent later).
         let iter: Box<dyn Iterator<Item = String>> = match self.view {
-            View::Projects => Box::new(self.data.projects.iter().map(|p| p.name.clone())),
             View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
             View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
             View::Hosts => Box::new(self.data.hosts.iter().map(|r| r.name.clone())),
@@ -498,7 +458,6 @@ impl App {
 
     pub(super) fn selected(&self) -> Option<String> {
         let state = match self.view {
-            View::Projects => &self.list_state_projects,
             View::Sessions => &self.list_state_sessions,
             View::Groups => &self.list_state_groups,
             View::Hosts => &self.list_state_hosts,
@@ -525,7 +484,6 @@ impl App {
         // to land on a non-header row.
         let agents_view_len = agent_items_grouped_by_session(&self.data).len();
         for (state, len) in [
-            (&mut self.list_state_projects, self.data.projects.len()),
             (&mut self.list_state_sessions, self.data.sessions.len()),
             (&mut self.list_state_groups, self.data.groups.len()),
             (&mut self.list_state_hosts, self.data.hosts.len()),
@@ -658,10 +616,6 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
         Some(OpenTarget::Group(name)) => groups::open(&name, None),
         Some(OpenTarget::Host(name)) => sessions::attach_or_create_remote(&name),
         Some(OpenTarget::JumpToPane(target)) => dispatch::jump_to_pane(&target),
-        Some(OpenTarget::SpawnAgent {
-            project_name,
-            prompt,
-        }) => dispatch::spawn_agent_in_project(&project_name, prompt.as_deref()),
         None => Ok(1),
     }
 }
@@ -680,14 +634,6 @@ fn app_loop<B: ratatui::backend::Backend>(
         app.from_popup = true;
         if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
             app.list_state_agents.select(Some(idx));
-        }
-    } else if app.view == View::Projects {
-        // Cwd-aware preselection: if the user launched tad from inside a
-        // known project, drop them on that project's row. Turns the
-        // dashboard from "browser of all projects" into "default to where
-        // I already am, browse when I want."
-        if let Some(idx) = dispatch::current_project_index(&app.data.projects) {
-            app.list_state_projects.select(Some(idx));
         }
     }
     let mut last_view = app.view;
@@ -710,7 +656,6 @@ fn app_loop<B: ratatui::backend::Backend>(
                 match app.input_mode {
                     InputMode::Filter => keys::handle_filter_key(&mut app, key),
                     InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
-                    InputMode::NewAgent => keys::handle_new_agent_key(&mut app, key),
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
@@ -755,7 +700,6 @@ mod tests {
             groups: vec![],
             hosts: vec![],
             agents,
-            projects: vec![],
             snoozes: crate::snooze::SnoozeState::default(),
             ui: crate::ui_config::UiConfig::default(),
         }
@@ -825,6 +769,14 @@ mod tests {
             .collect();
         assert_eq!(web1.len(), 1);
         assert_eq!(web1[0].groups, vec!["prod".to_string()]);
+    }
+
+    #[test]
+    fn legacy_projects_slug_is_not_a_view() {
+        // Pre-removal builds persisted "projects" in dashboard.state;
+        // from_slug must reject it so App::new falls back to Sessions.
+        assert!(View::from_slug("projects").is_none());
+        assert!(matches!(View::from_slug("sessions"), Some(View::Sessions)));
     }
 
     #[test]

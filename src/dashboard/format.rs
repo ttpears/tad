@@ -13,59 +13,6 @@ use crate::transcript;
 
 use super::AppData;
 
-pub(super) fn format_project_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
-    let Some(p) = data.projects.iter().find(|p| p.name == name) else {
-        return Line::from(name.to_string());
-    };
-    let awaiting = p
-        .agents
-        .iter()
-        .filter(|a| a.attention == transcript::Attention::AwaitingInput)
-        .count();
-    let working = p
-        .agents
-        .iter()
-        .filter(|a| a.attention == transcript::Attention::Working)
-        .count();
-    let activity = p
-        .last_activity
-        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-        .map(|d| format!(" · {}", agents::format_elapsed(d)))
-        .unwrap_or_default();
-    let mut spans = vec![
-        Span::styled(
-            format!("{:<28}", truncate(name, 28)),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{:>2} sess  ", p.sessions.len()),
-            Style::default().fg(theme.muted),
-        ),
-        Span::styled(
-            format!("{:>2} agt  ", p.agents.len()),
-            Style::default().fg(theme.muted),
-        ),
-    ];
-    if awaiting > 0 {
-        spans.push(Span::styled(
-            format!("{awaiting} waiting  "),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
-    } else if working > 0 {
-        spans.push(Span::styled(
-            format!("{working} working  "),
-            Style::default().fg(theme.success),
-        ));
-    }
-    spans.push(Span::styled(activity, Style::default().fg(theme.muted)));
-    Line::from(spans)
-}
-
 pub(super) fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     let s = match data.sessions.iter().find(|s| s.name == name) {
         Some(s) => s,
@@ -139,8 +86,8 @@ pub(super) fn format_host_line(data: &AppData, name: &str, theme: &Theme) -> Lin
 }
 
 pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
-    // Project-header rows (emitted by the Agents view's grouped items
-    // list) are visually distinct dividers — bold project name in the
+    // Session-header rows (emitted by the Agents view's grouped items
+    // list) are visually distinct dividers — bold session name in the
     // accent colour, with the inline count summary. The sigil isn't
     // shown; it's just an in-band marker for `is_agent_header`.
     if let Some(rest) = target.strip_prefix(super::AGENT_HEADER_SIGIL) {
@@ -258,7 +205,7 @@ pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> 
 
     let mut spans = vec![
         // Two-space indent so agent rows visually nest under their
-        // project-group header in the Agents view.
+        // session header in the Agents view.
         Span::raw("  "),
         Span::styled(marker_text, marker_style),
         Span::styled(

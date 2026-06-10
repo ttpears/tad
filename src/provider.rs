@@ -1,5 +1,5 @@
-//! Provider abstraction over "AI coding agents tad knows how to find,
-//! classify, and spawn." Today there's exactly one implementation
+//! Provider abstraction over "AI coding agents tad knows how to find
+//! and classify." Today there's exactly one implementation
 //! ([`ClaudeProvider`]) — the trait exists so that adding aider /
 //! codex / opencode / whatever someone uses next is a single new file
 //! plus an entry in [`providers()`], not a grep-and-replace across
@@ -12,7 +12,6 @@
 //!   * where its session state lives (`latest_transcript`)
 //!   * how to read "is this agent waiting for me?" from that state
 //!     (`classify_attention`)
-//!   * how to launch a fresh one (`spawn_command`)
 //!
 //! The *decoupled* parts — process-tree walking, tmux pane scanning,
 //! the watcher state machine, snooze handling, the Agents view —
@@ -50,11 +49,6 @@ pub(crate) trait Provider: Send + Sync {
     /// the steady-state cost is one `stat`.
     fn classify_attention(&self, transcript: &Path) -> Attention;
 
-    /// Shell command to spawn a fresh agent, optionally with an
-    /// initial prompt. Returned as a single string suitable for `tmux
-    /// new-window <cmd>` (which feeds it to `sh -c`). Prompts must be
-    /// shell-quoted by the provider; the caller passes the raw text.
-    fn spawn_command(&self, prompt: Option<&str>) -> String;
 }
 
 // ---- Claude Code provider ----
@@ -102,13 +96,6 @@ impl Provider for ClaudeProvider {
     fn classify_attention(&self, transcript: &Path) -> Attention {
         crate::transcript::classify_file(transcript)
     }
-
-    fn spawn_command(&self, prompt: Option<&str>) -> String {
-        match prompt {
-            Some(t) if !t.trim().is_empty() => format!("claude {}", crate::shell::quote(t)),
-            _ => "claude".to_string(),
-        }
-    }
 }
 
 /// Claude Code stores transcripts under `~/.claude/projects/<encoded-cwd>/`
@@ -133,9 +120,9 @@ pub(crate) fn providers() -> &'static [&'static dyn Provider] {
     SLICE
 }
 
-/// The provider used by `tad agent` spawn when the user hasn't picked
-/// one. Today there's only one; future versions may read this from
-/// `ui.default_provider` in config.yaml.
+/// Fallback provider when an agent's `provider_id` can't be matched
+/// against the registry (e.g. the id is absent or unknown). Today
+/// there's only one provider so this is always `ClaudeProvider`.
 pub(crate) fn default_provider() -> &'static dyn Provider {
     &CLAUDE_PROVIDER
 }
@@ -178,14 +165,4 @@ mod tests {
         assert!(s.contains("/.claude/projects/-home-me-git-tad-github"));
     }
 
-    #[test]
-    fn claude_spawn_command_quotes_prompt() {
-        let p = ClaudeProvider;
-        assert_eq!(p.spawn_command(None), "claude");
-        assert_eq!(p.spawn_command(Some("")), "claude");
-        assert_eq!(p.spawn_command(Some("   ")), "claude");
-        assert_eq!(p.spawn_command(Some("hello world")), "claude 'hello world'");
-        // Single-quote-in-prompt path goes through shell::quote.
-        assert_eq!(p.spawn_command(Some("it's me")), "claude 'it'\\''s me'");
-    }
 }

@@ -11,16 +11,10 @@ use ratatui::Frame;
 use crate::agents;
 
 use super::format::{
-    format_agent_line, format_group_line, format_host_line, format_project_line,
-    format_session_line,
+    format_agent_line, format_group_line, format_host_line, format_session_line,
 };
-use super::modal::{
-    render_new_agent_modal, render_new_session_modal, render_rename_agent_modal,
-    render_snooze_modal,
-};
-use super::preview::{
-    preview_agent, preview_group, preview_host, preview_project, preview_session,
-};
+use super::modal::{render_new_session_modal, render_rename_agent_modal, render_snooze_modal};
+use super::preview::{preview_agent, preview_group, preview_host, preview_session};
 use super::{App, InputMode, View};
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
@@ -44,22 +38,13 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     if app.input_mode == InputMode::SnoozeSelect {
         render_snooze_modal(f, area, app);
     }
-    if app.input_mode == InputMode::NewAgent {
-        render_new_agent_modal(f, area, app);
-    }
     if app.input_mode == InputMode::RenameAgent {
         render_rename_agent_modal(f, area, app);
     }
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    // Projects + Agents tabs are annotated with live counts so you can
-    // see the cockpit's state from any view without switching.
-    let projects_title = if app.data.projects.is_empty() {
-        "Projects".to_string()
-    } else {
-        format!("Projects ({})", app.data.projects.len())
-    };
+    // The Agents tab is annotated with a live count so you can see the cockpit's state from any view.
     let agents_title = if app.data.agents.is_empty() {
         "Agents".to_string()
     } else {
@@ -73,7 +58,6 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     let titles: Vec<Line> = vec![
-        Line::from(projects_title),
         Line::from(View::Sessions.title()),
         Line::from(View::Groups.title()),
         Line::from(View::Hosts.title()),
@@ -112,7 +96,6 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|name| {
             let line = match app.view {
-                View::Projects => format_project_line(&app.data, name, theme),
                 View::Sessions => format_session_line(&app.data, name, theme),
                 View::Groups => format_group_line(&app.data, name, theme),
                 View::Hosts => format_host_line(&app.data, name, theme),
@@ -125,7 +108,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
     let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
         format!(" {} — /{} ", app.view.title(), app.filter.as_str())
     } else {
-        // For Agents view, items_strs includes synthetic project-header
+        // For Agents view, items_strs includes synthetic session-header
         // separators — count the real agents from data, not items, so
         // the title doesn't claim "Agents (15)" when actually 8.
         let count = match app.view {
@@ -167,10 +150,6 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
                 "No hosts. Add groups with `tad config`.",
                 Style::default().fg(app.theme.muted),
             ))],
-            View::Projects => vec![Line::from(Span::styled(
-                "No projects yet.",
-                Style::default().fg(app.theme.muted),
-            ))],
         };
         f.render_widget(
             Paragraph::new(hint).block(block).wrap(Wrap { trim: true }),
@@ -189,7 +168,6 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_symbol("▶ ");
 
     let state = match app.view {
-        View::Projects => &mut app.list_state_projects,
         View::Sessions => &mut app.list_state_sessions,
         View::Groups => &mut app.list_state_groups,
         View::Hosts => &mut app.list_state_hosts,
@@ -205,7 +183,6 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App) {
         .title(" preview ");
     let lines: Vec<Line> = match app.selected() {
         Some(name) => match app.view {
-            View::Projects => preview_project(&app.data, &name, &app.theme),
             View::Sessions => preview_session(&app.data, &name, &app.theme),
             View::Groups => preview_group(&app.data, &name, &app.theme),
             View::Hosts => preview_host(&app.data, &name, &app.theme),
@@ -259,10 +236,6 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ pick duration   ↵ snooze   Esc cancel",
             Style::default().fg(theme.muted),
         )),
-        InputMode::NewAgent => Line::from(Span::styled(
-            "type initial prompt (optional)   ↵ spawn   Esc cancel",
-            Style::default().fg(theme.muted),
-        )),
         InputMode::RenameAgent => Line::from(Span::styled(
             "type new window name   ↵ rename   Esc cancel",
             Style::default().fg(theme.muted),
@@ -277,7 +250,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             let mut spans = Vec::new();
             spans.extend(bind("↑↓/jk", "nav"));
             spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3/4/5", "jump"));
+            spans.extend(bind("1/2/3/4", "jump"));
             spans.extend(bind("↵", "open"));
             spans.extend(bind("n", "new"));
             if app.view == View::Sessions {
