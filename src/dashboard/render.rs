@@ -83,17 +83,29 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(tabs, area);
 }
 
+/// 40/60 list/preview normally; the list takes everything while a pane
+/// is pulled — the real pane sits where the preview was. The preview
+/// carries the live content (transcript tail, pane capture) so it gets
+/// the bigger share; the list's widest rows (Agents, ~66 cols) still
+/// fit at 40% of a wide terminal and clip gracefully on narrow ones.
+fn main_constraints(pulled: bool) -> [Constraint; 2] {
+    if pulled {
+        [Constraint::Percentage(100), Constraint::Percentage(0)]
+    } else {
+        [Constraint::Percentage(40), Constraint::Percentage(60)]
+    }
+}
+
 fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
-    // The preview carries the live content (transcript tail, pane
-    // capture) so it gets the bigger share; the list's widest rows
-    // (Agents, ~66 cols) still fit at 40% of a wide terminal and clip
-    // gracefully on narrow ones.
+    let pulled = app.pulled_pane.is_some();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints(main_constraints(pulled))
         .split(area);
     render_list(f, chunks[0], app);
-    render_preview(f, chunks[1], app);
+    if !pulled {
+        render_preview(f, chunks[1], app);
+    }
 }
 
 fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
@@ -240,31 +252,71 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme.muted),
         )),
         InputMode::None => {
-            let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
-                vec![
-                    Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
-                    Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
-                ]
-            };
-            let mut spans = Vec::new();
-            spans.extend(bind("↑↓/jk", "nav"));
-            spans.extend(bind("⇥", "view"));
-            spans.extend(bind("1/2/3/4", "jump"));
-            spans.extend(bind("↵", "open"));
-            spans.extend(bind("n", "new"));
-            if app.view == View::Sessions {
-                spans.extend(bind("d", "kill"));
+            // A transient flash (guard refusal) owns the whole line
+            // until the next keypress clears it.
+            if let Some(msg) = &app.flash {
+                Line::from(Span::styled(
+                    msg.clone(),
+                    Style::default().fg(theme.warning),
+                ))
+            } else {
+                let bind = |key: &str, label: &str| -> Vec<Span<'static>> {
+                    vec![
+                        Span::styled(format!("{} ", key), Style::default().fg(theme.accent)),
+                        Span::styled(format!("{}  ", label), Style::default().fg(theme.fg)),
+                    ]
+                };
+                let mut spans = Vec::new();
+                if let Some(p) = &app.pulled_pane {
+                    spans.push(Span::styled(
+                        format!("◀ {} pulled  ", p.label),
+                        Style::default()
+                            .fg(theme.accent_bold)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    spans.extend(bind("o", "return"));
+                }
+                spans.extend(bind("↑↓/jk", "nav"));
+                spans.extend(bind("⇥", "view"));
+                spans.extend(bind("1/2/3/4", "jump"));
+                spans.extend(bind("↵", "open"));
+                spans.extend(bind("n", "new"));
+                if app.pulled_pane.is_none()
+                    && (app.view == View::Sessions || app.view == View::Agents)
+                {
+                    spans.extend(bind("o", "pull"));
+                }
+                if app.view == View::Sessions {
+                    spans.extend(bind("d", "kill"));
+                }
+                if app.view == View::Agents {
+                    spans.extend(bind("d", "kill"));
+                    spans.extend(bind("R", "rename"));
+                    spans.extend(bind("s", "snooze"));
+                }
+                spans.extend(bind("/", "filter"));
+                spans.extend(bind("r", "refresh"));
+                spans.extend(bind("q", "quit"));
+                Line::from(spans)
             }
-            if app.view == View::Agents {
-                spans.extend(bind("d", "kill"));
-                spans.extend(bind("R", "rename"));
-                spans.extend(bind("s", "snooze"));
-            }
-            spans.extend(bind("/", "filter"));
-            spans.extend(bind("r", "refresh"));
-            spans.extend(bind("q", "quit"));
-            Line::from(spans)
         }
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_takes_everything_while_a_pane_is_pulled() {
+        assert_eq!(
+            main_constraints(true),
+            [Constraint::Percentage(100), Constraint::Percentage(0)]
+        );
+        assert_eq!(
+            main_constraints(false),
+            [Constraint::Percentage(40), Constraint::Percentage(60)]
+        );
+    }
 }

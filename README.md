@@ -459,6 +459,14 @@ Keys (any view):
                          * Hosts view → new tmux session with the host
                            prefilled as the SSH target
                          * other views → blank new tmux session prompt
+- `o`                    pull the selected pane into a tmux split beside
+                         tad (sessions view: the session's active pane;
+                         agents view: the agent's pane) and focus it —
+                         work in the real pane with the dashboard still
+                         open. `o` again sends it home (recreating its
+                         origin window if it had closed); quitting tad
+                         or opening a row also returns it first. Needs
+                         tad in a regular tmux pane (not the popup).
 - `d`                    kill, with a y/N confirmation (sessions view:
                          tmux kill-session; agents view: SIGINT to the
                          agent). Only `y`/`Enter` confirm — Esc, `n`,
@@ -469,6 +477,10 @@ Keys (any view):
                          Esc exits and clears)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
+
+While a pane is pulled, tad's preview column collapses (the real pane
+is the preview now) and the status line shows `◀ name pulled — o
+return`. One pane at a time; pulling another row swaps them.
 
 All views auto-refresh every ~1.5 seconds. The last view you were on
 is remembered across launches in `$XDG_STATE_HOME/tad/dashboard.state`
