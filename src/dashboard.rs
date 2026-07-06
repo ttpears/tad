@@ -420,6 +420,17 @@ pub(super) struct PinnedPane {
     pub(super) label: String,
 }
 
+/// Flash text for `App::refresh` when `dispatch::validate_pins` drops
+/// one or more panes that vanished while pinned — singular wording for
+/// exactly one, plural otherwise.
+fn pins_vanished_message(dropped: usize) -> String {
+    if dropped == 1 {
+        "1 pinned pane vanished".to_string()
+    } else {
+        format!("{dropped} pinned panes vanished")
+    }
+}
+
 /// Victim captured when the user pressed `d`, so the ~1.5s background
 /// refresh can't swap what gets killed between arming and confirming.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -475,9 +486,15 @@ pub(super) struct App {
     /// full-screen over the main pane? (No key toggles this yet — a
     /// later task wires one up; the renderer already honors it.)
     pub(super) sidebar_overlay: bool,
-    /// Panes currently pinned beside tad. Treated as at-most-one until
-    /// Task 8 wires up the multi-pane grid via `grid::decide_pin`.
+    /// Panes currently pinned beside tad, in pin order (see
+    /// `grid::MAX_PINS`).
     pub(super) pins: Vec<PinnedPane>,
+    /// This window's `pane-border-status` value from just before the
+    /// first pin flipped it on, so the last unpin (or exit with pins
+    /// still out) can restore it. `None` means either nothing's been
+    /// pinned yet, or the value was unset (empty `show-options`
+    /// output) — both restore the same way (`set -wu`).
+    pub(super) saved_border_status: Option<String>,
     /// Bumped once per `refresh()`; animates `agents::state_dot`'s
     /// Working frames.
     pub(super) spinner_tick: u64,
@@ -549,6 +566,7 @@ impl App {
             sidebar_width,
             sidebar_overlay: false,
             pins: Vec::new(),
+            saved_border_status: None,
             spinner_tick: 0,
             prev_agent_states: std::collections::HashMap::new(),
             snooze_cursor: 0,
@@ -597,6 +615,12 @@ impl App {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
         self.data = AppData::load();
+        let pins = std::mem::take(&mut self.pins);
+        let (kept, dropped) = dispatch::validate_pins(pins);
+        self.pins = kept;
+        if dropped > 0 {
+            self.flash = Some(pins_vanished_message(dropped));
+        }
         self.refresh_rows();
     }
 
@@ -683,9 +707,14 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
 
     let mut app = result?;
     // Every clean exit (q/Esc/Ctrl-C/Enter dispatch) sends every pinned
-    // pane home before tad leaves the building.
+    // pane home before tad leaves the building, then — if any were out
+    // — restores the border-status/width the first pin changed.
+    let had_pins = !app.pins.is_empty();
     for p in app.pins.drain(..) {
         dispatch::return_pane(&p);
+    }
+    if had_pins {
+        dispatch::restore_border_and_width(&mut app.saved_border_status);
     }
     match app.open_after {
         Some(OpenTarget::AttachExisting(name)) => sessions::attach_or_create_silent(&name, None),
@@ -829,6 +858,7 @@ pub(super) mod testutil {
             sidebar_width: 32,
             sidebar_overlay: false,
             pins: Vec::new(),
+            saved_border_status: None,
             spinner_tick: 0,
             prev_agent_states: std::collections::HashMap::new(),
             snooze_cursor: 0,
@@ -859,6 +889,17 @@ mod tests {
     use super::testutil::mk_data;
     use super::*;
     use rows::{RowKind, Section};
+
+    #[test]
+    fn pins_vanished_message_is_singular_for_exactly_one() {
+        assert_eq!(pins_vanished_message(1), "1 pinned pane vanished");
+    }
+
+    #[test]
+    fn pins_vanished_message_is_plural_otherwise() {
+        assert_eq!(pins_vanished_message(2), "2 pinned panes vanished");
+        assert_eq!(pins_vanished_message(0), "0 pinned panes vanished");
+    }
 
     fn mk_data_with_group(layout: &str) -> AppData {
         let mut data = mk_data(vec![], vec![]);

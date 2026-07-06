@@ -1,14 +1,9 @@
-//! Pin-grid decision logic (scaffold — implemented in the herdr-cockpit
-//! overhaul, Task 3).
+//! Pin-grid decision logic.
 //!
 //! Pure decision logic for the multi-pane "pin grid" that replaces the
-//! single-pane pull (see `dashboard.rs`'s `PinnedPane` / `keys.rs`'s
-//! `decide_pull` for the one-pane precursor this generalizes). Nothing
-//! in this module touches tmux — callers resolve panes and gather
-//! environment facts, then hand them here for a pure decision.
-
-// TODO(herdr-cockpit): consumed by Task 8 — remove this allow once wired up.
-#![allow(dead_code)]
+//! old single-pane pull. Nothing in this module touches tmux — callers
+//! (`action.rs`) resolve panes and gather environment facts, then hand
+//! them here for a pure decision; `dispatch.rs` carries out the result.
 
 /// Max number of panes the grid holds beside tad.
 pub(super) const MAX_PINS: usize = 4;

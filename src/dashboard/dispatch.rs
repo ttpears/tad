@@ -107,23 +107,123 @@ pub(super) fn tad_window_id() -> Option<String> {
     }
 }
 
-/// Join the resolved pane beside tad (right, 60%) and focus it
-/// (join-pane focuses the moved pane by default).
-pub(super) fn pull_pane(p: &ResolvedPane) -> bool {
+/// Initial split ratio used for the very first pin's join. The exact
+/// value barely matters: right after the join we explicitly resize
+/// tad's own pane to `sidebar_width` columns, which overrides whatever
+/// ratio the join produced. This just keeps that one frame from being
+/// a wildly wrong split.
+const FIRST_PIN_LIVE_PCT: u16 = 70;
+
+/// Join the resolved pane into the grid per `grid::join_step`, title it,
+/// and — on the very first pin only — flip on `pane-border-status` and
+/// shrink tad's own pane down to `sidebar_width` columns. Returns false
+/// if the join itself failed (pane vanished between resolve and here);
+/// the caller flashes.
+pub(super) fn pin_pane(
+    r: &ResolvedPane,
+    pins: &[super::PinnedPane],
+    sidebar_width: u16,
+    title: &str,
+    saved_border_status: &mut Option<String>,
+) -> bool {
     let Ok(tad_pane) = std::env::var("TMUX_PANE") else {
         return false;
     };
-    let out = crate::tmux::run([
-        "join-pane",
-        "-h",
-        "-l",
-        "60%",
-        "-s",
-        &p.pane_id,
-        "-t",
-        &tad_pane,
-    ]);
-    matches!(out, Ok(o) if o.status.success())
+    let pane_ids: Vec<String> = pins.iter().map(|p| p.pane_id.clone()).collect();
+    let Some(step) = super::grid::join_step(&pane_ids, &tad_pane, FIRST_PIN_LIVE_PCT) else {
+        return false;
+    };
+    let mut args: Vec<String> = vec!["join-pane".to_string()];
+    args.push(if step.horizontal { "-h" } else { "-v" }.to_string());
+    if let Some(pct) = step.size_pct {
+        args.push("-p".to_string());
+        args.push(pct.to_string());
+    }
+    args.push("-s".to_string());
+    args.push(r.pane_id.clone());
+    args.push("-t".to_string());
+    args.push(step.target);
+    let joined = crate::tmux::run(&args);
+    if !matches!(joined, Ok(o) if o.status.success()) {
+        return false;
+    }
+    let _ = crate::tmux::run(["select-pane", "-t", &r.pane_id, "-T", title]);
+    if pins.is_empty() {
+        // First pin: remember whatever pane-border-status this window
+        // had (empty output = unset) before we flip it on, and shrink
+        // tad down to the sidebar width so the grid gets the rest.
+        let prior = crate::tmux::run(["show-options", "-wqv", "pane-border-status"])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        *saved_border_status = prior;
+        let _ = crate::tmux::run(["set", "-w", "pane-border-status", "top"]);
+        let _ = crate::tmux::run([
+            "resize-pane",
+            "-t",
+            &tad_pane,
+            "-x",
+            &sidebar_width.to_string(),
+        ]);
+    }
+    true
+}
+
+/// Best-effort layout nudge after a pin closes and others remain: tmux
+/// doesn't re-even the survivors on its own, so without this the grid
+/// can end up lopsided. Picks any one non-tad pane in the window as an
+/// anchor; failures (including "couldn't find one") are silently
+/// ignored — this is cosmetic, never worth a flash.
+fn even_out_best_effort() {
+    let Ok(tad_pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
+    let Ok(out) = crate::tmux::run(["list-panes", "-t", &tad_pane, "-F", "#{pane_id}"]) else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(target) = stdout.lines().find(|id| *id != tad_pane) {
+        let _ = crate::tmux::run(["resize-pane", "-t", target, "-y", "50%"]);
+    }
+}
+
+/// Undo what the first pin did: restore the window's original
+/// `pane-border-status` (or unset it, if it was unset before) and grow
+/// tad's own pane back to full width. Called once the last pin goes
+/// home, whether via unpin or the dashboard exiting with pins still out.
+pub(super) fn restore_border_and_width(saved_border_status: &mut Option<String>) {
+    let Ok(tad_pane) = std::env::var("TMUX_PANE") else {
+        return;
+    };
+    match saved_border_status.take() {
+        Some(v) if !v.is_empty() => {
+            let _ = crate::tmux::run(["set", "-w", "pane-border-status", &v]);
+        }
+        _ => {
+            let _ = crate::tmux::run(["set", "-wu", "pane-border-status"]);
+        }
+    }
+    let _ = crate::tmux::run(["resize-pane", "-t", &tad_pane, "-x", "100%"]);
+}
+
+/// Send a pinned pane home, then either even out the survivors or —
+/// when it was the last one — restore the border-status/width tad had
+/// before the first pin. `remaining` is `pins.len()` *after* the caller
+/// already removed `p` from it.
+pub(super) fn unpin_pane(
+    p: &super::PinnedPane,
+    remaining: usize,
+    saved_border_status: &mut Option<String>,
+) {
+    return_pane(p);
+    if remaining > 0 {
+        even_out_best_effort();
+        return;
+    }
+    restore_border_and_width(saved_border_status);
 }
 
 /// True when the tmux target still resolves to a non-empty `{fmt}`.
@@ -172,6 +272,27 @@ pub(super) fn return_pane(p: &super::PinnedPane) {
     let _ = crate::tmux::run(["rename-window", "-t", &p.pane_id, &p.origin_window_name]);
     let idx = format!("{}:{}", p.origin_session, p.origin_window_index);
     let _ = crate::tmux::run(["move-window", "-d", "-s", &p.pane_id, "-t", &idx]);
+}
+
+/// Pure half of `validate_pins`: drop any pin whose pane id `alive`
+/// reports as gone, preserving the order of survivors. Split out from
+/// the real tmux-backed `target_alive` check so it's testable with a
+/// closure instead of a subprocess.
+pub(super) fn validate_pins_with(
+    pins: Vec<super::PinnedPane>,
+    alive: impl Fn(&str) -> bool,
+) -> (Vec<super::PinnedPane>, usize) {
+    let before = pins.len();
+    let kept: Vec<_> = pins.into_iter().filter(|p| alive(&p.pane_id)).collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
+/// Refresh-time validation: pins whose pane no longer resolves in tmux
+/// are dropped. Returns the (possibly shorter) list and how many were
+/// dropped; the caller (`App::refresh`) flashes on `dropped > 0`.
+pub(super) fn validate_pins(pins: Vec<super::PinnedPane>) -> (Vec<super::PinnedPane>, usize) {
+    validate_pins_with(pins, |id| target_alive(id, "#{pane_id}"))
 }
 
 /// Kill a Claude Code agent by sending SIGINT to its `claude` PID.
@@ -224,5 +345,45 @@ mod tests {
         );
         // no pane suffix → pass through unchanged
         assert_eq!(window_target_of("session:0"), "session:0");
+    }
+
+    fn pinned(pane: &str) -> super::super::PinnedPane {
+        super::super::PinnedPane {
+            pane_id: pane.into(),
+            origin_window_id: "@9".into(),
+            origin_session: "origin".into(),
+            origin_window_name: "work".into(),
+            origin_window_index: "1".into(),
+            label: "origin:work".into(),
+        }
+    }
+
+    #[test]
+    fn validate_pins_with_keeps_all_when_all_alive() {
+        let pins = vec![pinned("%1"), pinned("%2"), pinned("%3")];
+        let (kept, dropped) = validate_pins_with(pins, |_| true);
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            kept.iter().map(|p| p.pane_id.as_str()).collect::<Vec<_>>(),
+            vec!["%1", "%2", "%3"]
+        );
+    }
+
+    #[test]
+    fn validate_pins_with_drops_dead_middle_pane_preserving_order() {
+        let pins = vec![pinned("%1"), pinned("%2"), pinned("%3")];
+        let (kept, dropped) = validate_pins_with(pins, |id| id != "%2");
+        assert_eq!(dropped, 1);
+        assert_eq!(
+            kept.iter().map(|p| p.pane_id.as_str()).collect::<Vec<_>>(),
+            vec!["%1", "%3"]
+        );
+    }
+
+    #[test]
+    fn validate_pins_with_empty_input_is_a_noop() {
+        let (kept, dropped) = validate_pins_with(vec![], |_| true);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 0);
     }
 }

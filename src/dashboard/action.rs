@@ -5,12 +5,12 @@
 //! `mouse.rs`'s per-event arms) means the two input paths can't drift:
 //! a key and a click that mean the same thing run the exact same code.
 
+use crate::agents;
 use crate::{snooze, tmux};
 
-use super::dispatch::{
-    pull_pane, resolve_pane, return_pane, tad_window_id, OpenTarget, ResolvedPane,
-};
+use super::dispatch::{self, resolve_pane, tad_window_id, OpenTarget};
 use super::format;
+use super::grid;
 use super::rows::{self, RowKind, Section};
 use super::{App, ConfirmKillTarget, InputMode, NewSessionField, PinnedPane, TextInput};
 
@@ -225,258 +225,154 @@ fn new_session_selected(app: &mut App) {
     }
 }
 
+/// What `o` (or a click on the pin dot) does: resolve the target row
+/// to stable ids, ask `grid::decide_pin` for the pure verdict, and
+/// carry it out. All the actual tmux side effects live in
+/// `dispatch::{pin_pane, unpin_pane}` — this function and
+/// `apply_pin_decision` just wire the decision to them.
 fn toggle_pin(app: &mut App, i: usize) {
-    let env = PullEnv {
+    let env = grid::PinEnv {
         inside_tmux: std::env::var_os("TMUX").is_some(),
         tad_window_id: tad_window_id(),
     };
     // Resolve the target row to stable ids first; the decision
     // function never touches tmux itself.
     let kind = app.rows.get(i).map(|r| r.kind.clone());
-    let pullable = matches!(kind, Some(RowKind::Session(_)) | Some(RowKind::Agent(_)));
     let row = match &kind {
         Some(RowKind::Session(name)) => resolve_pane(&tmux::exact_target(name)),
         Some(RowKind::Agent(target)) => resolve_pane(&tmux::exact_target(target)),
         _ => None,
     };
-    let pinned = app.pins.first().cloned();
-    match decide_pull(pullable, row.as_ref(), pinned.as_ref(), &env) {
-        PullAction::None => {}
-        PullAction::Refuse(msg) => app.flash = Some(msg.to_string()),
-        PullAction::ReturnCurrent => {
-            if let Some(p) = app.pins.pop() {
-                return_pane(&p);
-            }
+    let decision = grid::decide_pin(row.as_ref(), &app.pins, &env);
+    apply_pin_decision(app, decision, kind.as_ref());
+}
+
+/// Carry out a `grid::PinAction` against `app`. Split out from
+/// `toggle_pin` so the Refuse/None arms — the only ones with no tmux
+/// side effect — can be exercised directly in tests without ever
+/// resolving a real pane.
+fn apply_pin_decision(app: &mut App, decision: grid::PinAction, kind: Option<&RowKind>) {
+    match decision {
+        grid::PinAction::None => {}
+        grid::PinAction::Refuse(msg) => app.flash = Some(msg.to_string()),
+        grid::PinAction::Unpin(idx) => {
+            let p = app.pins.remove(idx);
+            let remaining = app.pins.len();
+            dispatch::unpin_pane(&p, remaining, &mut app.saved_border_status);
             app.refresh();
         }
-        PullAction::Pull(r) => {
-            let _ = execute_pull(app, r);
-        }
-        PullAction::SwapTo(r) => {
-            if let Some(p) = app.pins.pop() {
-                return_pane(&p);
-            }
-            if !execute_pull(app, r) {
-                app.flash = Some("swap failed — new pane vanished, original returned".to_string());
-            }
-        }
-    }
-}
-
-/// Everything `decide_pull` needs about the environment, gathered by
-/// the caller so the decision stays pure.
-pub(super) struct PullEnv {
-    pub(super) inside_tmux: bool,
-    /// None = not in a regular pane (popup, or resolution failed).
-    pub(super) tad_window_id: Option<String>,
-}
-
-#[derive(Debug)]
-pub(super) enum PullAction {
-    None,
-    Refuse(&'static str),
-    ReturnCurrent,
-    Pull(ResolvedPane),
-    SwapTo(ResolvedPane),
-}
-
-/// What should pin/unpin do? Pure — all tmux state arrives
-/// pre-resolved. `pullable` is true iff the target row is a Session or
-/// Agent row (the only kinds that can be pinned).
-fn decide_pull(
-    pullable: bool,
-    row: Option<&ResolvedPane>,
-    pinned: Option<&PinnedPane>,
-    env: &PullEnv,
-) -> PullAction {
-    if !env.inside_tmux {
-        return PullAction::Refuse("pull needs tad inside tmux");
-    }
-    let Some(tad_win) = env.tad_window_id.as_deref() else {
-        return PullAction::Refuse("pull doesn't work in the popup — run tad in a regular pane");
-    };
-    // Something's already out: this is primarily the way home, from
-    // any selection. Selecting a different pullable row swaps instead.
-    if let Some(p) = pinned {
-        return match row {
-            Some(r) if r.pane_id != p.pane_id && r.window_id != tad_win => {
-                PullAction::SwapTo(r.clone())
-            }
-            _ => PullAction::ReturnCurrent,
-        };
-    }
-    match (pullable, row) {
-        (true, Some(r)) => {
-            if r.window_id == tad_win {
-                PullAction::Refuse("that pane is already here")
+        grid::PinAction::Pin(r) => {
+            let label = format!("{}:{}", r.session, r.window_name);
+            let title = pin_title(pin_dot(app, kind), &label);
+            if dispatch::pin_pane(
+                &r,
+                &app.pins,
+                app.sidebar_width,
+                &title,
+                &mut app.saved_border_status,
+            ) {
+                app.pins.push(PinnedPane {
+                    pane_id: r.pane_id,
+                    origin_window_id: r.window_id,
+                    origin_session: r.session,
+                    origin_window_name: r.window_name,
+                    origin_window_index: r.window_index,
+                    label,
+                });
+                app.refresh();
             } else {
-                PullAction::Pull(r.clone())
+                app.flash = Some("pin failed — pane vanished?".to_string());
             }
         }
-        _ => PullAction::None,
     }
 }
 
-/// Run the join and record the pinned state; flash on failure (the
-/// pane can vanish between resolution and join).
-/// Returns true if the join succeeded.
-fn execute_pull(app: &mut App, r: ResolvedPane) -> bool {
-    let label = format!("{}:{}", r.session, r.window_name);
-    if pull_pane(&r) {
-        app.pins.clear();
-        app.pins.push(PinnedPane {
-            pane_id: r.pane_id,
-            origin_window_id: r.window_id,
-            origin_session: r.session,
-            origin_window_name: r.window_name,
-            origin_window_index: r.window_index,
-            label,
-        });
-        app.refresh();
-        true
-    } else {
-        app.flash = Some("pull failed — pane vanished?".to_string());
-        false
-    }
+/// The dot a freshly-pinned pane's title should carry: the agent's own
+/// state dot (animated the same as its sidebar row) for an Agent-origin
+/// pin, else the plain filled dot Sessions rows always show.
+fn pin_dot(app: &App, kind: Option<&RowKind>) -> char {
+    let Some(RowKind::Agent(target)) = kind else {
+        return '●';
+    };
+    let Some(agent) = app.data.agents.iter().find(|a| &a.target == target) else {
+        return '●';
+    };
+    let state = agents::agent_state(
+        agent,
+        format::snoozed(&app.data, target),
+        app.data.ui.attention_idle,
+    );
+    agents::state_dot(state, app.spinner_tick)
+}
+
+/// `select-pane -T` title text for a pinned pane: `<dot> <label>`.
+fn pin_title(dot: char, label: &str) -> String {
+    format!("{dot} {label}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dashboard::testutil::{mk_agent, mk_app, mk_data, mk_session};
-    use crate::dashboard::PinnedPane;
 
-    fn rp(pane: &str, win: &str) -> ResolvedPane {
-        ResolvedPane {
-            pane_id: pane.into(),
-            window_id: win.into(),
-            session: "origin".into(),
-            window_name: "work".into(),
-            window_index: "1".into(),
-        }
-    }
+    // -- apply_pin_decision: the Refuse/None arms have no tmux side
+    // effect, so they're exercised directly with a hand-built
+    // `grid::PinAction` rather than through `toggle_pin`'s real
+    // env/tmux resolution (see `decide_pin`'s own exhaustive coverage
+    // in grid.rs for the pure decision logic itself).
 
-    fn pinned(pane: &str) -> PinnedPane {
-        PinnedPane {
-            pane_id: pane.into(),
-            origin_window_id: "@9".into(),
-            origin_session: "origin".into(),
-            origin_window_name: "work".into(),
-            origin_window_index: "1".into(),
-            label: "origin:work".into(),
-        }
-    }
-
-    fn env_ok() -> PullEnv {
-        PullEnv {
-            inside_tmux: true,
-            tad_window_id: Some("@1".into()),
-        }
+    #[test]
+    fn apply_pin_decision_refuse_sets_flash_and_leaves_pins_untouched() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        apply_pin_decision(
+            &mut app,
+            grid::PinAction::Refuse("pin needs tad inside tmux"),
+            None,
+        );
+        assert_eq!(app.flash.as_deref(), Some("pin needs tad inside tmux"));
+        assert!(app.pins.is_empty());
     }
 
     #[test]
-    fn pull_refused_outside_tmux() {
-        let env = PullEnv {
-            inside_tmux: false,
-            tad_window_id: None,
+    fn apply_pin_decision_none_is_a_noop() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.flash = None;
+        apply_pin_decision(&mut app, grid::PinAction::None, None);
+        assert!(app.flash.is_none());
+        assert!(app.pins.is_empty());
+    }
+
+    #[test]
+    fn pin_title_formats_dot_and_label() {
+        assert_eq!(pin_title('●', "work:main"), "● work:main");
+    }
+
+    #[test]
+    fn pin_dot_defaults_to_filled_dot_for_non_agent_or_unknown_target() {
+        let app = mk_app(mk_data(vec![], vec![]));
+        assert_eq!(pin_dot(&app, None), '●');
+        assert_eq!(pin_dot(&app, Some(&RowKind::Session("work".into()))), '●');
+        // Agent kind but the target isn't in `data.agents` (vanished
+        // between resolve and here) — still falls back cleanly.
+        assert_eq!(pin_dot(&app, Some(&RowKind::Agent("gone:0.0".into()))), '●');
+    }
+
+    #[test]
+    fn pin_dot_uses_the_agents_own_state_dot_when_found() {
+        let agent = mk_agent("s1:0.0", "s1", 5);
+        let target = agent.target.clone();
+        let mut app = mk_app(mk_data(vec![], vec![agent]));
+        app.spinner_tick = 0;
+        let expected = {
+            let agent = &app.data.agents[0];
+            let state = agents::agent_state(
+                agent,
+                format::snoozed(&app.data, &target),
+                app.data.ui.attention_idle,
+            );
+            agents::state_dot(state, app.spinner_tick)
         };
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), None, &env),
-            PullAction::Refuse(m) if m.contains("inside tmux")
-        ));
-    }
-
-    #[test]
-    fn pull_refused_in_popup() {
-        let env = PullEnv {
-            inside_tmux: true,
-            tad_window_id: None,
-        };
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), None, &env),
-            PullAction::Refuse(m) if m.contains("popup")
-        ));
-    }
-
-    #[test]
-    fn pull_noop_on_non_pullable_rows_even_with_resolved_pane() {
-        // Group/Host rows never resolve to a pane in practice, but
-        // decide_pull must still no-op if it somehow received one.
-        assert!(matches!(
-            decide_pull(false, Some(&rp("%5", "@2")), None, &env_ok()),
-            PullAction::None
-        ));
-    }
-
-    #[test]
-    fn pull_noop_without_selection() {
-        assert!(matches!(
-            decide_pull(true, None, None, &env_ok()),
-            PullAction::None
-        ));
-    }
-
-    #[test]
-    fn pull_refused_when_pane_already_in_tads_window() {
-        // tad's window is @1; the row's pane lives in @1 too.
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@1")), None, &env_ok()),
-            PullAction::Refuse(m) if m.contains("already here")
-        ));
-    }
-
-    #[test]
-    fn pull_plain_pull_when_nothing_out() {
-        let row = rp("%5", "@2");
-        match decide_pull(true, Some(&row), None, &env_ok()) {
-            PullAction::Pull(r) => assert_eq!(r, row),
-            other => panic!("expected Pull, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pull_same_row_again_returns_it() {
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), Some(&pinned("%5")), &env_ok()),
-            PullAction::ReturnCurrent
-        ));
-    }
-
-    #[test]
-    fn pull_different_row_swaps() {
-        let row = rp("%6", "@3");
-        match decide_pull(true, Some(&row), Some(&pinned("%5")), &env_ok()) {
-            PullAction::SwapTo(r) => assert_eq!(r, row),
-            other => panic!("expected SwapTo, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pull_returns_current_regardless_of_pullable_when_something_is_out() {
-        // Pinning always offers the way home, even when the current
-        // selection isn't itself pullable.
-        for pullable in [true, false] {
-            assert!(matches!(
-                decide_pull(pullable, None, Some(&pinned("%5")), &env_ok()),
-                PullAction::ReturnCurrent
-            ));
-        }
-    }
-
-    /// Something is out and the newly-selected row's pane is (somehow)
-    /// already in tad's window: can't pull it, so pin/unpin falls back
-    /// to returning the current pane — safe, pinned here on purpose.
-    #[test]
-    fn pull_with_target_in_tads_window_returns_current() {
-        assert!(matches!(
-            decide_pull(
-                true,
-                Some(&rp("%6", "@1")), // different pane, but in tad's window @1
-                Some(&pinned("%5")),
-                &env_ok()
-            ),
-            PullAction::ReturnCurrent
-        ));
+        assert_eq!(pin_dot(&app, Some(&RowKind::Agent(target))), expected);
     }
 
     #[test]
@@ -556,10 +452,10 @@ mod tests {
             // `toggle_pin` reads the *real* process environment (no
             // tmux vars in a test run), so the exact refusal reason
             // varies by sandbox — but none of these kinds resolve to a
-            // pane (`row` stays `None`, nothing was pinned to begin
-            // with), so `decide_pull` can only ever answer `None` or
-            // `Refuse`, never `Pull`/`SwapTo`/`ReturnCurrent`. Pins
-            // never change is the environment-independent invariant.
+            // pane (`row` stays `None`, and nothing was pinned to begin
+            // with), so `decide_pin` can only ever answer `None` or
+            // `Refuse`, never `Unpin`/`Pin`. Pins never change is the
+            // environment-independent invariant.
             let pins_before = app.pins.len();
             execute(&mut app, Action::TogglePin(i));
             assert_eq!(app.pins.len(), pins_before, "kind {kind:?} changed pins");
