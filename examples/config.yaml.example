@@ -36,6 +36,9 @@ theme: tokyonight
 #                                  # treated as "user walked away" and excluded
 #                                  # from the `tad status` "waiting" count.
 #   snooze_intervals_secs: [300, 1800, 7200]   # offered in the dashboard 's' modal
+#   notify_on_blocked: true        # desktop notification when an agent turns
+#                                  # blocked (needs your input). Default true;
+#                                  # set false to disable.
 
 # ---- groups ----
 # Multi-host configurations for `tad -g <name>` / the dashboard Groups view.

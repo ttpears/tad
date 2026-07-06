@@ -71,6 +71,16 @@ pub struct Theme {
     pub border: Color,
 }
 
+/// Canonical names of built-in themes, picker order.
+pub fn builtin_names() -> &'static [&'static str] {
+    BUILTIN_THEMES
+}
+
+/// Theme by name (same aliases the loader accepts). None for unknown.
+pub fn by_name(name: &str) -> Option<Theme> {
+    builtin(name)
+}
+
 /// Built-in named themes. Add more by extending this match.
 fn builtin(name: &str) -> Option<Theme> {
     Some(match name {
@@ -271,4 +281,35 @@ fn parse_color(s: String) -> Option<Color> {
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
     Some(Color::Rgb(r, g, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_builtin_name_resolves_via_by_name() {
+        for name in builtin_names() {
+            assert!(
+                by_name(name).is_some(),
+                "builtin_names() entry {:?} did not resolve via by_name()",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn by_name_accepts_known_alias() {
+        assert!(by_name("tokyo-night").is_some());
+    }
+
+    #[test]
+    fn by_name_unknown_is_none() {
+        assert!(by_name("nope").is_none());
+    }
+
+    #[test]
+    fn builtin_names_matches_public_const() {
+        assert_eq!(builtin_names(), BUILTIN_THEMES);
+    }
 }

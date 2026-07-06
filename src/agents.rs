@@ -44,6 +44,15 @@ pub struct Agent {
     /// Mtime of the most recent transcript file (provider-specific
     /// location), if one exists.
     pub last_activity: Option<SystemTime>,
+    /// Currently write-only: nothing reads this back after construction
+    /// (the preview pane captures the live tmux pane instead — see
+    /// `dashboard/preview.rs`). Left in place, with the dead-code lint
+    /// suppressed, because `dashboard/format.rs` test fixtures (edited
+    /// concurrently on another branch) still populate it in `Agent`
+    /// struct literals; removing the field would break that file's
+    /// compilation. Safe to delete for real once that work lands and
+    /// its fixtures are updated to drop the field too.
+    #[allow(dead_code)]
     pub transcript_path: Option<PathBuf>,
     /// Best-effort "is this agent waiting for me right now" derived
     /// from the tail of the provider's transcript. Unknown when
@@ -222,6 +231,83 @@ pub fn counts(agents: &[Agent], active_window: Duration) -> StatusCounts {
     }
 }
 
+/// Unified semantic state for an agent, combining transcript attention,
+/// the mtime-based activity heuristic, and the user's snooze flag into
+/// a single value the dashboard can render without knowing about any
+/// of the underlying signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentState {
+    /// Waiting on the human right now (or otherwise flagged as needing
+    /// attention). Highest-priority state — always surfaced first.
+    Blocked,
+    Working,
+    Idle,
+    /// Snoozed by the user, or the agent itself signaled the user has
+    /// stepped away (`transcript::Attention::Away`).
+    Away,
+}
+
+/// Unify transcript attention + mtime heuristic + snooze into one state.
+/// snoozed → Away; AwaitingInput → Blocked; Working → Working;
+/// Attention::Away → Away; Unknown → Active(mtime within active_window)
+/// ? Working : Idle (NoTranscript → Idle).
+pub fn agent_state(a: &Agent, snoozed: bool, active_window: Duration) -> AgentState {
+    if snoozed {
+        return AgentState::Away;
+    }
+    match a.attention {
+        transcript::Attention::AwaitingInput => AgentState::Blocked,
+        transcript::Attention::Working => AgentState::Working,
+        transcript::Attention::Away => AgentState::Away,
+        transcript::Attention::Unknown => match a.activity_status(active_window) {
+            ActivityStatus::Active(_) => AgentState::Working,
+            ActivityStatus::Idle(_) | ActivityStatus::NoTranscript => AgentState::Idle,
+        },
+    }
+}
+
+/// Sidebar dot for a state. `tick` animates Working (frames ◐◓◑◒,
+/// tick % 4). Blocked '●', Idle '○', Away '◌'.
+pub fn state_dot(state: AgentState, tick: u64) -> char {
+    const WORKING_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+    match state {
+        AgentState::Blocked => '●',
+        AgentState::Working => WORKING_FRAMES[(tick % 4) as usize],
+        AgentState::Idle => '○',
+        AgentState::Away => '◌',
+    }
+}
+
+/// Aggregate counts for the dashboard's section headers.
+pub struct StateCounts {
+    pub blocked: usize,
+    pub working: usize,
+    pub total: usize,
+}
+
+pub fn state_counts(states: &[AgentState]) -> StateCounts {
+    let total = states.len();
+    let blocked = states.iter().filter(|s| **s == AgentState::Blocked).count();
+    let working = states.iter().filter(|s| **s == AgentState::Working).count();
+    StateCounts {
+        blocked,
+        working,
+        total,
+    }
+}
+
+/// Section-header count label per spec: "blocked/total" when blocked>0,
+/// else "working/total" when working>0, else "total".
+pub fn header_count_label(c: &StateCounts) -> String {
+    if c.blocked > 0 {
+        format!("{}/{}", c.blocked, c.total)
+    } else if c.working > 0 {
+        format!("{}/{}", c.working, c.total)
+    } else {
+        format!("{}", c.total)
+    }
+}
+
 /// Human-friendly "Xs/Xm/Xh ago" formatter shared by the dashboard
 /// preview and the agents-view line formatter.
 pub fn format_elapsed(d: Duration) -> String {
@@ -308,5 +394,225 @@ mod tests {
     fn find_agent_pid_on_self_terminates() {
         let me = std::process::id();
         assert!(find_agent_pid(me, provider::providers()).is_none());
+    }
+
+    fn mk_agent(last_activity: Option<SystemTime>, attention: transcript::Attention) -> Agent {
+        Agent {
+            target: "s:0.0".into(),
+            session: "s".into(),
+            window_index: "0".into(),
+            window_name: "w".into(),
+            pane_index: "0".into(),
+            cwd: PathBuf::from("/tmp"),
+            agent_pid: 1,
+            provider_id: "claude",
+            last_activity,
+            transcript_path: None,
+            attention,
+        }
+    }
+
+    #[test]
+    fn agent_state_snoozed_is_always_away() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        for attention in [
+            transcript::Attention::AwaitingInput,
+            transcript::Attention::Working,
+            transcript::Attention::Away,
+            transcript::Attention::Unknown,
+        ] {
+            let agent = mk_agent(Some(now), attention);
+            assert_eq!(
+                agent_state(&agent, true, window),
+                AgentState::Away,
+                "attention {attention:?} with snoozed=true should be Away"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_state_awaiting_input_is_blocked() {
+        let agent = mk_agent(
+            Some(SystemTime::now()),
+            transcript::Attention::AwaitingInput,
+        );
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn agent_state_working_is_working() {
+        let agent = mk_agent(Some(SystemTime::now()), transcript::Attention::Working);
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn agent_state_attention_away_is_away() {
+        let agent = mk_agent(Some(SystemTime::now()), transcript::Attention::Away);
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Away
+        );
+    }
+
+    #[test]
+    fn agent_state_unknown_falls_back_to_mtime_active_is_working() {
+        let agent = mk_agent(Some(SystemTime::now()), transcript::Attention::Unknown);
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn agent_state_unknown_falls_back_to_mtime_idle_is_idle() {
+        let agent = mk_agent(
+            Some(SystemTime::now() - Duration::from_secs(90)),
+            transcript::Attention::Unknown,
+        );
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn agent_state_unknown_no_transcript_is_idle() {
+        let agent = mk_agent(None, transcript::Attention::Unknown);
+        assert_eq!(
+            agent_state(&agent, false, Duration::from_secs(30)),
+            AgentState::Idle
+        );
+    }
+
+    /// Verify that Attention::AwaitingInput always produces Blocked,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_awaiting_input_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::AwaitingInput);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Blocked,
+                "Attention::AwaitingInput with {} mtime should be Blocked",
+                desc
+            );
+        }
+    }
+
+    /// Verify that Attention::Working always produces Working,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_working_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::Working);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Working,
+                "Attention::Working with {} mtime should be Working",
+                desc
+            );
+        }
+    }
+
+    /// Verify that Attention::Away always produces Away,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_away_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::Away);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Away,
+                "Attention::Away with {} mtime should be Away",
+                desc
+            );
+        }
+    }
+
+    #[test]
+    fn state_dot_animates_working_over_four_frames() {
+        let frames = ['◐', '◓', '◑', '◒'];
+        for (tick, expected) in frames.iter().enumerate() {
+            assert_eq!(state_dot(AgentState::Working, tick as u64), *expected);
+        }
+        // Wraps around every 4 ticks.
+        assert_eq!(state_dot(AgentState::Working, 4), '◐');
+        assert_eq!(state_dot(AgentState::Working, 7), '◒');
+    }
+
+    #[test]
+    fn state_dot_fixed_chars_for_non_working_states() {
+        for tick in 0..6u64 {
+            assert_eq!(state_dot(AgentState::Blocked, tick), '●');
+            assert_eq!(state_dot(AgentState::Idle, tick), '○');
+            assert_eq!(state_dot(AgentState::Away, tick), '◌');
+        }
+    }
+
+    #[test]
+    fn state_counts_aggregates_totals() {
+        let states = vec![
+            AgentState::Blocked,
+            AgentState::Blocked,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Away,
+        ];
+        let c = state_counts(&states);
+        assert_eq!(c.blocked, 2);
+        assert_eq!(c.working, 1);
+        assert_eq!(c.total, 5);
+    }
+
+    #[test]
+    fn header_count_label_prefers_blocked_then_working_then_total() {
+        let blocked_first = StateCounts {
+            blocked: 2,
+            working: 1,
+            total: 5,
+        };
+        assert_eq!(header_count_label(&blocked_first), "2/5");
+
+        let working_only = StateCounts {
+            blocked: 0,
+            working: 3,
+            total: 5,
+        };
+        assert_eq!(header_count_label(&working_only), "3/5");
+
+        let all_idle = StateCounts {
+            blocked: 0,
+            working: 0,
+            total: 5,
+        };
+        assert_eq!(header_count_label(&all_idle), "5");
     }
 }

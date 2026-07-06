@@ -73,6 +73,7 @@ pub fn run() -> Result<i32> {
     check_legacy_groups_yaml(&mut r);
     check_snooze_count(&mut r);
     check_shell_completions(&mut r);
+    check_mouse_mode(&mut r);
 
     println!();
     let (warns, fails) = r.print();
@@ -448,6 +449,44 @@ fn check_shell_completions(r: &mut Report) {
     }
 }
 
+/// Classify the output of `tmux show -gv mouse` (a bare `on`/`off`, possibly
+/// with trailing whitespace/newline). Pure so it's testable without a tmux
+/// server; `None` means the command failed or produced unparseable output
+/// (e.g. no server running, or a `tmux` too old to have the option).
+fn mouse_check_result(raw: Option<&str>) -> Verdict {
+    let fix = Some("set -g mouse on".to_string());
+    match raw.map(str::trim) {
+        Some("on") => Verdict::Pass("on".into()),
+        Some("off") => Verdict::Warn {
+            msg: "mouse mode is off — `set -g mouse on` enables click-to-focus \
+                  for pinned panes, plus clicking, scrolling, and dragging the \
+                  divider in the sidebar"
+                .into(),
+            fix,
+        },
+        Some(other) => Verdict::Warn {
+            msg: format!("couldn't parse `tmux show -gv mouse` output: {other:?}"),
+            fix,
+        },
+        None => Verdict::Warn {
+            msg: "couldn't read tmux's mouse setting (no server running, or \
+                  `tmux` not on PATH) — can't confirm click-to-focus will work"
+                .into(),
+            fix,
+        },
+    }
+}
+
+fn check_mouse_mode(r: &mut Report) {
+    let label = "tmux mouse mode";
+    let out = Command::new("tmux").args(["show", "-gv", "mouse"]).output();
+    let raw = match out {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        _ => None,
+    };
+    r.add(label, mouse_check_result(raw.as_deref()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +521,37 @@ mod tests {
     fn completion_version_none_for_unmarked_legacy_files() {
         assert_eq!(completion_file_version("#compdef tad\n_tad() { }\n"), None);
         assert_eq!(completion_file_version("# tad-completions: vX\n"), None);
+    }
+
+    #[test]
+    fn mouse_check_result_pass_when_on() {
+        assert!(matches!(mouse_check_result(Some("on")), Verdict::Pass(_)));
+        // tmux appends a trailing newline to `show -gv` output.
+        assert!(matches!(mouse_check_result(Some("on\n")), Verdict::Pass(_)));
+    }
+
+    #[test]
+    fn mouse_check_result_warns_when_off() {
+        match mouse_check_result(Some("off\n")) {
+            Verdict::Warn { msg, fix } => {
+                assert!(msg.contains("set -g mouse on"));
+                assert_eq!(fix.as_deref(), Some("set -g mouse on"));
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_check_result_warns_on_unparseable_output() {
+        assert!(matches!(
+            mouse_check_result(Some("garbage")),
+            Verdict::Warn { .. }
+        ));
+    }
+
+    #[test]
+    fn mouse_check_result_warns_when_none() {
+        assert!(matches!(mouse_check_result(None), Verdict::Warn { .. }));
     }
 
     /// The scripts this repo ships must carry the version doctor expects —

@@ -12,9 +12,10 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/ttpears/tad"></a>
 </p>
 
-A tmux session and group manager. Bare `tad` opens a native TUI dashboard
-that cycles between live sessions, named groups, and the hosts inside those
-groups, with live updates every ~1.5s. `tad <name>` resolves in order:
+A tmux session and group manager. Bare `tad` opens a native TUI dashboard —
+a collapsible sidebar cockpit covering live sessions, running agents, named
+groups, and the hosts inside those groups — with live updates every ~1.5s.
+`tad <name>` resolves in order:
 attach to an existing tmux session by that name → SSH into it as a discovered
 host (in a new session) → create a new blank session by that name.
 `tad -g <group>` opens a multi-host session whose layout you control per
@@ -319,23 +320,17 @@ Requires tmux 3.2+ for `display-popup`.
 If you run multiple Claude Code agents across multiple tmux panes — one per
 repo, one per worktree, parallel investigations — tad has a view for that.
 
-**The Agents tab** (the 4th dashboard tab, jump with `4`) lists every tmux
-pane on this server whose process tree contains a `claude` process,
-showing `<session>:<window>.<pane>  <cwd>  <status>` per row. Status comes
-from the mtime of the most recent transcript jsonl under
-`~/.claude/projects/<encoded-cwd>/`:
-
-```
-●  active · 2s        currently working
-○  idle 4m            transcript hasn't been written in a while
-?  no transcript      can't find a transcript on disk
-```
+**The Agents section** (jump with `2`) lists every tmux pane on this
+server whose process tree contains a `claude` process, showing
+`<session>:<window>.<pane>  <cwd>  <status>` per row with a semantic
+status dot (see the states legend in the Dashboard section above:
+`●` blocked, `◐◓◑◒` working, `○` idle, `◌` away).
 
 `Enter` runs `tmux switch-client` to jump straight to that pane. If
 you've installed the popup keybind, the loop is:
 
 ```
-prefix + D  →  4  (Agents tab)  →  ↑↓ to the blocked one  →  ↵  →  reply
+prefix + D  →  2  (Agents section)  →  ↑↓ to the blocked one  →  ↵  →  reply
 ```
 
 **The status-line segment** so you never have to look first. Add this to
@@ -437,55 +432,94 @@ in scripts, `panes` keeps it off.
 
 ## Dashboard
 
-Bare `tad` opens a TUI with four views — **Sessions** (the lead view),
-Groups, Hosts, Agents — that you cycle through with `Tab`
-(or jump to with `1` / `2` / `3` / `4`):
+Bare `tad` opens a persistent sidebar cockpit, not a tab-cycling
+screen: **Sessions**, **Agents**, **Groups**, and **Hosts** are
+sections stacked in one scrollable sidebar, each collapsible, with a
+live preview of the selected row's pane alongside it. Rows carry a
+semantic status dot instead of plain text:
 
-| Sessions | Groups | Hosts | Agents |
-| --- | --- | --- | --- |
-| (raw tmux sessions) | (multi-host configs) | (one row per host) | (one row per claude pane) |
+```
+●  blocked   — needs your input
+◐◓◑◒  working    — animated, actively producing output
+○  idle      — quiet for a while
+◌  away      — no agent / not currently running
+```
 
-The Agents view groups its rows under per-session headers
+The Agents section groups its rows under per-session headers
 (`session · N agents · M awaiting`), most-recently-active session
 first, so the busiest work reads from the top.
 
-Keys (any view):
+Everything is clickable as well as keyboard-driven: click a row to
+select it, click it again (or double-click) to open it, scroll the
+sidebar or preview with the wheel, and drag the divider between them
+to resize. The footer is a row of clickable chips (`open`, `pin`,
+`new`, `kill`, `theme`, `filter`, `refresh`, `quit`, …) that mirror
+whatever keys apply to the current row, and every modal (theme
+picker, snooze picker, rename, kill confirmation) is clickable too.
+Mouse support needs tmux's own mouse mode; see `tad doctor` and the
+note below.
+
+Keys (any section):
 - `↑/↓` or `j/k`         move selection
-- `Tab` / `Shift-Tab`    cycle views forward/back
-- `1` / `2` / `3` / `4`  jump to Sessions / Groups / Hosts / Agents
+- `Tab` / `Shift-Tab`    jump to next/previous section
+- `1` / `2` / `3` / `4`  jump to Sessions / Agents / Groups / Hosts
+                         (the sidebar's visual top-to-bottom order)
+- `Space`                collapse/expand the section under the cursor
+- `` ` ``                toggle the sidebar as an overlay — only
+                         matters in narrow terminals, where the
+                         sidebar auto-hides behind a `☰` chip
 - `g` / `G`              first / last item
 - `Enter`                open the highlighted item
+- `t`                    open the theme picker (live preview as you
+                         move; `Enter` confirms, `Esc` cancels)
 - `n`                    new — context-sensitive:
-                         * Hosts view → new tmux session with the host
-                           prefilled as the SSH target
-                         * other views → blank new tmux session prompt
-- `o`                    pull the selected pane into a tmux split beside
-                         tad (sessions view: the session's active pane;
-                         agents view: the agent's pane) and focus it —
-                         work in the real pane with the dashboard still
-                         open. `o` again sends it home (recreating its
-                         origin window if it had closed); quitting tad
-                         or opening a row also returns it first. Needs
-                         tad in a regular tmux pane (not the popup).
-- `d`                    kill, with a y/N confirmation (sessions view:
-                         tmux kill-session; agents view: SIGINT to the
+                         * Hosts section → new tmux session with the
+                           host prefilled as the SSH target
+                         * other sections → blank new tmux session prompt
+- `o`                    pin the selected pane into a tmux split
+                         beside tad (sessions: the session's active
+                         pane; agents: the agent's pane) and focus
+                         it — work in the real pane with the
+                         dashboard still open. Up to 4 panes can be
+                         pinned at once, tiled in a grid; `o` again
+                         (or clicking its dot) unpins that one.
+                         Quitting tad returns any pinned panes to
+                         their original windows first. Needs tad in
+                         a regular tmux pane (not the popup).
+- `d`                    kill, with a y/N confirmation (sessions:
+                         tmux kill-session; agents: SIGINT to the
                          agent). Only `y`/`Enter` confirm — Esc, `n`,
                          or any other key cancels.
-- `s` / `S`              snooze / clear snooze (agents view only)
+- `R`                    rename the selected agent's display label
+- `s` / `S`              snooze / clear snooze (agents section only)
 - `/`                    enter filter mode (live — ↑↓ navigates, Enter
-                         opens, Tab cycles views with filter applied,
+                         opens, Tab jumps sections with filter applied,
                          Esc exits and clears)
 - `r`                    manual refresh
 - `q` or `Esc`           quit
 
-While a pane is pulled, tad's preview column collapses (the real pane
-is the preview now) and the status line shows `◀ name pulled — o
-return`. One pane at a time; pulling another row swaps them.
+The sidebar auto-refreshes every ~1.5 seconds. Selection, collapsed
+sections, and sidebar width are all remembered across launches in
+`$XDG_STATE_HOME/tad/dashboard.state` (typically
+`~/.local/state/tad/dashboard.state`); first launch defaults to
+Sessions, nothing collapsed.
 
-All views auto-refresh every ~1.5 seconds. The last view you were on
-is remembered across launches in `$XDG_STATE_HOME/tad/dashboard.state`
-(typically `~/.local/state/tad/dashboard.state`); first launch defaults
-to Sessions.
+By default tad sends a desktop notification the moment an agent turns
+blocked (needs your input). Disable it with `ui.notify_on_blocked:
+false` in `~/.config/tad/config.yaml`.
+
+### Mouse support
+
+The sidebar, preview, footer chips, and modals all respond to clicks
+and scroll natively. Clicking to focus a *pinned* pane, though, is
+tmux's job, not tad's — it needs tmux's own mouse mode:
+
+```tmux
+set -g mouse on
+```
+
+`tad doctor` checks this (`tmux show -gv mouse`) and warns if it's
+off.
 
 ## Theme
 

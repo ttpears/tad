@@ -212,67 +212,6 @@ fn decide(ev: &Event) -> Option<Attention> {
     }
 }
 
-/// Cap on the text returned by `last_assistant_text*` so a giant
-/// message can't bloat the preview render.
-const TAIL_TEXT_CAP: usize = 2000;
-
-/// Last assistant text from the tail of a transcript jsonl. Reads at
-/// most the final 256KB of the file (same bounded-IO approach as
-/// `classify_file`). None when the file is unreadable or no assistant
-/// text appears in that window.
-pub fn last_assistant_text(path: &Path) -> Option<String> {
-    let meta = fs::metadata(path).ok()?;
-    let start = meta.len().saturating_sub(TAIL_WINDOW_BYTES);
-    let bytes = read_tail(path, start).ok()?;
-    last_assistant_text_in(&bytes)
-}
-
-/// Hermetic core of `last_assistant_text` — public for tests.
-///
-/// Walks lines newest-to-oldest for the first assistant event whose
-/// content has non-empty text blocks; joins multiple text blocks with
-/// newlines. Malformed lines (including the partial line at the head
-/// of the tail window) are skipped, same as `classify`.
-pub fn last_assistant_text_in(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    for raw in text.lines().rev() {
-        let trimmed = raw.trim();
-        // Same cheap pre-filter as classify: skip the many non-message
-        // event kinds without paying serde overhead.
-        if trimmed.is_empty() || !trimmed.contains("\"type\":\"assistant\"") {
-            continue;
-        }
-        let Ok(ev) = serde_json::from_str::<TextEvent>(trimmed) else {
-            continue;
-        };
-        if ev.r#type.as_deref() != Some("assistant") {
-            continue;
-        }
-        let Some(msg) = ev.message else {
-            continue;
-        };
-        let joined = msg
-            .content
-            .iter()
-            .filter(|b| b.r#type.as_deref() == Some("text"))
-            .filter_map(|b| b.text.as_deref())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if joined.is_empty() {
-            continue;
-        }
-        if joined.chars().count() > TAIL_TEXT_CAP {
-            let mut capped: String = joined.chars().take(TAIL_TEXT_CAP).collect();
-            capped.push('…');
-            return Some(capped);
-        }
-        return Some(joined);
-    }
-    None
-}
-
 // ---- JSON event shape (only the fields we care about) ----
 
 #[derive(Debug, Deserialize, Default)]
@@ -286,29 +225,6 @@ struct Event {
 #[serde(default)]
 struct Message {
     stop_reason: Option<String>,
-}
-
-// Richer shapes for last_assistant_text — kept separate from
-// Event/Message so classify's hot path doesn't parse content blocks
-// it never looks at.
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct TextEvent {
-    r#type: Option<String>,
-    message: Option<TextMessage>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct TextMessage {
-    content: Vec<TextBlock>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct TextBlock {
-    r#type: Option<String>,
-    text: Option<String>,
 }
 
 #[cfg(test)]
@@ -457,97 +373,5 @@ this is not json at all
     fn away_summary_alone_is_unknown() {
         let lines = "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"…\"}\n";
         assert_eq!(classify(lines.as_bytes()), Attention::Unknown);
-    }
-
-    #[test]
-    fn last_assistant_text_finds_newest_assistant_text() {
-        let lines = "\
-{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"older answer\"}]}}
-{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"next question\"}]}}
-{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"newest answer\"}]}}
-";
-        assert_eq!(
-            last_assistant_text_in(lines.as_bytes()).as_deref(),
-            Some("newest answer")
-        );
-    }
-
-    #[test]
-    fn last_assistant_text_skips_tool_only_events() {
-        // Newest assistant event has only a tool_use block — walk back
-        // to the previous assistant event that actually said something.
-        let lines = "\
-{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"the words\"}]}}
-{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"Bash\"}]}}
-";
-        assert_eq!(
-            last_assistant_text_in(lines.as_bytes()).as_deref(),
-            Some("the words")
-        );
-    }
-
-    #[test]
-    fn last_assistant_text_joins_multiple_text_blocks() {
-        let lines = "\
-{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"},{\"type\":\"tool_use\",\"name\":\"Read\"},{\"type\":\"text\",\"text\":\"second\"}]}}
-";
-        assert_eq!(
-            last_assistant_text_in(lines.as_bytes()).as_deref(),
-            Some("first\nsecond")
-        );
-    }
-
-    #[test]
-    fn last_assistant_text_none_when_no_assistant_text() {
-        let lines = "\
-{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello?\"}]}}
-{\"type\":\"system\",\"subtype\":\"away_summary\"}
-";
-        assert_eq!(last_assistant_text_in(lines.as_bytes()), None);
-    }
-
-    #[test]
-    fn last_assistant_text_skips_malformed_lines() {
-        let lines = "\
-{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"survives\"}]}}
-{\"type\":\"assistant\",this is broken json
-";
-        assert_eq!(
-            last_assistant_text_in(lines.as_bytes()).as_deref(),
-            Some("survives")
-        );
-    }
-
-    #[test]
-    fn last_assistant_text_caps_giant_messages() {
-        let big = "x".repeat(5000);
-        let line = format!(
-            "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{big}\"}}]}}}}\n"
-        );
-        let out = last_assistant_text_in(line.as_bytes()).unwrap();
-        // 2000 chars + the ellipsis marker
-        assert_eq!(out.chars().count(), 2001);
-        assert!(out.ends_with('…'));
-    }
-
-    /// Empty input → None (not a panic) — mirrors classify's
-    /// empty_input_is_unknown.
-    #[test]
-    fn last_assistant_text_empty_input_is_none() {
-        assert_eq!(last_assistant_text_in(b""), None);
-    }
-
-    /// An assistant event whose only text block is whitespace doesn't
-    /// count as "said something" — walk back to the previous one.
-    #[test]
-    fn last_assistant_text_skips_whitespace_only_messages() {
-        let lines = "\
-{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"real words\"}]}}
-{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"   \"}]}}
-";
-        assert_eq!(
-            last_assistant_text_in(lines.as_bytes()).as_deref(),
-            Some("real words")
-        );
     }
 }

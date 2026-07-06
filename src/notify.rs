@@ -13,6 +13,14 @@
 //!    right now? "Looking at" means active pane AND the containing
 //!    session has at least one attached client. A pane that is the
 //!    active pane in a detached session is not visited.
+//!
+//! A third, unrelated operation also lives here: `send_blocked`, an
+//! actual OS desktop notification (via the freedesktop `notify-send`
+//! CLI — no new crate dependency, same "shell out and ignore failure"
+//! idiom as `TmuxNotifier::set_attn`) fired by the dashboard when an
+//! agent transitions into `Blocked`. It shares this module because
+//! it's the same category of thing — a best-effort "look at this"
+//! signal — even though the transport differs.
 
 use std::process::Command;
 
@@ -76,6 +84,17 @@ impl AttentionNotifier for TmuxNotifier {
         let session_attached = parts.next().unwrap_or("0");
         pane_active == "1" && session_attached != "0"
     }
+}
+
+/// Fire a desktop notification announcing that `window_name` is
+/// blocked, waiting on the user. Best-effort, matching the
+/// `TmuxNotifier::set_attn` idiom: one shell-out, failures (missing
+/// `notify-send`, no notification daemon, a headless/CI environment)
+/// are swallowed rather than surfaced — a broken notification path
+/// must never interrupt the dashboard.
+pub(crate) fn send_blocked(window_name: &str) {
+    let body = format!("{window_name} is blocked, waiting for input");
+    let _ = Command::new("notify-send").args(["tad", &body]).status();
 }
 
 /// Strip the `.pane` suffix off a `session:window.pane` target so the

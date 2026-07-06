@@ -32,6 +32,11 @@ pub struct UiConfig {
     /// The dashboard's Agents view still surfaces stale AwaitingInput
     /// rows (with their age) so abandoned work isn't invisible.
     pub awaiting_freshness: Duration,
+    /// Fire a desktop notification (`notify::send_blocked`) when an
+    /// agent transitions into `Blocked` while the dashboard is open.
+    /// Default true; set `notify_on_blocked: false` under `ui:` to
+    /// quiet it.
+    pub notify_on_blocked: bool,
 }
 
 impl Default for UiConfig {
@@ -44,6 +49,7 @@ impl Default for UiConfig {
                 Duration::from_secs(2 * 3600),
             ],
             awaiting_freshness: Duration::from_secs(10 * 60),
+            notify_on_blocked: true,
         }
     }
 }
@@ -60,6 +66,7 @@ struct UiWire {
     attention_idle_secs: Option<u64>,
     snooze_intervals_secs: Option<Vec<u64>>,
     awaiting_freshness_secs: Option<u64>,
+    notify_on_blocked: Option<bool>,
 
     // Legacy keys (pre-v0.11). Kept so existing configs deserialize
     // cleanly. `auto_popup_idle_secs` is mapped onto the new
@@ -155,6 +162,10 @@ fn merge(wire: Wire) -> UiConfig {
             .awaiting_freshness_secs
             .map(Duration::from_secs)
             .unwrap_or(defaults.awaiting_freshness),
+        notify_on_blocked: wire
+            .ui
+            .notify_on_blocked
+            .unwrap_or(defaults.notify_on_blocked),
     }
 }
 
@@ -175,6 +186,7 @@ mod tests {
             ]
         );
         assert_eq!(d.awaiting_freshness, Duration::from_secs(600));
+        assert!(d.notify_on_blocked);
     }
 
     #[test]
@@ -227,6 +239,22 @@ groups:
         let wire: Wire = serde_yml::from_str(yaml).unwrap();
         let cfg = merge(wire);
         assert_eq!(cfg.snooze_intervals.len(), 3);
+    }
+
+    #[test]
+    fn notify_on_blocked_false_is_honored() {
+        let yaml = "ui:\n  notify_on_blocked: false\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
+        assert!(!cfg.notify_on_blocked);
+    }
+
+    #[test]
+    fn notify_on_blocked_defaults_true_when_absent() {
+        let yaml = "ui:\n  attention_idle_secs: 30\n";
+        let wire: Wire = serde_yml::from_str(yaml).unwrap();
+        let cfg = merge(wire);
+        assert!(cfg.notify_on_blocked);
     }
 
     #[test]

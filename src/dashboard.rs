@@ -1,15 +1,17 @@
 //! Native TUI dashboard. Live updates every ~1.5s.
 //!
 //! This file is the spine — it owns the shared state types (`App`,
-//! `AppData`, `View`, `InputMode`, `TextInput`, `OpenTarget`-via-
-//! `dispatch`), `state_path`/`load`/`save_last_view`, `RunOpts` and
-//! `run_with`, and the event/render loop. Everything else lives in
-//! a submodule:
+//! `AppData`, `InputMode`, `TextInput`, `OpenTarget`-via-`dispatch`),
+//! `state_path`/`load_state`/`save_state`, `RunOpts` and `run_with`,
+//! and the event/render loop. Everything else lives in a submodule:
 //!
+//!   * `rows`     — pure row-tree model (`Section`, `RowKind`, `Row`,
+//!     `build_rows`, cursor-movement helpers)
+//!   * `grid`     — pin-grid decision logic (multi-pane precursor)
 //!   * `keys`     — per-mode keyboard handlers + global `handle_key`
-//!   * `render`   — `ui()` + tabs / main / status composition
-//!   * `format`   — per-view row formatters + cwd/truncate helpers
-//!   * `preview`  — per-view preview-pane builders
+//!   * `render`   — `ui()` + header / main / status composition
+//!   * `format`   — per-row-kind formatters + cwd/truncate helpers
+//!   * `preview`  — per-row-kind preview-pane builders
 //!   * `modal`    — new-session / snooze / rename / confirm-kill overlays
 //!   * `dispatch` — `OpenTarget` + post-dashboard tmux side effects
 //!
@@ -17,36 +19,43 @@
 //! tree, not to the rest of the crate. The crate-public surface is
 //! just `RunOpts` and `run_with`.
 
+mod action;
 mod dispatch;
 mod format;
+mod grid;
+mod hit;
 mod keys;
 mod modal;
+mod mouse;
 mod preview;
 mod render;
+mod rows;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::{backend::CrosstermBackend, widgets::ListState, Terminal};
-use std::path::PathBuf;
+use ratatui::{backend::CrosstermBackend, Terminal};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::{
-    agents::{self, Agent},
-    config, groups,
+    agents::{self, Agent, AgentState},
+    config, groups, notify,
     sessions::{self, Session},
     theme::{self, Theme},
 };
 
 use dispatch::OpenTarget;
 
-/// `~/.local/state/tad/dashboard.state` — last view the user was on.
-/// Falls back to the cache dir and finally `/tmp` so we always have a path.
+/// `~/.local/state/tad/dashboard.state` — the user's cursor position,
+/// collapsed sections and sidebar width. Falls back to the cache dir
+/// and finally `/tmp` so we always have a path.
 fn state_path() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::cache_dir)
@@ -158,93 +167,144 @@ impl TextInput {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum View {
-    Sessions,
-    Groups,
-    Hosts,
-    Agents,
-}
-
-impl View {
-    pub(super) fn next(self) -> Self {
-        match self {
-            View::Sessions => View::Groups,
-            View::Groups => View::Hosts,
-            View::Hosts => View::Agents,
-            View::Agents => View::Sessions,
-        }
-    }
-    pub(super) fn prev(self) -> Self {
-        match self {
-            View::Sessions => View::Agents,
-            View::Groups => View::Sessions,
-            View::Hosts => View::Groups,
-            View::Agents => View::Hosts,
-        }
-    }
-    pub(super) fn title(self) -> &'static str {
-        match self {
-            View::Sessions => "Sessions",
-            View::Groups => "Groups",
-            View::Hosts => "Hosts",
-            View::Agents => "Agents",
-        }
-    }
-    pub(super) fn index(self) -> usize {
-        match self {
-            View::Sessions => 0,
-            View::Groups => 1,
-            View::Hosts => 2,
-            View::Agents => 3,
-        }
-    }
-    pub(super) fn slug(self) -> &'static str {
-        match self {
-            View::Sessions => "sessions",
-            View::Groups => "groups",
-            View::Hosts => "hosts",
-            View::Agents => "agents",
-        }
-    }
-    /// Unrecognized slugs — including the legacy `"projects"` persisted
-    /// by pre-removal versions — return None; the caller falls back to
-    /// Sessions so an old state file can't strand the user.
-    pub(super) fn from_slug(s: &str) -> Option<Self> {
-        match s.trim() {
-            "sessions" => Some(View::Sessions),
-            "groups" => Some(View::Groups),
-            "hosts" => Some(View::Hosts),
-            "agents" => Some(View::Agents),
-            _ => None,
-        }
-    }
-}
-
-fn load_last_view() -> Option<View> {
-    std::fs::read_to_string(state_path())
-        .ok()
-        .and_then(|s| View::from_slug(&s))
-}
-
-fn save_last_view(view: View) {
-    let path = state_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, view.slug());
-}
-
 /// Single-entry cache for the preview pane. Building a preview can
 /// shell out to tmux and read transcript files, and the draw loop runs
 /// several times a second — without this the selected row's preview
-/// would redo that IO every frame. Keyed by (view, row, refresh
+/// would redo that IO every frame. Keyed by (row kind, refresh
 /// generation): selection moves and data refreshes miss naturally,
 /// every other frame hits.
 #[derive(Default)]
 pub(super) struct PreviewCache {
-    pub(super) key: Option<(View, String, u64)>,
+    pub(super) key: Option<(rows::RowKind, u64)>,
     pub(super) lines: Vec<Line<'static>>,
+}
+
+// ---- persisted state (selection / collapsed sections / sidebar width) ----
+
+/// Parsed contents of `state_path()`. All three fields are optional —
+/// a fresh install, a partially-written file, or an unrecognized slug
+/// all degrade to `None`/empty rather than an error.
+#[derive(Default, Debug, PartialEq)]
+struct PersistedState {
+    selected: Option<(rows::Section, String)>,
+    collapsed: std::collections::HashSet<rows::Section>,
+    sidebar_width: Option<u16>,
+}
+
+/// Reconstruct the `RowKind` a persisted `(section, item)` pair refers
+/// to. An empty item name means "that section's header row".
+fn kind_for_selection(section: rows::Section, item: &str) -> rows::RowKind {
+    if item.is_empty() {
+        return rows::RowKind::SectionHeader(section);
+    }
+    match section {
+        rows::Section::Sessions => rows::RowKind::Session(item.to_string()),
+        rows::Section::Agents => rows::RowKind::Agent(item.to_string()),
+        rows::Section::Groups => rows::RowKind::Group(item.to_string()),
+        rows::Section::Hosts => rows::RowKind::Host(item.to_string()),
+    }
+}
+
+/// The inverse of `kind_for_selection` — what would we persist for this
+/// row? `None` for `AgentGroupHeader`, which is never a cursor position.
+fn selection_key(kind: &rows::RowKind) -> Option<(rows::Section, String)> {
+    match kind {
+        rows::RowKind::SectionHeader(s) => Some((*s, String::new())),
+        rows::RowKind::Session(n) => Some((rows::Section::Sessions, n.clone())),
+        rows::RowKind::Agent(t) => Some((rows::Section::Agents, t.clone())),
+        rows::RowKind::Group(n) => Some((rows::Section::Groups, n.clone())),
+        rows::RowKind::Host(n) => Some((rows::Section::Hosts, n.clone())),
+        rows::RowKind::AgentGroupHeader(_) => None,
+    }
+}
+
+/// Parse the `k=v` state-file format:
+/// `selected=<section-slug>:<item-name-or-empty-for-header>`,
+/// `collapsed=<comma-separated-slugs>`, `sidebar=<cols>`.
+///
+/// Tolerates the legacy pre-rework format, which was just a bare view
+/// slug (`"sessions"`, `"agents"`, …) with no `=` at all: that selects
+/// the matching section's header, with nothing collapsed and the
+/// default width. An unrecognized legacy slug (e.g. the even-older
+/// `"projects"`) yields a fully-default state.
+fn parse_state(content: &str) -> PersistedState {
+    if !content.contains('=') {
+        let slug = content.trim();
+        return match rows::Section::from_slug(slug) {
+            Some(section) => PersistedState {
+                selected: Some((section, String::new())),
+                ..Default::default()
+            },
+            None => PersistedState::default(),
+        };
+    }
+    let mut state = PersistedState::default();
+    for line in content.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k {
+            "selected" => {
+                if let Some((slug, item)) = v.split_once(':') {
+                    if let Some(section) = rows::Section::from_slug(slug) {
+                        state.selected = Some((section, item.to_string()));
+                    }
+                }
+            }
+            "collapsed" => {
+                state.collapsed = v.split(',').filter_map(rows::Section::from_slug).collect();
+            }
+            "sidebar" => {
+                if let Ok(n) = v.trim().parse::<u16>() {
+                    state.sidebar_width = Some(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    state
+}
+
+/// Render the `k=v` state-file format from live values. Pure — the
+/// caller decides what "selected" resolves to (`selection_key` of the
+/// current row).
+fn serialize_state(
+    selected: Option<(rows::Section, String)>,
+    collapsed: &std::collections::HashSet<rows::Section>,
+    sidebar_width: u16,
+) -> String {
+    let selected_str = selected
+        .map(|(s, item)| format!("{}:{}", s.slug(), item))
+        .unwrap_or_default();
+    let mut collapsed_slugs: Vec<&str> = collapsed.iter().map(|s| s.slug()).collect();
+    collapsed_slugs.sort_unstable();
+    format!(
+        "selected={selected_str}\ncollapsed={}\nsidebar={sidebar_width}\n",
+        collapsed_slugs.join(",")
+    )
+}
+
+fn load_state_from(path: &Path) -> PersistedState {
+    std::fs::read_to_string(path)
+        .map(|s| parse_state(&s))
+        .unwrap_or_default()
+}
+
+fn save_state_to(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, content);
+}
+
+fn load_state() -> PersistedState {
+    load_state_from(&state_path())
+}
+
+fn save_state(app: &App) {
+    let selected = app.selected_row().and_then(|r| selection_key(&r.kind));
+    let content = serialize_state(selected, &app.collapsed, app.sidebar_width);
+    save_state_to(&state_path(), &content);
 }
 
 pub(super) struct AppData {
@@ -347,11 +407,11 @@ impl AppData {
     }
 }
 
-/// The one pane currently pulled beside tad, with everything needed to
-/// send it home. All ids are tmux's stable handles (`%pane`, `@window`),
-/// resolved at pull time so renames/shuffles can't misroute the return.
+/// A pane currently pinned beside tad, with everything needed to send
+/// it home. All ids are tmux's stable handles (`%pane`, `@window`),
+/// resolved at pin time so renames/shuffles can't misroute the return.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) struct PulledPane {
+pub(super) struct PinnedPane {
     pub(super) pane_id: String,
     pub(super) origin_window_id: String,
     pub(super) origin_session: String,
@@ -359,6 +419,17 @@ pub(super) struct PulledPane {
     pub(super) origin_window_index: String,
     /// Row label for the status line (`session:window`).
     pub(super) label: String,
+}
+
+/// Flash text for `App::refresh` when `dispatch::validate_pins` drops
+/// one or more panes that vanished while pinned — singular wording for
+/// exactly one, plural otherwise.
+fn pins_vanished_message(dropped: usize) -> String {
+    if dropped == 1 {
+        "1 pinned pane vanished".to_string()
+    } else {
+        format!("{dropped} pinned panes vanished")
+    }
 }
 
 /// Victim captured when the user pressed `d`, so the ~1.5s background
@@ -390,6 +461,11 @@ pub(super) enum InputMode {
     /// `d` on a Sessions/Agents row: y/N confirmation before the kill.
     /// Default is No — only y/Y/Enter confirm.
     ConfirmKill,
+    /// `t` (or the footer's theme chip): picker over
+    /// `theme::builtin_names()`. Moving the cursor live-applies the
+    /// theme so the picker doubles as a preview; Esc restores whatever
+    /// was active before the picker opened.
+    ThemeSelect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -399,12 +475,43 @@ pub(super) enum NewSessionField {
 }
 
 pub(super) struct App {
-    pub(super) view: View,
     pub(super) data: AppData,
-    pub(super) list_state_sessions: ListState,
-    pub(super) list_state_groups: ListState,
-    pub(super) list_state_hosts: ListState,
-    pub(super) list_state_agents: ListState,
+    /// Flat row tree — rebuilt by [`App::refresh_rows`] whenever the
+    /// data, collapsed set, or filter text changes.
+    pub(super) rows: Vec<rows::Row>,
+    /// Index into `rows`. Always on a selectable row (see
+    /// `rows::step_selectable`) except transiently during a rebuild.
+    pub(super) cursor: usize,
+    /// First visible row in the sidebar viewport; `render::scroll_to_cursor`
+    /// keeps this in sync with `cursor` so the selection stays on screen.
+    pub(super) sidebar_scroll: usize,
+    pub(super) collapsed: std::collections::HashSet<rows::Section>,
+    /// Sidebar width in columns; persisted, clamped to 20..=60.
+    pub(super) sidebar_width: u16,
+    /// Narrow-terminal overlay mode: is the sidebar currently drawn
+    /// full-screen over the main pane? (No key toggles this yet — a
+    /// later task wires one up; the renderer already honors it.)
+    pub(super) sidebar_overlay: bool,
+    /// Panes currently pinned beside tad, in pin order (see
+    /// `grid::MAX_PINS`).
+    pub(super) pins: Vec<PinnedPane>,
+    /// This window's `pane-border-status` value from just before the
+    /// first pin flipped it on, so the last unpin (or exit with pins
+    /// still out) can restore it. `None` means either nothing's been
+    /// pinned yet, or the value was unset (empty `show-options`
+    /// output) — both restore the same way (`set -wu`).
+    pub(super) saved_border_status: Option<String>,
+    /// Bumped once per `refresh()`; animates `agents::state_dot`'s
+    /// Working frames.
+    pub(super) spinner_tick: u64,
+    /// Agent state as of the previous refresh, keyed by target.
+    /// `refresh()` diffs this against the freshly computed state each
+    /// tick (via `blocked_transitions`) to detect genuine
+    /// Working/absent → Blocked transitions worth a desktop
+    /// notification, then replaces it wholesale. Seeded from the
+    /// initial scan in `App::new` so simply opening the dashboard with
+    /// already-blocked agents doesn't fire one notification per row.
+    pub(super) prev_agent_states: HashMap<String, AgentState>,
     /// Cursor over `data.ui.snooze_intervals` in the snooze modal.
     pub(super) snooze_cursor: usize,
     /// New window name being typed in the rename-agent modal.
@@ -414,8 +521,6 @@ pub(super) struct App {
     pub(super) rename_agent_target: Option<String>,
     /// Victim of the pending confirm-kill modal (captured at arm time).
     pub(super) confirm_kill: Option<ConfirmKillTarget>,
-    /// Pane currently pulled beside tad, if any. See [`PulledPane`].
-    pub(super) pulled_pane: Option<PulledPane>,
     /// Transient one-line status message (guard refusals). Cleared on
     /// the next keypress.
     pub(super) flash: Option<String>,
@@ -432,55 +537,106 @@ pub(super) struct App {
     pub(super) should_quit: bool,
     pub(super) open_after: Option<OpenTarget>,
     pub(super) theme: Theme,
+    /// Cursor over `theme::builtin_names()` in the theme picker.
+    pub(super) theme_cursor: usize,
+    /// The theme active just before the picker opened, so Esc can
+    /// restore it after the cursor's live-preview has changed
+    /// `app.theme`. `None` whenever the picker isn't open.
+    pub(super) theme_before: Option<Theme>,
+    /// `theme::current_name()` at the moment the picker opened —
+    /// captured alongside `theme_before` for symmetry, even though
+    /// restoring only needs the `Theme` value itself.
+    pub(super) theme_before_name: Option<String>,
     /// See [`PreviewCache`].
     pub(super) preview_cache: PreviewCache,
     /// Bumped by `refresh()`; part of the preview-cache key so cached
     /// preview lines never outlive the data they were built from.
     pub(super) refresh_generation: u64,
+    /// Screen-space click/scroll regions, rebuilt every frame by
+    /// `render.rs`. See `hit::HitMap`.
+    pub(super) hits: hit::HitMap,
+    /// Set while the user is dragging the sidebar/preview divider.
+    pub(super) drag: Option<hit::DragKind>,
+    /// Vertical scroll offset into the preview pane (mouse wheel over
+    /// `PreviewZone`); reset to 0 whenever the selection changes.
+    pub(super) preview_scroll: u16,
+}
+
+/// Compute every present agent's semantic state for this tick, using
+/// the same `snoozed` + `attention_idle` inputs the row/dot renderer
+/// uses (`format::snoozed`, `agents::agent_state`) so the notification
+/// path and the sidebar can never disagree about what "Blocked" means.
+/// Shared by `App::new` (to seed `prev_agent_states` from the initial
+/// scan) and `App::refresh` (to detect transitions each tick).
+fn agent_states(data: &AppData) -> Vec<(String, AgentState)> {
+    data.agents
+        .iter()
+        .map(|a| {
+            (
+                a.target.clone(),
+                agents::agent_state(a, format::snoozed(data, &a.target), data.ui.attention_idle),
+            )
+        })
+        .collect()
+}
+
+/// Targets that should fire a desktop notification this refresh:
+/// present in `now` as Blocked, previous state != Blocked (or absent),
+/// not snoozed, and cfg enabled.
+pub(super) fn blocked_transitions(
+    prev: &HashMap<String, AgentState>,
+    now: &[(String, AgentState)],
+    snoozed: &dyn Fn(&str) -> bool,
+    enabled: bool,
+) -> Vec<String> {
+    if !enabled {
+        return Vec::new();
+    }
+    now.iter()
+        .filter(|(target, state)| {
+            *state == AgentState::Blocked
+                && prev.get(target) != Some(&AgentState::Blocked)
+                && !snoozed(target)
+        })
+        .map(|(target, _)| target.clone())
+        .collect()
 }
 
 impl App {
     fn new() -> Self {
         let data = AppData::load();
-        let mut s = ListState::default();
-        s.select(if data.sessions.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        let mut g = ListState::default();
-        g.select(if data.groups.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        let mut h = ListState::default();
-        h.select(if data.hosts.is_empty() { None } else { Some(0) });
-        let mut a = ListState::default();
-        a.select(if data.agents.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        // The Agents view's items() injects session-header rows; the
-        // initial index 0 may land on a header. Snap to the next data
-        // row so the first thing the user sees highlighted is an
-        // actual agent, not a synthetic separator.
-        snap_agents_selection_to_data_row(&mut a, &data);
+        let persisted = load_state();
+        let sidebar_width = persisted.sidebar_width.unwrap_or(32).clamp(20, 60);
+        let collapsed = persisted.collapsed;
+        let rows = rows::build_rows(&data, &collapsed, "");
+        let cursor = persisted
+            .selected
+            .as_ref()
+            .and_then(|(section, item)| rows::index_of(&rows, &kind_for_selection(*section, item)))
+            .or_else(|| rows::first_item_index(&rows))
+            .unwrap_or(0);
+        // Seed from the initial scan rather than starting empty: every
+        // agent already Blocked when tad opens must NOT fire a
+        // notification on the very first refresh — only genuine
+        // transitions observed while the dashboard is running should.
+        let prev_agent_states: HashMap<String, AgentState> =
+            agent_states(&data).into_iter().collect();
         App {
-            // Default to Sessions. Old `dashboard.state` still wins when
-            // present; a legacy "projects" value falls back here too.
-            view: load_last_view().unwrap_or(View::Sessions),
             data,
-            list_state_sessions: s,
-            list_state_groups: g,
-            list_state_hosts: h,
-            list_state_agents: a,
+            rows,
+            cursor,
+            sidebar_scroll: 0,
+            collapsed,
+            sidebar_width,
+            sidebar_overlay: false,
+            pins: Vec::new(),
+            saved_border_status: None,
+            spinner_tick: 0,
+            prev_agent_states,
             snooze_cursor: 0,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
             confirm_kill: None,
-            pulled_pane: None,
             flash: None,
             from_popup: false,
             filter: TextInput::new(),
@@ -491,99 +647,107 @@ impl App {
             should_quit: false,
             open_after: None,
             theme: theme::load(),
+            theme_cursor: 0,
+            theme_before: None,
+            theme_before_name: None,
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
+            hits: hit::HitMap::default(),
+            drag: None,
+            preview_scroll: 0,
         }
     }
 
-    pub(super) fn list_state_mut(&mut self) -> &mut ListState {
-        match self.view {
-            View::Sessions => &mut self.list_state_sessions,
-            View::Groups => &mut self.list_state_groups,
-            View::Hosts => &mut self.list_state_hosts,
-            View::Agents => &mut self.list_state_agents,
-        }
+    /// Rebuild `rows` from the current `data`/`collapsed`/`filter`,
+    /// keeping the cursor on the same `RowKind` when it's still
+    /// present; otherwise snap forward to the nearest selectable row.
+    pub(super) fn refresh_rows(&mut self) {
+        let current_kind = self.rows.get(self.cursor).map(|r| r.kind.clone());
+        self.rows = rows::build_rows(&self.data, &self.collapsed, self.filter.as_str());
+        self.cursor = current_kind
+            .as_ref()
+            .and_then(|k| rows::index_of(&self.rows, k))
+            .or_else(|| {
+                let clamped = self.cursor.min(self.rows.len().saturating_sub(1));
+                rows::step_selectable(&self.rows, clamped, 0)
+            })
+            .unwrap_or(0);
     }
 
-    pub(super) fn items(&self) -> Vec<String> {
-        let iter: Box<dyn Iterator<Item = String>> = match self.view {
-            View::Sessions => Box::new(self.data.sessions.iter().map(|s| s.name.clone())),
-            View::Groups => Box::new(self.data.groups.iter().map(|(n, _)| n.clone())),
-            View::Hosts => Box::new(self.data.hosts.iter().map(|r| r.name.clone())),
-            View::Agents => Box::new(agent_items_grouped_by_session(&self.data).into_iter()),
-        };
-        if self.filter.is_empty() {
-            iter.collect()
-        } else {
-            let f = self.filter.as_str().to_lowercase();
-            iter.filter(|x| x.to_lowercase().contains(&f)).collect()
-        }
-    }
-
-    pub(super) fn selected(&self) -> Option<String> {
-        let state = match self.view {
-            View::Sessions => &self.list_state_sessions,
-            View::Groups => &self.list_state_groups,
-            View::Hosts => &self.list_state_hosts,
-            View::Agents => &self.list_state_agents,
-        };
-        let idx = state.selected()?;
-        let item = self.items().get(idx).cloned()?;
-        // Header rows in the Agents view aren't "selections" for any
-        // action key — return None so Enter / d / R / s / n no-op
-        // and snooze/rename modals don't open with a header as their
-        // target.
-        if is_agent_header(&item) {
-            return None;
-        }
-        Some(item)
+    pub(super) fn selected_row(&self) -> Option<&rows::Row> {
+        self.rows.get(self.cursor)
     }
 
     pub(super) fn refresh(&mut self) {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        self.spinner_tick = self.spinner_tick.wrapping_add(1);
         self.data = AppData::load();
-        // Clamp selections to new list sizes. The Agents view uses a
-        // grouped list (session header rows interleaved with agent
-        // rows), so the row count there comes from the grouped items()
-        // helper rather than data.agents.len(), and the clamp needs
-        // to land on a non-header row.
-        let agents_view_len = agent_items_grouped_by_session(&self.data).len();
-        for (state, len) in [
-            (&mut self.list_state_sessions, self.data.sessions.len()),
-            (&mut self.list_state_groups, self.data.groups.len()),
-            (&mut self.list_state_hosts, self.data.hosts.len()),
-            (&mut self.list_state_agents, agents_view_len),
-        ] {
-            match (state.selected(), len) {
-                (_, 0) => state.select(None),
-                (Some(i), n) if i >= n => state.select(Some(n - 1)),
-                (None, _) => state.select(Some(0)),
-                _ => {}
+        let pins = std::mem::take(&mut self.pins);
+        let (kept, dropped) = dispatch::validate_pins(pins);
+        self.pins = kept;
+        if dropped > 0 {
+            self.flash = Some(pins_vanished_message(dropped));
+        }
+
+        // Compute every present agent's state once this refresh (the
+        // same snoozed + attention_idle inputs the row/dot renderer
+        // uses — see `format::snoozed` and `agents::agent_state`), fire
+        // a desktop notification for genuine Working/absent → Blocked
+        // transitions, then replace `prev_agent_states` wholesale so
+        // the next refresh diffs against this tick.
+        let now_states = agent_states(&self.data);
+        let notify_enabled = self.data.ui.notify_on_blocked;
+        let targets = blocked_transitions(
+            &self.prev_agent_states,
+            &now_states,
+            &|target| format::snoozed(&self.data, target),
+            notify_enabled,
+        );
+        for target in &targets {
+            if let Some(agent) = self.data.agents.iter().find(|a| &a.target == target) {
+                notify::send_blocked(&agent.window_name);
             }
         }
-        // Ensure the Agents-view selection isn't on a synthetic header
-        // row (would happen on first load and after a refresh narrows
-        // the list).
-        snap_agents_selection_to_data_row(&mut self.list_state_agents, &self.data);
+        self.prev_agent_states = now_states.into_iter().collect();
+
+        self.refresh_rows();
     }
 
     /// Preview lines for the current selection, via the single-entry
     /// cache. Builders only run on a cache miss (selection moved or
     /// the data refreshed).
     pub(super) fn preview_lines(&mut self) -> Vec<Line<'static>> {
-        let Some(name) = self.selected() else {
-            return vec![Line::from(Span::styled(
+        let no_selection = || {
+            vec![Line::from(Span::styled(
                 "no selection",
                 Style::default().fg(self.theme.muted),
-            ))];
+            ))]
         };
-        let key = (self.view, name.clone(), self.refresh_generation);
+        let Some(row) = self.selected_row() else {
+            return no_selection();
+        };
+        let kind = row.kind.clone();
+        let name = match &kind {
+            rows::RowKind::Session(n)
+            | rows::RowKind::Group(n)
+            | rows::RowKind::Host(n)
+            | rows::RowKind::Agent(n) => n.clone(),
+            rows::RowKind::SectionHeader(_) | rows::RowKind::AgentGroupHeader(_) => {
+                return no_selection();
+            }
+        };
+        let key = (kind.clone(), self.refresh_generation);
         if self.preview_cache.key.as_ref() != Some(&key) {
-            let lines = match self.view {
-                View::Sessions => preview::preview_session(&self.data, &name, &self.theme),
-                View::Groups => preview::preview_group(&self.data, &name, &self.theme),
-                View::Hosts => preview::preview_host(&self.data, &name, &self.theme),
-                View::Agents => preview::preview_agent(&self.data, &name, &self.theme),
+            let lines = match &kind {
+                rows::RowKind::Session(_) => {
+                    preview::preview_session(&self.data, &name, &self.theme)
+                }
+                rows::RowKind::Group(_) => preview::preview_group(&self.data, &name, &self.theme),
+                rows::RowKind::Host(_) => preview::preview_host(&self.data, &name, &self.theme),
+                rows::RowKind::Agent(_) => preview::preview_agent(&self.data, &name, &self.theme),
+                rows::RowKind::SectionHeader(_) | rows::RowKind::AgentGroupHeader(_) => {
+                    unreachable!("handled above")
+                }
             };
             self.preview_cache = PreviewCache {
                 key: Some(key),
@@ -596,91 +760,14 @@ impl App {
     }
 }
 
-/// If the agents-view list state is parked on a header row, advance
-/// it forward to the next data row. No-op if the selection is already
-/// on data, or if no agents exist at all.
-pub(super) fn snap_agents_selection_to_data_row(state: &mut ListState, data: &AppData) {
-    let items = agent_items_grouped_by_session(data);
-    if items.is_empty() {
-        return;
-    }
-    let Some(cur) = state.selected() else {
-        return;
-    };
-    let mut idx = cur.min(items.len() - 1);
-    let start = idx;
-    while is_agent_header(&items[idx]) {
-        idx = (idx + 1) % items.len();
-        if idx == start {
-            // Pathological all-headers case (can't happen since a
-            // session only appears when at least one agent belongs to it, but be safe).
-            return;
-        }
-    }
-    state.select(Some(idx));
-}
-
-/// Sentinel that prefixes Agents-view "header" rows — synthetic
-/// non-selectable entries inserted between session groups to visually
-/// separate them. Chosen as ASCII bell + a leading sigil because no
-/// tmux target / agent name will ever contain those characters; the
-/// `§` is the visible part of the rendered header.
-pub(super) const AGENT_HEADER_SIGIL: &str = "\x07§";
-
-pub(super) fn is_agent_header(item: &str) -> bool {
-    item.starts_with(AGENT_HEADER_SIGIL)
-}
-
-/// Build the Agents-view item list: group agents by their tmux session,
-/// most-recently-active session first, then emit one header row followed
-/// by that session's agent target rows (most-recent agent first). The
-/// header carries the session name and an at-a-glance summary
-/// (`N agents · M awaiting`) so the busiest sessions read first.
-fn agent_items_grouped_by_session(data: &AppData) -> Vec<String> {
-    let mut by_session: Vec<(String, Vec<&Agent>)> = Vec::new();
-    for a in &data.agents {
-        match by_session.iter_mut().find(|(s, _)| s == &a.session) {
-            Some((_, v)) => v.push(a),
-            None => by_session.push((a.session.clone(), vec![a])),
-        }
-    }
-    // Most-recently-active session first; None activity sorts last.
-    by_session.sort_by_key(|(_, agents)| {
-        std::cmp::Reverse(agents.iter().filter_map(|a| a.last_activity).max())
-    });
-    let mut items = Vec::new();
-    for (session, mut agents) in by_session {
-        agents.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
-        let awaiting = agents
-            .iter()
-            .filter(|a| a.attention == crate::transcript::Attention::AwaitingInput)
-            .count();
-        let plural = if agents.len() == 1 { "" } else { "s" };
-        let suffix = if awaiting > 0 {
-            format!(" · {awaiting} awaiting")
-        } else {
-            String::new()
-        };
-        items.push(format!(
-            "{AGENT_HEADER_SIGIL} {} · {} agent{plural}{suffix}",
-            session,
-            agents.len()
-        ));
-        for a in agents {
-            items.push(a.target.clone());
-        }
-    }
-    items
-}
-
-/// Options for launching the dashboard. Today: open on a specific agent
-/// row (`--select-agent <target>` — useful for scripts that want to
-/// jump straight to a particular agent).
+/// Options for launching the dashboard. Today: open with a specific
+/// agent row preselected (`--select-agent <target>` — useful for
+/// scripts that want to jump straight to a particular agent).
 #[derive(Debug, Default, Clone)]
 pub struct RunOpts {
-    /// If Some, the dashboard opens on the Agents view with the row whose
-    /// `target` matches preselected. Missing-target = no preselection
-    /// (we still open on Agents).
+    /// If Some, the dashboard preselects the row whose agent `target`
+    /// matches. Missing-target = falls back to the Agents section
+    /// header so the user still lands somewhere relevant.
     pub select_agent: Option<String>,
 }
 
@@ -690,21 +777,33 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
     // wants to define groups.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = app_loop(&mut terminal, opts);
 
+    // Symmetric cleanup on every path, including the error path — an
+    // Err from app_loop must not leave the terminal in mouse-capture /
+    // alternate-screen / raw mode.
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     let mut app = result?;
-    // Every clean exit (q/Esc/Ctrl-C/Enter dispatch) sends a pulled
-    // pane home before tad leaves the building.
-    if let Some(p) = app.pulled_pane.take() {
+    // Every clean exit (q/Esc/Ctrl-C/Enter dispatch) sends every pinned
+    // pane home before tad leaves the building, then — if any were out
+    // — restores the border-status/width the first pin changed.
+    let had_pins = !app.pins.is_empty();
+    for p in app.pins.drain(..) {
         dispatch::return_pane(&p);
+    }
+    if had_pins {
+        dispatch::restore_border_and_width(&mut app.saved_border_status);
     }
     match app.open_after {
         Some(OpenTarget::AttachExisting(name)) => sessions::attach_or_create_silent(&name, None),
@@ -718,23 +817,36 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
     }
 }
 
+/// Snapshot of everything `save_state` persists, used to detect
+/// whether a keypress actually changed anything worth writing.
+fn persist_snapshot(
+    app: &App,
+) -> (
+    Option<(rows::Section, String)>,
+    std::collections::HashSet<rows::Section>,
+    u16,
+) {
+    let selected = app.selected_row().and_then(|r| selection_key(&r.kind));
+    (selected, app.collapsed.clone(), app.sidebar_width)
+}
+
 fn app_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     opts: RunOpts,
 ) -> Result<App> {
     let mut app = App::new();
-    // Honor --select-agent: jump to Agents and try to select the matching
-    // row. If the target isn't in the scan (agent vanished between the
-    // watcher noticing and us launching), we still open on Agents — the
-    // first row stays selected.
+    // Honor --select-agent: try to select the matching row. If the
+    // target isn't in the scan (agent vanished between the watcher
+    // noticing and us launching), fall back to the Agents section
+    // header so we still land somewhere relevant.
     if let Some(target) = &opts.select_agent {
-        app.view = View::Agents;
         app.from_popup = true;
-        if let Some(idx) = app.data.agents.iter().position(|a| &a.target == target) {
-            app.list_state_agents.select(Some(idx));
-        }
+        app.refresh_rows();
+        app.cursor = rows::index_of(&app.rows, &rows::RowKind::Agent(target.clone()))
+            .or_else(|| rows::section_header_index(&app.rows, rows::Section::Agents))
+            .unwrap_or(app.cursor);
     }
-    let mut last_view = app.view;
+    let mut last_snapshot = persist_snapshot(&app);
     let mut last_refresh = Instant::now();
     let refresh_every = Duration::from_millis(1500);
 
@@ -747,23 +859,27 @@ fn app_loop<B: ratatui::backend::Backend>(
         }
 
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match app.input_mode {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match app.input_mode {
                     InputMode::Filter => keys::handle_filter_key(&mut app, key),
                     InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::ConfirmKill => keys::handle_confirm_kill_key(&mut app, key),
+                    InputMode::ThemeSelect => keys::handle_theme_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
-                }
+                },
+                // Mouse always flows through — while a modal is open,
+                // `mouse::handle_mouse` itself restricts clicks to the
+                // modal's own `Hit::Modal` regions (see `mouse.rs`).
+                Event::Mouse(ev) => mouse::handle_mouse(&mut app, ev),
+                _ => {}
             }
         }
-        if app.view != last_view {
-            save_last_view(app.view);
-            last_view = app.view;
+        let snapshot = persist_snapshot(&app);
+        if snapshot != last_snapshot {
+            save_state(&app);
+            last_snapshot = snapshot;
         }
         if app.should_quit {
             return Ok(app);
@@ -817,24 +933,30 @@ pub(super) mod testutil {
         }
     }
 
-    pub(super) fn mk_app(view: View, data: AppData) -> App {
-        let mut list = ListState::default();
-        list.select(Some(0));
+    pub(super) fn mk_app(data: AppData) -> App {
+        let collapsed: std::collections::HashSet<rows::Section> = std::collections::HashSet::new();
+        let filter = TextInput::new();
+        let built_rows = rows::build_rows(&data, &collapsed, filter.as_str());
+        let cursor = rows::first_item_index(&built_rows).unwrap_or(0);
         App {
-            view,
             data,
-            list_state_sessions: list.clone(),
-            list_state_groups: list.clone(),
-            list_state_hosts: ListState::default(),
-            list_state_agents: list,
+            rows: built_rows,
+            cursor,
+            sidebar_scroll: 0,
+            collapsed,
+            sidebar_width: 32,
+            sidebar_overlay: false,
+            pins: Vec::new(),
+            saved_border_status: None,
+            spinner_tick: 0,
+            prev_agent_states: HashMap::new(),
             snooze_cursor: 0,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
             confirm_kill: None,
-            pulled_pane: None,
             flash: None,
             from_popup: false,
-            filter: TextInput::new(),
+            filter,
             input_mode: InputMode::None,
             new_session_name: TextInput::new(),
             new_session_host: TextInput::new(),
@@ -842,16 +964,148 @@ pub(super) mod testutil {
             should_quit: false,
             open_after: None,
             theme: crate::theme::load(),
+            theme_cursor: 0,
+            theme_before: None,
+            theme_before_name: None,
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
+            hits: hit::HitMap::default(),
+            drag: None,
+            preview_scroll: 0,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testutil::{mk_agent, mk_data};
+    use super::testutil::mk_data;
     use super::*;
+    use rows::{RowKind, Section};
+
+    // ---- blocked_transitions: full transition matrix ----
+
+    #[test]
+    fn blocked_transitions_absent_to_blocked_fires() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert_eq!(fired, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_working_to_blocked_fires() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Working);
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert_eq!(fired, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_blocked_to_blocked_does_not_fire() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Blocked);
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_blocked_then_working_then_blocked_fires_again() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Blocked);
+
+        // Tick: Working — no fire.
+        let now1 = vec![("t".to_string(), AgentState::Working)];
+        let fired1 = blocked_transitions(&prev, &now1, &|_| false, true);
+        assert!(fired1.is_empty());
+
+        // What refresh() does between ticks: replace prev wholesale.
+        prev = now1.into_iter().collect();
+
+        // Next tick: Blocked again — fires, because the immediately
+        // preceding state was Working, not Blocked.
+        let now2 = vec![("t".to_string(), AgentState::Blocked)];
+        let fired2 = blocked_transitions(&prev, &now2, &|_| false, true);
+        assert_eq!(fired2, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_snoozed_suppressed() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| true, true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_disabled_suppressed() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, false);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_ignores_targets_not_in_now() {
+        // A target present only in `prev` (e.g. vanished pane) isn't
+        // in `now` at all, so it can't fire regardless of its old
+        // state — `now` is the sole source of "is this target here".
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("gone".to_string(), AgentState::Working);
+        let now: Vec<(String, AgentState)> = vec![];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert!(fired.is_empty());
+    }
+
+    // ---- seeding: opening the dashboard must not notify for agents
+    // already Blocked at startup ----
+
+    #[test]
+    fn seeding_from_initial_scan_suppresses_notification_on_first_refresh() {
+        let blocked = testutil::mk_agent("s:0.0", "s", 1);
+        let mut data = mk_data(vec![], vec![blocked]);
+        // Force AwaitingInput so agent_state resolves to Blocked.
+        data.agents[0].attention = crate::transcript::Attention::AwaitingInput;
+
+        // This is exactly what App::new() does: seed prev from the
+        // same initial scan rather than starting from an empty map.
+        let seeded: HashMap<String, AgentState> = agent_states(&data).into_iter().collect();
+
+        // The following refresh sees the same data (nothing changed)
+        // — no transition, so no notification, even though the agent
+        // is Blocked.
+        let now = agent_states(&data);
+        let fired = blocked_transitions(&seeded, &now, &|t| format::snoozed(&data, t), true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn empty_seed_would_have_fired_for_the_same_data() {
+        // Contrast case proving the seeding test above is meaningful:
+        // without seeding (empty prev, as if freshly constructed with
+        // `HashMap::new()`), the same already-blocked agent WOULD
+        // fire — this is the absent→Blocked rule from the matrix.
+        let blocked = testutil::mk_agent("s:0.0", "s", 1);
+        let mut data = mk_data(vec![], vec![blocked]);
+        data.agents[0].attention = crate::transcript::Attention::AwaitingInput;
+
+        let empty_prev: HashMap<String, AgentState> = HashMap::new();
+        let now = agent_states(&data);
+        let fired = blocked_transitions(&empty_prev, &now, &|t| format::snoozed(&data, t), true);
+        assert_eq!(fired, vec!["s:0.0".to_string()]);
+    }
+
+    #[test]
+    fn pins_vanished_message_is_singular_for_exactly_one() {
+        assert_eq!(pins_vanished_message(1), "1 pinned pane vanished");
+    }
+
+    #[test]
+    fn pins_vanished_message_is_plural_otherwise() {
+        assert_eq!(pins_vanished_message(2), "2 pinned panes vanished");
+        assert_eq!(pins_vanished_message(0), "0 pinned panes vanished");
+    }
 
     fn mk_data_with_group(layout: &str) -> AppData {
         let mut data = mk_data(vec![], vec![]);
@@ -867,7 +1121,7 @@ mod tests {
 
     #[test]
     fn preview_cache_serves_stale_until_generation_bumps() {
-        let mut app = testutil::mk_app(View::Groups, mk_data_with_group("panes"));
+        let mut app = testutil::mk_app(mk_data_with_group("panes"));
         let first = format!("{:?}", app.preview_lines());
         // Mutate underlying data WITHOUT bumping the generation — the
         // cache must serve the stale lines (that's the point: no
@@ -884,7 +1138,7 @@ mod tests {
 
     #[test]
     fn preview_cache_misses_on_selection_change() {
-        let mut app = testutil::mk_app(View::Groups, mk_data_with_group("panes"));
+        let mut app = testutil::mk_app(mk_data_with_group("panes"));
         app.data.groups.push((
             "staging".to_string(),
             crate::config::Group {
@@ -892,8 +1146,9 @@ mod tests {
                 hosts: vec![],
             },
         ));
+        app.refresh_rows();
         let first = format!("{:?}", app.preview_lines());
-        app.list_state_groups.select(Some(1));
+        app.cursor = rows::index_of(&app.rows, &RowKind::Group("staging".into())).unwrap();
         let second = format!("{:?}", app.preview_lines());
         assert_ne!(first, second);
         assert!(second.contains("staging"));
@@ -901,56 +1156,147 @@ mod tests {
 
     #[test]
     fn preview_lines_without_selection_says_so() {
-        let mut app = testutil::mk_app(View::Hosts, mk_data(vec![], vec![]));
-        // mk_app leaves list_state_hosts unselected.
+        // Wholly empty data: the cursor sits on a SectionHeader row,
+        // which isn't a "selection" for the preview pane.
+        let mut app = testutil::mk_app(mk_data(vec![], vec![]));
         let lines = format!("{:?}", app.preview_lines());
         assert!(lines.contains("no selection"));
     }
 
     #[test]
-    fn grouped_items_emit_header_then_agents_per_session() {
-        // cops has the most recent activity (300) so it sorts first;
-        // salt's agents sort most-recent-first within the session.
-        let data = mk_data(
-            vec![],
-            vec![
-                mk_agent("salt:1.0", "salt", 100),
-                mk_agent("salt:2.0", "salt", 200),
-                mk_agent("cops:1.0", "cops", 300),
-            ],
+    fn preview_cache_keys_on_row_kind_not_just_name() {
+        // A session and a group sharing the same name must not collide
+        // in the cache — this is exactly why the key is RowKind, not
+        // a bare String.
+        let mut data = mk_data(vec![testutil::mk_session("shared")], vec![]);
+        data.groups = vec![(
+            "shared".to_string(),
+            crate::config::Group {
+                layout: "panes".to_string(),
+                hosts: vec![],
+            },
+        )];
+        let mut app = testutil::mk_app(data);
+        app.cursor = rows::index_of(&app.rows, &RowKind::Session("shared".into())).unwrap();
+        let session_preview = format!("{:?}", app.preview_lines());
+        app.cursor = rows::index_of(&app.rows, &RowKind::Group("shared".into())).unwrap();
+        let group_preview = format!("{:?}", app.preview_lines());
+        assert_ne!(session_preview, group_preview);
+    }
+
+    #[test]
+    fn refresh_rows_keeps_cursor_on_same_row_kind_after_data_change() {
+        let data = mk_data(vec![testutil::mk_session("alpha")], vec![]);
+        let mut app = testutil::mk_app(data);
+        app.cursor = rows::index_of(&app.rows, &RowKind::Session("alpha".into())).unwrap();
+        // A new session appears earlier in the list, but "alpha" is
+        // still present — the cursor must stay on it.
+        app.data
+            .sessions
+            .insert(0, testutil::mk_session("aaa-first"));
+        app.refresh_rows();
+        assert_eq!(
+            app.selected_row().unwrap().kind,
+            RowKind::Session("alpha".into())
         );
-        let items = agent_items_grouped_by_session(&data);
-        // header, agent, header, agent, agent
-        assert_eq!(items.len(), 5);
-        assert!(is_agent_header(&items[0]));
-        assert!(items[0].contains("cops"));
-        assert!(items[0].contains("1 agent"));
-        assert!(!items[0].contains("1 agents")); // singular wording
-        assert_eq!(items[1], "cops:1.0");
-        assert!(is_agent_header(&items[2]));
-        assert!(items[2].contains("salt"));
-        assert!(items[2].contains("2 agents"));
-        assert_eq!(items[3], "salt:2.0"); // most-recent agent first
-        assert_eq!(items[4], "salt:1.0");
     }
 
     #[test]
-    fn header_summary_includes_awaiting_count_when_nonzero() {
-        let mut a = mk_agent("salt:1.0", "salt", 100);
-        a.attention = crate::transcript::Attention::AwaitingInput;
-        let data = mk_data(vec![], vec![a]);
-        let items = agent_items_grouped_by_session(&data);
-        assert!(items[0].contains("1 awaiting"));
+    fn refresh_rows_snaps_to_nearest_selectable_when_row_vanishes() {
+        let data = mk_data(
+            vec![testutil::mk_session("alpha"), testutil::mk_session("beta")],
+            vec![],
+        );
+        let mut app = testutil::mk_app(data);
+        app.cursor = rows::index_of(&app.rows, &RowKind::Session("beta".into())).unwrap();
+        app.data.sessions.retain(|s| s.name != "beta");
+        app.refresh_rows();
+        // "beta" is gone; the cursor must land on some selectable row
+        // rather than pointing past the end or at a header/divider.
+        assert!(app.selected_row().unwrap().selectable);
+        assert!(app.cursor < app.rows.len());
     }
 
     #[test]
-    fn snap_skips_a_header_at_the_initial_position() {
-        let data = mk_data(vec![], vec![mk_agent("salt:1.0", "salt", 100)]);
-        let mut state = ListState::default();
-        state.select(Some(0)); // would land on the header
-        snap_agents_selection_to_data_row(&mut state, &data);
-        // Snapped forward past the header to the agent row.
-        assert_eq!(state.selected(), Some(1));
+    fn parse_state_round_trips_selected_collapsed_and_width() {
+        let mut collapsed = std::collections::HashSet::new();
+        collapsed.insert(Section::Hosts);
+        let content = serialize_state(
+            Some((Section::Agents, "work:1.0".to_string())),
+            &collapsed,
+            40,
+        );
+        let parsed = parse_state(&content);
+        assert_eq!(
+            parsed.selected,
+            Some((Section::Agents, "work:1.0".to_string()))
+        );
+        assert_eq!(parsed.collapsed, collapsed);
+        assert_eq!(parsed.sidebar_width, Some(40));
+    }
+
+    #[test]
+    fn parse_state_handles_header_selection_with_empty_item() {
+        let content = serialize_state(
+            Some((Section::Sessions, String::new())),
+            &Default::default(),
+            32,
+        );
+        let parsed = parse_state(&content);
+        assert_eq!(parsed.selected, Some((Section::Sessions, String::new())));
+    }
+
+    #[test]
+    fn parse_state_tolerates_legacy_single_slug_file() {
+        for slug in ["sessions", "groups", "hosts", "agents"] {
+            let parsed = parse_state(slug);
+            assert_eq!(
+                parsed.selected,
+                Some((Section::from_slug(slug).unwrap(), String::new())),
+                "slug {slug}"
+            );
+            assert!(parsed.collapsed.is_empty());
+            assert!(parsed.sidebar_width.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_state_rejects_legacy_projects_slug() {
+        // Pre-removal builds persisted "projects"; from_slug rejects
+        // it so the caller falls back to the default (Sessions header).
+        let state = parse_state("projects");
+        assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn load_and_save_state_round_trip_through_a_real_file() {
+        let path = std::env::temp_dir().join(format!(
+            "tad-dashboard-state-test-{}-{}.state",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut collapsed = std::collections::HashSet::new();
+        collapsed.insert(Section::Groups);
+        let content = serialize_state(Some((Section::Hosts, "web1".to_string())), &collapsed, 45);
+        save_state_to(&path, &content);
+        let loaded = load_state_from(&path);
+        assert_eq!(loaded.selected, Some((Section::Hosts, "web1".to_string())));
+        assert_eq!(loaded.collapsed, collapsed);
+        assert_eq!(loaded.sidebar_width, Some(45));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_state_from_missing_file_is_default() {
+        let path = std::env::temp_dir().join(format!(
+            "tad-dashboard-state-missing-{}.state",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(load_state_from(&path), PersistedState::default());
     }
 
     #[test]
@@ -974,14 +1320,6 @@ mod tests {
             .collect();
         assert_eq!(web1.len(), 1);
         assert_eq!(web1[0].groups, vec!["prod".to_string()]);
-    }
-
-    #[test]
-    fn legacy_projects_slug_is_not_a_view() {
-        // Pre-removal builds persisted "projects" in dashboard.state;
-        // from_slug must reject it so App::new falls back to Sessions.
-        assert!(View::from_slug("projects").is_none());
-        assert!(matches!(View::from_slug("sessions"), Some(View::Sessions)));
     }
 
     #[test]
