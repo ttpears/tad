@@ -162,7 +162,7 @@ fn format_section_header(
     ])
 }
 
-fn format_session_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
+fn format_session_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Line<'static> {
     let Some(s) = data.sessions.iter().find(|s| s.name == name) else {
         return Line::from(name.to_string());
     };
@@ -171,7 +171,8 @@ fn format_session_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static
     } else {
         ("○ ", theme.muted)
     };
-    Line::from(vec![
+    let left_cols = dot.chars().count() + name.chars().count();
+    let left = vec![
         Span::styled(dot, Style::default().fg(dot_color)),
         Span::styled(
             name.to_string(),
@@ -179,9 +180,14 @@ fn format_session_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        Span::styled(s.activity_str.clone(), Style::default().fg(theme.muted)),
-    ])
+    ];
+    two_col(
+        left,
+        left_cols,
+        &s.activity_str,
+        Style::default().fg(theme.muted),
+        width,
+    )
 }
 
 /// `session:window_name` — the identity a `PinnedPane::label` carries.
@@ -259,26 +265,27 @@ fn format_agent_group_header(data: &AppData, session: &str, theme: &Theme) -> Li
     Line::from(Span::styled(text, Style::default().fg(theme.muted)))
 }
 
-fn format_group_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
+fn format_group_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Line<'static> {
     let Some((_, g)) = data.groups.iter().find(|(n, _)| n == name) else {
         return Line::from(name.to_string());
     };
-    Line::from(vec![
-        Span::styled(
-            name.to_string(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("{} hosts · {}", g.hosts.len(), g.layout),
-            Style::default().fg(theme.muted),
-        ),
-    ])
+    let left = vec![Span::styled(
+        name.to_string(),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let right = format!("{} hosts · {}", g.hosts.len(), g.layout);
+    two_col(
+        left,
+        name.chars().count(),
+        &right,
+        Style::default().fg(theme.muted),
+        width,
+    )
 }
 
-fn format_host_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
+fn format_host_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Line<'static> {
     let row = data.hosts.iter().find(|r| r.name == name);
     let groups = row.map(|r| r.groups.join(", ")).unwrap_or_default();
     let source = row.map(|r| r.source.clone()).unwrap_or_default();
@@ -289,11 +296,17 @@ fn format_host_row(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
     } else {
         format!("{groups} · {source}")
     };
-    Line::from(vec![
-        Span::styled(name.to_string(), Style::default().fg(theme.accent)),
-        Span::raw("  "),
-        Span::styled(trailing, Style::default().fg(theme.muted)),
-    ])
+    let left = vec![Span::styled(
+        name.to_string(),
+        Style::default().fg(theme.accent),
+    )];
+    two_col(
+        left,
+        name.chars().count(),
+        &trailing,
+        Style::default().fg(theme.muted),
+        width,
+    )
 }
 
 /// Compact sidebar row renderer, dispatched per `RowKind`:
@@ -313,19 +326,62 @@ pub(super) fn format_row(
     pins: &[PinnedPane],
     width: u16,
 ) -> Line<'static> {
-    let width = width as usize;
     let line = match &row.kind {
-        RowKind::SectionHeader(section) => format_section_header(data, *section, theme, width),
-        RowKind::Session(name) => format_session_row(data, name, theme),
+        RowKind::SectionHeader(section) => {
+            format_section_header(data, *section, theme, width as usize)
+        }
+        RowKind::Session(name) => format_session_row(data, name, theme, width),
         RowKind::Agent(target) => format_agent_row(data, target, theme, tick, pins),
         RowKind::AgentGroupHeader(session) => format_agent_group_header(data, session, theme),
-        RowKind::Group(name) => format_group_row(data, name, theme),
-        RowKind::Host(name) => format_host_row(data, name, theme),
+        RowKind::Group(name) => format_group_row(data, name, theme, width),
+        RowKind::Host(name) => format_host_row(data, name, theme, width),
     };
-    clip_line(line, width)
+    clip_line(line, width as usize)
 }
 
 // ---- shared display helpers ----
+
+/// Lay out a row as two columns: `left` content flush to the start,
+/// `right` text right-aligned flush to `width`. Same right-alignment
+/// technique `format_section_header` uses for its count, generalized
+/// so every row kind's muted metadata lands in the same column
+/// instead of starting wherever the name happens to end.
+///
+/// `left_cols` must be the display-column count of `left` (chars, not
+/// bytes/spans) — the caller already knows it since it built the
+/// spans from strings it can measure.
+///
+/// A minimum 1-column gap always separates the columns. When `left`
+/// doesn't fit alongside `right` within `width`, `left` is truncated
+/// (via `clip_line`) so the two columns never collide; `clip_line` is
+/// still applied to the whole line by `format_row` as a final guard.
+pub(super) fn two_col(
+    left: Vec<Span<'static>>,
+    left_cols: usize,
+    right: &str,
+    right_style: Style,
+    width: u16,
+) -> Line<'static> {
+    let width = width as usize;
+    let right_cols = right.chars().count();
+    let available_for_left = width.saturating_sub(right_cols + 1);
+    let (left, left_cols) = if left_cols > available_for_left {
+        let clipped = clip_line(Line::from(left), available_for_left);
+        let new_cols = clipped
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        (clipped.spans, new_cols)
+    } else {
+        (left, left_cols)
+    };
+    let gap = width.saturating_sub(left_cols + right_cols).max(1);
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(right.to_string(), right_style));
+    Line::from(spans)
+}
 
 /// Clip a rendered line to at most `width` display columns, preserving
 /// each span's style up to the cut point. Assumes single-width glyphs
@@ -529,5 +585,208 @@ mod tests {
         let theme = crate::theme::load();
         let line = format_agent_group_header(&data, "s1", &theme);
         assert_eq!(line_text(&line), "s1 · 1 agent");
+    }
+
+    // ---- column alignment ----
+    //
+    // Every mk_session() carries the same activity_str ("1m"), so any
+    // two sessions with different name lengths whose activity column
+    // still ends flush at the requested width demonstrate real
+    // right-alignment, not a coincidence of matching name lengths.
+
+    #[test]
+    fn session_rows_align_activity_column_regardless_of_name_length() {
+        let data = mk_data(
+            vec![mk_session("ab"), mk_session("a-much-longer-name")],
+            vec![],
+        );
+        let theme = crate::theme::load();
+        let short = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Session("ab".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let long = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Session("a-much-longer-name".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let short_text = line_text(&short);
+        let long_text = line_text(&long);
+        assert_eq!(short_text.chars().count(), 30, "got {short_text:?}");
+        assert_eq!(long_text.chars().count(), 30, "got {long_text:?}");
+        assert!(short_text.ends_with("1m"), "got {short_text:?}");
+        assert!(long_text.ends_with("1m"), "got {long_text:?}");
+    }
+
+    #[test]
+    fn session_row_truncates_name_when_it_would_collide_with_activity() {
+        let long_name = "a-".to_string() + &"x".repeat(48); // 50 chars
+        let data = mk_data(vec![mk_session(&long_name)], vec![]);
+        let theme = crate::theme::load();
+        let line = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Session(long_name.clone()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let text = line_text(&line);
+        assert_eq!(text.chars().count(), 30, "got {text:?}");
+        assert!(
+            text.ends_with("1m"),
+            "activity column must stay intact: got {text:?}"
+        );
+        assert!(
+            !text.contains(&long_name),
+            "full name should have been truncated: got {text:?}"
+        );
+    }
+
+    #[test]
+    fn group_rows_align_meta_column_regardless_of_name_length() {
+        let g1 = crate::config::Group {
+            layout: "panes".to_string(),
+            hosts: vec!["a".to_string()],
+        };
+        let g2 = crate::config::Group {
+            layout: "windows".to_string(),
+            hosts: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+        let mut data = mk_data(vec![], vec![]);
+        data.groups = vec![
+            ("g".to_string(), g1),
+            ("a-much-longer-group-name".to_string(), g2),
+        ];
+        let theme = crate::theme::load();
+        let short = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Group("g".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let long = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Group("a-much-longer-group-name".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        assert_eq!(line_text(&short).chars().count(), 30);
+        assert_eq!(line_text(&long).chars().count(), 30);
+        assert!(line_text(&short).ends_with("1 hosts · panes"));
+        assert!(line_text(&long).ends_with("3 hosts · windows"));
+    }
+
+    #[test]
+    fn group_row_truncates_name_when_it_would_collide_with_meta() {
+        let long_name = "a-".to_string() + &"x".repeat(48);
+        let g = crate::config::Group {
+            layout: "panes".to_string(),
+            hosts: vec!["a".to_string()],
+        };
+        let mut data = mk_data(vec![], vec![]);
+        data.groups = vec![(long_name.clone(), g)];
+        let theme = crate::theme::load();
+        let line = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Group(long_name.clone()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let text = line_text(&line);
+        assert_eq!(text.chars().count(), 30, "got {text:?}");
+        assert!(text.ends_with("1 hosts · panes"), "got {text:?}");
+        assert!(!text.contains(&long_name), "got {text:?}");
+    }
+
+    #[test]
+    fn host_rows_align_meta_column_regardless_of_name_length() {
+        let mut data = mk_data(vec![], vec![]);
+        data.hosts = vec![
+            crate::dashboard::HostRow {
+                name: "h".to_string(),
+                groups: vec!["g1".to_string()],
+                source: "config".to_string(),
+            },
+            crate::dashboard::HostRow {
+                name: "a-much-longer-host-name".to_string(),
+                groups: vec!["g1".to_string()],
+                source: "config".to_string(),
+            },
+        ];
+        let theme = crate::theme::load();
+        let short = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Host("h".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        let long = format_row(
+            &data,
+            &Row {
+                kind: RowKind::Host("a-much-longer-host-name".into()),
+                selectable: true,
+            },
+            &theme,
+            0,
+            &[],
+            30,
+        );
+        assert_eq!(line_text(&short).chars().count(), 30);
+        assert_eq!(line_text(&long).chars().count(), 30);
+        assert!(line_text(&short).ends_with("g1 · config"));
+        assert!(line_text(&long).ends_with("g1 · config"));
+    }
+
+    #[test]
+    fn two_col_pads_left_content_flush_right_with_min_one_space_gap() {
+        let left = vec![Span::raw("hi".to_string())];
+        let line = two_col(left, 2, "yo", Style::default(), 10);
+        assert_eq!(line_text(&line), "hi      yo");
+    }
+
+    #[test]
+    fn two_col_truncates_left_and_keeps_right_intact_on_collision() {
+        let left = vec![Span::raw("x".repeat(20))];
+        let line = two_col(left, 20, "right", Style::default(), 10);
+        let text = line_text(&line);
+        assert_eq!(text.chars().count(), 10, "got {text:?}");
+        assert!(text.ends_with("right"), "got {text:?}");
     }
 }
