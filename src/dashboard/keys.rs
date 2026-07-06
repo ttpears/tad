@@ -5,9 +5,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::theme;
 use crate::{snooze, tmux};
 
-use super::action::{execute, Action};
+use super::action::{self, execute, Action};
 use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
 use super::rows::{self, RowKind, Section};
 use super::{App, ConfirmKillTarget, InputMode, NewSessionField};
@@ -129,6 +130,74 @@ pub(super) fn handle_snooze_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// What a theme-picker keypress resolves to — pure over just the
+/// cursor position and list length, so it's trivial to unit-test
+/// exhaustively without ever touching `App` or the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ThemePick {
+    /// Move the cursor to this index (already clamped in-range).
+    Move(usize),
+    /// Persist the theme at the current cursor and close the picker.
+    Confirm,
+    /// Restore the pre-picker theme and close the picker.
+    Cancel,
+    /// Not a theme-picker key — no-op.
+    None,
+}
+
+/// The pure decision behind `handle_theme_key`. j/k/arrows move one
+/// step, clamped at the ends (no wraparound); Enter confirms; Esc
+/// cancels; anything else is `None`.
+pub(super) fn theme_pick_result(code: KeyCode, cursor: usize, len: usize) -> ThemePick {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if cursor > 0 {
+                ThemePick::Move(cursor - 1)
+            } else {
+                ThemePick::None
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if cursor + 1 < len {
+                ThemePick::Move(cursor + 1)
+            } else {
+                ThemePick::None
+            }
+        }
+        KeyCode::Enter => ThemePick::Confirm,
+        KeyCode::Esc => ThemePick::Cancel,
+        _ => ThemePick::None,
+    }
+}
+
+/// Theme picker (`InputMode::ThemeSelect`): a thin side-effect shell
+/// around `theme_pick_result` — j/k/arrows live-apply the theme under
+/// the cursor (shares `action::apply_theme_cursor` with a click on the
+/// same row); Enter persists it via `theme::save_theme_name` and
+/// closes; Esc restores whatever was active before the picker opened.
+pub(super) fn handle_theme_key(app: &mut App, key: KeyEvent) {
+    let len = theme::builtin_names().len();
+    match theme_pick_result(key.code, app.theme_cursor, len) {
+        ThemePick::Move(i) => action::apply_theme_cursor(app, i),
+        ThemePick::Confirm => {
+            if let Some(name) = theme::builtin_names().get(app.theme_cursor) {
+                let _ = theme::save_theme_name(name);
+            }
+            app.theme_before = None;
+            app.theme_before_name = None;
+            app.input_mode = InputMode::None;
+        }
+        ThemePick::Cancel => {
+            if let Some(t) = app.theme_before.take() {
+                app.theme = t;
+            }
+            app.theme_before_name = None;
+            app.input_mode = InputMode::None;
+        }
+        ThemePick::None => {}
+    }
+}
+
 pub(super) fn handle_new_session_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -225,6 +294,7 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('/') => execute(app, Action::Filter),
         KeyCode::Char('n') => execute(app, Action::NewSession),
         KeyCode::Char('r') => execute(app, Action::Refresh),
+        KeyCode::Char('t') => execute(app, Action::OpenThemePicker),
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => execute(app, Action::Quit),
         _ => {}
     }
@@ -478,5 +548,121 @@ mod tests {
         assert!(app.sidebar_overlay);
         handle_key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
         assert!(!app.sidebar_overlay);
+    }
+
+    #[test]
+    fn t_opens_the_theme_picker() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::ThemeSelect);
+        assert!(app.theme_before.is_some());
+    }
+
+    // -- theme_pick_result: exhaustive over every key the picker cares
+    // about, at both ends of the cursor range so the clamping (no
+    // wraparound) is covered too.
+
+    #[test]
+    fn theme_pick_result_up_at_top_is_none() {
+        assert_eq!(theme_pick_result(KeyCode::Up, 0, 3), ThemePick::None);
+        assert_eq!(theme_pick_result(KeyCode::Char('k'), 0, 3), ThemePick::None);
+    }
+
+    #[test]
+    fn theme_pick_result_up_moves_back_one() {
+        assert_eq!(theme_pick_result(KeyCode::Up, 2, 3), ThemePick::Move(1));
+        assert_eq!(
+            theme_pick_result(KeyCode::Char('k'), 2, 3),
+            ThemePick::Move(1)
+        );
+    }
+
+    #[test]
+    fn theme_pick_result_down_at_bottom_is_none() {
+        assert_eq!(theme_pick_result(KeyCode::Down, 2, 3), ThemePick::None);
+        assert_eq!(theme_pick_result(KeyCode::Char('j'), 2, 3), ThemePick::None);
+    }
+
+    #[test]
+    fn theme_pick_result_down_moves_forward_one() {
+        assert_eq!(theme_pick_result(KeyCode::Down, 0, 3), ThemePick::Move(1));
+        assert_eq!(
+            theme_pick_result(KeyCode::Char('j'), 0, 3),
+            ThemePick::Move(1)
+        );
+    }
+
+    #[test]
+    fn theme_pick_result_enter_confirms() {
+        assert_eq!(theme_pick_result(KeyCode::Enter, 1, 3), ThemePick::Confirm);
+    }
+
+    #[test]
+    fn theme_pick_result_esc_cancels() {
+        assert_eq!(theme_pick_result(KeyCode::Esc, 1, 3), ThemePick::Cancel);
+    }
+
+    #[test]
+    fn theme_pick_result_other_keys_are_none() {
+        assert_eq!(theme_pick_result(KeyCode::Char('x'), 1, 3), ThemePick::None);
+        assert_eq!(theme_pick_result(KeyCode::Tab, 1, 3), ThemePick::None);
+    }
+
+    // -- handle_theme_key: Move and Cancel only — Confirm calls the
+    // real `theme::save_theme_name`, which writes the user's actual
+    // config.yaml, so it's deliberately left untested here (the pure
+    // `theme_pick_result::Confirm` routing above is the coverage for
+    // that arm; see the task brief).
+
+    #[test]
+    fn theme_cursor_move_live_applies_the_theme() {
+        // tokyonight (index 0) and dracula (index 2) have visibly
+        // different accents — moving the cursor there must repaint
+        // `app.theme` immediately, not just on confirm.
+        let names = theme::builtin_names();
+        let dracula_idx = names.iter().position(|n| *n == "dracula").unwrap();
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.theme = theme::by_name("tokyonight").unwrap();
+        app.theme_cursor = 0;
+        app.input_mode = InputMode::ThemeSelect;
+        for _ in 0..dracula_idx {
+            handle_theme_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.theme_cursor, dracula_idx);
+        let dracula = theme::by_name("dracula").unwrap();
+        assert_eq!(
+            format!("{:?}", app.theme.accent),
+            format!("{:?}", dracula.accent)
+        );
+        // The picker stays open — only Confirm/Cancel close it.
+        assert_eq!(app.input_mode, InputMode::ThemeSelect);
+    }
+
+    #[test]
+    fn theme_esc_restores_the_pre_picker_theme() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        let original = theme::by_name("tokyonight").unwrap();
+        app.theme = original;
+        app.theme_before = Some(original);
+        app.theme_before_name = Some("tokyonight".to_string());
+        app.theme_cursor = 0;
+        app.input_mode = InputMode::ThemeSelect;
+        // Simulate having arrowed onto a different theme before
+        // changing our mind. tokyonight-storm (index 1) shares
+        // tokyonight's accent, so go one further to dracula (index 2),
+        // which is visibly different.
+        handle_theme_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_theme_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_ne!(
+            format!("{:?}", app.theme.accent),
+            format!("{:?}", original.accent)
+        );
+        handle_theme_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            format!("{:?}", app.theme.accent),
+            format!("{:?}", original.accent)
+        );
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.theme_before.is_none());
     }
 }

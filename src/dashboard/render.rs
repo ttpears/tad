@@ -17,7 +17,7 @@ use super::action::Action;
 use super::hit::Hit;
 use super::modal::{
     render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
-    render_snooze_modal,
+    render_snooze_modal, render_theme_modal,
 };
 use super::rows::{RowKind, Section};
 use super::{format, App, InputMode};
@@ -131,6 +131,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     }
     if app.input_mode == InputMode::ConfirmKill {
         render_confirm_kill_modal(f, area, app);
+    }
+    if app.input_mode == InputMode::ThemeSelect {
+        render_theme_modal(f, area, app);
     }
 }
 
@@ -443,6 +446,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         )),
         InputMode::ConfirmKill => Line::from(Span::styled(
             "y/↵ confirm kill   Esc/n cancel",
+            Style::default().fg(theme.muted),
+        )),
+        InputMode::ThemeSelect => Line::from(Span::styled(
+            "↑↓ pick theme   ↵ confirm   Esc cancel",
             Style::default().fg(theme.muted),
         )),
         InputMode::None => {

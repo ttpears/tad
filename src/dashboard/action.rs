@@ -5,12 +5,16 @@
 //! `mouse.rs`'s per-event arms) means the two input paths can't drift:
 //! a key and a click that mean the same thing run the exact same code.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 use crate::agents;
+use crate::theme;
 use crate::{snooze, tmux};
 
 use super::dispatch::{self, resolve_pane, tad_window_id, OpenTarget};
 use super::format;
 use super::grid;
+use super::keys;
 use super::rows::{self, RowKind, Section};
 use super::{App, ConfirmKillTarget, InputMode, NewSessionField, PinnedPane, TextInput};
 
@@ -37,11 +41,21 @@ pub(crate) enum Action {
     Filter,
     Refresh,
     Quit,
-    /// The dashboard doesn't have a theme-picker modal yet (that's
-    /// Task 9's job — see `theme::builtin_names`/`by_name`, already
-    /// staged for it). The footer's `t` chip constructs this today so
-    /// it's clickable; `execute` no-ops on it until the modal exists.
+    /// `t` (or the footer's theme chip): opens the theme picker.
     OpenThemePicker,
+    /// A click on theme-picker row `i`: moves the cursor there and
+    /// live-applies that theme, same as arrowing to it with j/k.
+    ThemeOption(usize),
+    /// A click on snooze-picker row `i`: moves the cursor there
+    /// (confirming still needs `ModalConfirm`/Enter).
+    SnoozeOption(usize),
+    /// A click on a modal's `↵ confirm`-style hint chip. `execute`
+    /// routes this to whichever mode is currently open's own Enter
+    /// handling — see `handle_modal_key`.
+    ModalConfirm,
+    /// A click on a modal's `Esc cancel` hint chip. Routes to whichever
+    /// mode is currently open's own Esc handling.
+    ModalCancel,
     ToggleOverlay,
     /// Reserved: nothing constructs this yet. Mouse-wheel-over-sidebar
     /// maps directly to `MoveCursor` (see `mouse.rs`) since the
@@ -117,9 +131,15 @@ pub(super) fn execute(app: &mut App, action: Action) {
         }
         Action::Refresh => app.refresh(),
         Action::Quit => app.should_quit = true,
-        Action::OpenThemePicker => {
-            // No-op until Task 9 adds the modal.
+        Action::OpenThemePicker => open_theme_picker(app),
+        Action::ThemeOption(i) => apply_theme_cursor(app, i),
+        Action::SnoozeOption(i) => {
+            if i < app.data.ui.snooze_intervals.len() {
+                app.snooze_cursor = i;
+            }
         }
+        Action::ModalConfirm => handle_modal_key(app, KeyCode::Enter),
+        Action::ModalCancel => handle_modal_key(app, KeyCode::Esc),
         Action::ToggleOverlay => app.sidebar_overlay = !app.sidebar_overlay,
         Action::ScrollSidebar(delta) => {
             if let Some(next) = rows::step_selectable(&app.rows, app.cursor, delta) {
@@ -140,6 +160,53 @@ pub(super) fn execute(app: &mut App, action: Action) {
     }
     if app.cursor != prev_cursor {
         app.preview_scroll = 0;
+    }
+}
+
+/// `t` / the footer's theme chip: open the picker, capturing the
+/// active theme (and its name, for the initial cursor position) so
+/// Esc can restore it after the cursor's live-preview has moved
+/// `app.theme` elsewhere.
+fn open_theme_picker(app: &mut App) {
+    let names = theme::builtin_names();
+    app.theme_before = Some(app.theme);
+    app.theme_before_name = theme::current_name();
+    app.theme_cursor = app
+        .theme_before_name
+        .as_deref()
+        .and_then(|n| names.iter().position(|x| *x == n))
+        .unwrap_or(0);
+    app.input_mode = InputMode::ThemeSelect;
+}
+
+/// Move the theme-picker cursor to `i` and live-apply that theme —
+/// shared by a click on picker row `i` (`Action::ThemeOption`) and
+/// `keys::handle_theme_key`'s j/k/arrow handling.
+pub(super) fn apply_theme_cursor(app: &mut App, i: usize) {
+    let names = theme::builtin_names();
+    if let Some(name) = names.get(i) {
+        if let Some(t) = theme::by_name(name) {
+            app.theme_cursor = i;
+            app.theme = t;
+        }
+    }
+}
+
+/// Route a modal's `↵ confirm` / `Esc cancel` hint-chip click to
+/// whichever `InputMode` is currently open's own key handler — the
+/// exact same code path a real Enter/Esc keypress would take, so
+/// there's no separate "confirm" logic to drift out of sync with it.
+/// A no-op in `None`/`Filter`, neither of which is one of the four
+/// modals (or the theme picker) this routes for.
+fn handle_modal_key(app: &mut App, code: KeyCode) {
+    let key = KeyEvent::new(code, KeyModifiers::NONE);
+    match app.input_mode {
+        InputMode::NewSession => keys::handle_new_session_key(app, key),
+        InputMode::SnoozeSelect => keys::handle_snooze_key(app, key),
+        InputMode::RenameAgent => keys::handle_rename_agent_key(app, key),
+        InputMode::ConfirmKill => keys::handle_confirm_kill_key(app, key),
+        InputMode::ThemeSelect => keys::handle_theme_key(app, key),
+        InputMode::None | InputMode::Filter => {}
     }
 }
 
@@ -460,5 +527,101 @@ mod tests {
             execute(&mut app, Action::TogglePin(i));
             assert_eq!(app.pins.len(), pins_before, "kind {kind:?} changed pins");
         }
+    }
+
+    #[test]
+    fn open_theme_picker_captures_the_active_theme_and_opens_the_mode() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        let before_accent = format!("{:?}", app.theme.accent);
+        execute(&mut app, Action::OpenThemePicker);
+        assert_eq!(app.input_mode, InputMode::ThemeSelect);
+        let captured = app.theme_before.expect("theme_before must be captured");
+        assert_eq!(format!("{:?}", captured.accent), before_accent);
+        assert!(app.theme_cursor < theme::builtin_names().len());
+    }
+
+    #[test]
+    fn theme_option_click_moves_cursor_and_live_applies() {
+        let names = theme::builtin_names();
+        let dracula_idx = names.iter().position(|n| *n == "dracula").unwrap();
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.theme = theme::by_name("tokyonight").unwrap();
+        app.input_mode = InputMode::ThemeSelect;
+        execute(&mut app, Action::ThemeOption(dracula_idx));
+        assert_eq!(app.theme_cursor, dracula_idx);
+        let dracula = theme::by_name("dracula").unwrap();
+        assert_eq!(
+            format!("{:?}", app.theme.accent),
+            format!("{:?}", dracula.accent)
+        );
+    }
+
+    #[test]
+    fn snooze_option_click_moves_the_snooze_cursor_in_range() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.data.ui.snooze_intervals = vec![
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(3600),
+        ];
+        execute(&mut app, Action::SnoozeOption(2));
+        assert_eq!(app.snooze_cursor, 2);
+        // Out-of-range index is ignored rather than panicking or
+        // corrupting the cursor.
+        execute(&mut app, Action::SnoozeOption(99));
+        assert_eq!(app.snooze_cursor, 2);
+    }
+
+    #[test]
+    fn modal_confirm_routes_to_the_current_modes_enter_handling() {
+        // NewSession's Enter arm has no filesystem side effect (the
+        // real tmux/session creation happens post-exit via
+        // `open_after`), so it's safe to exercise the real routed
+        // handler here.
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.new_session_name = TextInput::pristine("foo".to_string());
+        app.input_mode = InputMode::NewSession;
+        execute(&mut app, Action::ModalConfirm);
+        assert!(matches!(
+            &app.open_after,
+            Some(OpenTarget::CreateNew { name, host }) if name == "foo" && host.is_none()
+        ));
+        assert!(app.should_quit);
+        assert_eq!(app.input_mode, InputMode::None);
+    }
+
+    #[test]
+    fn modal_cancel_routes_to_the_current_modes_esc_handling() {
+        // ConfirmKill's Esc arm just clears the modal — no kill is
+        // issued — so, like the NewSession case above, this exercises
+        // the real routed handler with no real side effect.
+        let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
+        app.input_mode = InputMode::ConfirmKill;
+        app.confirm_kill = Some(ConfirmKillTarget::Session {
+            name: "work".into(),
+        });
+        execute(&mut app, Action::ModalCancel);
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.confirm_kill.is_none());
+        assert_eq!(app.data.sessions.len(), 1);
+    }
+
+    #[test]
+    fn modal_cancel_on_theme_select_restores_the_pre_picker_theme() {
+        // ThemeSelect's Esc arm only restores `theme_before` in memory
+        // (no `save_theme_name` call), so it's safe to exercise here
+        // too — unlike Confirm, which does write the user's config.
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        let original = theme::by_name("tokyonight").unwrap();
+        app.theme = original;
+        app.theme_before = Some(original);
+        app.input_mode = InputMode::ThemeSelect;
+        app.theme = theme::by_name("dracula").unwrap();
+        execute(&mut app, Action::ModalCancel);
+        assert_eq!(
+            format!("{:?}", app.theme.accent),
+            format!("{:?}", original.accent)
+        );
+        assert_eq!(app.input_mode, InputMode::None);
     }
 }

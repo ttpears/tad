@@ -22,6 +22,13 @@ use super::action::Action;
 pub(crate) enum Hit {
     /// A concrete action to run on left-click.
     Click(Action),
+    /// A concrete action to run on left-click, registered by a modal
+    /// overlay's own render function. Modals render after the base UI
+    /// (see `render::ui`), so these naturally win the last-registered
+    /// tiebreak — and `mouse::handle_mouse` uses the variant itself to
+    /// tell modal-owned regions apart from base-UI ones while a modal
+    /// is open (see `mouse::hit_allowed`).
+    Modal(Action),
     /// The draggable column between the sidebar and the preview pane.
     Divider,
     /// The sidebar's full rect — catches scroll wheel events that

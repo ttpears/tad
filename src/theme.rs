@@ -72,15 +72,11 @@ pub struct Theme {
 }
 
 /// Canonical names of built-in themes, picker order.
-// TODO(herdr-cockpit): consumed by Task 9
-#[allow(dead_code)]
 pub fn builtin_names() -> &'static [&'static str] {
     BUILTIN_THEMES
 }
 
 /// Theme by name (same aliases the loader accepts). None for unknown.
-// TODO(herdr-cockpit): consumed by Task 9
-#[allow(dead_code)]
 pub fn by_name(name: &str) -> Option<Theme> {
     builtin(name)
 }

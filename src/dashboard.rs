@@ -460,6 +460,11 @@ pub(super) enum InputMode {
     /// `d` on a Sessions/Agents row: y/N confirmation before the kill.
     /// Default is No — only y/Y/Enter confirm.
     ConfirmKill,
+    /// `t` (or the footer's theme chip): picker over
+    /// `theme::builtin_names()`. Moving the cursor live-applies the
+    /// theme so the picker doubles as a preview; Esc restores whatever
+    /// was active before the picker opened.
+    ThemeSelect,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -529,6 +534,16 @@ pub(super) struct App {
     pub(super) should_quit: bool,
     pub(super) open_after: Option<OpenTarget>,
     pub(super) theme: Theme,
+    /// Cursor over `theme::builtin_names()` in the theme picker.
+    pub(super) theme_cursor: usize,
+    /// The theme active just before the picker opened, so Esc can
+    /// restore it after the cursor's live-preview has changed
+    /// `app.theme`. `None` whenever the picker isn't open.
+    pub(super) theme_before: Option<Theme>,
+    /// `theme::current_name()` at the moment the picker opened —
+    /// captured alongside `theme_before` for symmetry, even though
+    /// restoring only needs the `Theme` value itself.
+    pub(super) theme_before_name: Option<String>,
     /// See [`PreviewCache`].
     pub(super) preview_cache: PreviewCache,
     /// Bumped by `refresh()`; part of the preview-cache key so cached
@@ -583,6 +598,9 @@ impl App {
             should_quit: false,
             open_after: None,
             theme: theme::load(),
+            theme_cursor: 0,
+            theme_before: None,
+            theme_before_name: None,
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
             hits: hit::HitMap::default(),
@@ -777,13 +795,13 @@ fn app_loop<B: ratatui::backend::Backend>(
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::ConfirmKill => keys::handle_confirm_kill_key(&mut app, key),
+                    InputMode::ThemeSelect => keys::handle_theme_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
                 },
-                // Modals get their own hit-testing in a later task; for
-                // now the mouse is only live while no modal is open.
-                Event::Mouse(ev) if app.input_mode == InputMode::None => {
-                    mouse::handle_mouse(&mut app, ev)
-                }
+                // Mouse always flows through — while a modal is open,
+                // `mouse::handle_mouse` itself restricts clicks to the
+                // modal's own `Hit::Modal` regions (see `mouse.rs`).
+                Event::Mouse(ev) => mouse::handle_mouse(&mut app, ev),
                 _ => {}
             }
         }
@@ -875,6 +893,9 @@ pub(super) mod testutil {
             should_quit: false,
             open_after: None,
             theme: crate::theme::load(),
+            theme_cursor: 0,
+            theme_before: None,
+            theme_before_name: None,
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
             hits: hit::HitMap::default(),

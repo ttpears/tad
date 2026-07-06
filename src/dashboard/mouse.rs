@@ -9,7 +9,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 use super::action::{self, Action};
 use super::hit::{DragKind, Hit};
-use super::App;
+use super::{App, InputMode};
 
 /// What a left-click on `hit` should do, given the current cursor
 /// position. Pure — no `App` access, so it's trivial to unit test.
@@ -22,8 +22,19 @@ pub(super) fn click_action(hit: &Hit, cursor: usize) -> Option<Action> {
     match hit {
         Hit::Click(Action::Select(i)) if *i == cursor => Some(Action::Activate(*i)),
         Hit::Click(a) => Some(a.clone()),
+        Hit::Modal(a) => Some(a.clone()),
         Hit::Divider | Hit::SidebarZone | Hit::PreviewZone => None,
     }
+}
+
+/// Whether `hit` is live given the current `mode`. Outside any modal
+/// (`InputMode::None`) every hit is live as usual. While a modal is
+/// open, only the regions *it* registered during its own render
+/// (`Hit::Modal`) fire — a click that lands on a base-UI region
+/// underneath the (visually opaque, `Clear`-backed) overlay is inert,
+/// exactly as if the modal had eaten the whole screen.
+pub(super) fn hit_allowed(hit: &Hit, mode: InputMode) -> bool {
+    mode == InputMode::None || matches!(hit, Hit::Modal(_))
 }
 
 pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
@@ -32,6 +43,9 @@ pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
             let Some(hit) = app.hits.at(ev.column, ev.row).cloned() else {
                 return;
             };
+            if !hit_allowed(&hit, app.input_mode) {
+                return;
+            }
             if matches!(hit, Hit::Divider) {
                 app.drag = Some(DragKind::Divider);
                 return;
@@ -40,6 +54,10 @@ pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
                 action::execute(app, act);
             }
         }
+        // The divider drag/persist below only ever starts in
+        // `InputMode::None` (a `Hit::Divider` down-click is blocked by
+        // `hit_allowed` in any modal mode), so no separate mode check
+        // is needed here.
         MouseEventKind::Drag(MouseButton::Left) => {
             if app.drag == Some(DragKind::Divider) {
                 action::execute(app, Action::SetSidebarWidth(ev.column));
@@ -53,16 +71,20 @@ pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
                 super::save_state(app);
             }
         }
-        MouseEventKind::ScrollUp => match app.hits.at(ev.column, ev.row) {
-            Some(Hit::SidebarZone) => action::execute(app, Action::MoveCursor(-3)),
-            Some(Hit::PreviewZone) => action::execute(app, Action::ScrollPreview(-3)),
-            _ => {}
-        },
-        MouseEventKind::ScrollDown => match app.hits.at(ev.column, ev.row) {
-            Some(Hit::SidebarZone) => action::execute(app, Action::MoveCursor(3)),
-            Some(Hit::PreviewZone) => action::execute(app, Action::ScrollPreview(3)),
-            _ => {}
-        },
+        MouseEventKind::ScrollUp if app.input_mode == InputMode::None => {
+            match app.hits.at(ev.column, ev.row) {
+                Some(Hit::SidebarZone) => action::execute(app, Action::MoveCursor(-3)),
+                Some(Hit::PreviewZone) => action::execute(app, Action::ScrollPreview(-3)),
+                _ => {}
+            }
+        }
+        MouseEventKind::ScrollDown if app.input_mode == InputMode::None => {
+            match app.hits.at(ev.column, ev.row) {
+                Some(Hit::SidebarZone) => action::execute(app, Action::MoveCursor(3)),
+                Some(Hit::PreviewZone) => action::execute(app, Action::ScrollPreview(3)),
+                _ => {}
+            }
+        }
         _ => {}
     }
 }
@@ -94,5 +116,58 @@ mod tests {
         assert_eq!(click_action(&Hit::SidebarZone, 0), None);
         assert_eq!(click_action(&Hit::PreviewZone, 0), None);
         assert_eq!(click_action(&Hit::Divider, 0), None);
+    }
+
+    #[test]
+    fn click_on_modal_hit_passes_the_action_through() {
+        let hit = Hit::Modal(Action::ModalConfirm);
+        assert_eq!(click_action(&hit, 0), Some(Action::ModalConfirm));
+    }
+
+    // -- hit_allowed: the modal hit-precedence rule itself. Outside a
+    // modal (`InputMode::None`) everything is live; inside one, only
+    // that modal's own `Hit::Modal` regions are.
+
+    #[test]
+    fn none_mode_allows_every_hit_kind() {
+        assert!(hit_allowed(&Hit::Click(Action::Refresh), InputMode::None));
+        assert!(hit_allowed(
+            &Hit::Modal(Action::ModalConfirm),
+            InputMode::None
+        ));
+        assert!(hit_allowed(&Hit::SidebarZone, InputMode::None));
+        assert!(hit_allowed(&Hit::PreviewZone, InputMode::None));
+        assert!(hit_allowed(&Hit::Divider, InputMode::None));
+    }
+
+    #[test]
+    fn modal_mode_blocks_non_modal_hits() {
+        assert!(!hit_allowed(
+            &Hit::Click(Action::Refresh),
+            InputMode::SnoozeSelect
+        ));
+        assert!(!hit_allowed(&Hit::SidebarZone, InputMode::SnoozeSelect));
+        assert!(!hit_allowed(&Hit::PreviewZone, InputMode::SnoozeSelect));
+        assert!(!hit_allowed(&Hit::Divider, InputMode::SnoozeSelect));
+    }
+
+    #[test]
+    fn modal_mode_allows_only_that_modals_hits() {
+        for mode in [
+            InputMode::SnoozeSelect,
+            InputMode::NewSession,
+            InputMode::RenameAgent,
+            InputMode::ConfirmKill,
+            InputMode::ThemeSelect,
+        ] {
+            assert!(
+                hit_allowed(&Hit::Modal(Action::ModalConfirm), mode),
+                "mode {mode:?}"
+            );
+            assert!(
+                !hit_allowed(&Hit::Click(Action::Quit), mode),
+                "mode {mode:?}"
+            );
+        }
     }
 }
