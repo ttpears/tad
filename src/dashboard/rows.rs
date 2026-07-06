@@ -192,8 +192,22 @@ pub(super) fn build_rows(
 }
 
 /// Move the cursor delta steps over selectable rows, wrapping. Returns the
-/// new index, or None when no row is selectable. `cur` may be out of range
-/// (clamp first).
+/// new index, or None when no row is selectable.
+///
+/// `cur` may be out of range or land on a non-selectable row (e.g. an
+/// `AgentGroupHeader`); it is clamped to `rows.len() - 1` first. When the
+/// (clamped) `cur` is *not* itself selectable, it is treated as an
+/// insertion point between two selectable rows:
+/// - `delta >= 1` lands on the `delta`-th selectable row *after* cur, so
+///   `delta == 1` lands on the immediately-next selectable row (wrapping
+///   to the first selectable row if there is none after cur).
+/// - `delta <= -1` lands on the `|delta|`-th selectable row *before* cur,
+///   so `delta == -1` lands on the immediately-previous selectable row
+///   (wrapping to the last selectable row if there is none before cur).
+/// - `delta == 0` snaps forward to the next selectable row.
+///
+/// When `cur` is itself selectable, this steps `delta` positions through
+/// the selectable sequence, wrapping, unchanged from before.
 pub(super) fn step_selectable(rows: &[Row], cur: usize, delta: i32) -> Option<usize> {
     let selectable: Vec<usize> = rows
         .iter()
@@ -206,11 +220,21 @@ pub(super) fn step_selectable(rows: &[Row], cur: usize, delta: i32) -> Option<us
     }
     let clamped = cur.min(rows.len().saturating_sub(1));
     let n = selectable.len() as i32;
-    let pos = match selectable.iter().position(|&i| i == clamped) {
-        Some(p) => p as i32,
-        None => selectable.iter().position(|&i| i > clamped).unwrap_or(0) as i32,
+
+    let new_pos = match selectable.iter().position(|&i| i == clamped) {
+        Some(p) => (p as i32 + delta).rem_euclid(n),
+        None => {
+            // `clamped` is an insertion point between selectable rows:
+            // `next_pos` is the index (into `selectable`) of the first
+            // selectable row after it, wrapping to 0 if there is none.
+            let next_pos = selectable.iter().position(|&i| i > clamped).unwrap_or(0) as i32;
+            match delta.cmp(&0) {
+                std::cmp::Ordering::Greater => (next_pos + delta - 1).rem_euclid(n),
+                std::cmp::Ordering::Less => (next_pos + delta).rem_euclid(n),
+                std::cmp::Ordering::Equal => next_pos,
+            }
+        }
     };
-    let new_pos = ((pos + delta) % n + n) % n;
     Some(selectable[new_pos as usize])
 }
 
@@ -337,6 +361,39 @@ mod tests {
         assert_eq!(step_selectable(&rows, 2, 1), Some(4));
         assert_eq!(step_selectable(&rows, 4, 1), Some(0));
         assert_eq!(step_selectable(&rows, 0, -1), Some(4));
+    }
+
+    #[test]
+    fn step_selectable_from_unselectable_cursor_lands_on_adjacent_selectable() {
+        let rows = vec![
+            Row::new(RowKind::SectionHeader(Section::Agents), true), // 0
+            Row::new(RowKind::AgentGroupHeader("s2".into()), false), // 1
+            Row::new(RowKind::Agent("s2:0.0".into()), true),         // 2
+            Row::new(RowKind::AgentGroupHeader("s1".into()), false), // 3
+            Row::new(RowKind::Agent("s1:0.0".into()), true),         // 4
+        ];
+
+        // cur on a non-selectable AgentGroupHeader row: delta +1 lands on
+        // the immediately-next selectable row, not one past it.
+        assert_eq!(step_selectable(&rows, 1, 1), Some(2));
+        // delta -1 lands on the immediately-previous selectable row.
+        assert_eq!(step_selectable(&rows, 1, -1), Some(0));
+
+        // Same, from the other non-selectable row, with wrap-forward.
+        assert_eq!(step_selectable(&rows, 3, 1), Some(4));
+        assert_eq!(step_selectable(&rows, 3, -1), Some(2));
+    }
+
+    #[test]
+    fn step_selectable_clamps_out_of_range_cursor() {
+        let rows = vec![
+            Row::new(RowKind::Agent("s1:0.0".into()), true), // 0
+            Row::new(RowKind::AgentGroupHeader("s1".into()), false), // 1 (last row, non-selectable)
+        ];
+
+        // cur is out of range; clamped to the last row (non-selectable),
+        // so delta +1 wraps to the first selectable row.
+        assert_eq!(step_selectable(&rows, rows.len() + 10, 1), Some(0));
     }
 
     #[test]
