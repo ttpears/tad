@@ -19,18 +19,21 @@
 //! tree, not to the rest of the crate. The crate-public surface is
 //! just `RunOpts` and `run_with`.
 
+mod action;
 mod dispatch;
 mod format;
 mod grid;
+mod hit;
 mod keys;
 mod modal;
+mod mouse;
 mod preview;
 mod render;
 mod rows;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -514,6 +517,14 @@ pub(super) struct App {
     /// Bumped by `refresh()`; part of the preview-cache key so cached
     /// preview lines never outlive the data they were built from.
     pub(super) refresh_generation: u64,
+    /// Screen-space click/scroll regions, rebuilt every frame by
+    /// `render.rs`. See `hit::HitMap`.
+    pub(super) hits: hit::HitMap,
+    /// Set while the user is dragging the sidebar/preview divider.
+    pub(super) drag: Option<hit::DragKind>,
+    /// Vertical scroll offset into the preview pane (mouse wheel over
+    /// `PreviewZone`); reset to 0 whenever the selection changes.
+    pub(super) preview_scroll: u16,
 }
 
 impl App {
@@ -556,6 +567,9 @@ impl App {
             theme: theme::load(),
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
+            hits: hit::HitMap::default(),
+            drag: None,
+            preview_scroll: 0,
         }
     }
 
@@ -650,14 +664,21 @@ pub fn run_with(opts: RunOpts) -> Result<i32> {
     // wants to define groups.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = app_loop(&mut terminal, opts);
 
+    // Symmetric cleanup on every path, including the error path — an
+    // Err from app_loop must not leave the terminal in mouse-capture /
+    // alternate-screen / raw mode.
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     let mut app = result?;
@@ -720,18 +741,21 @@ fn app_loop<B: ratatui::backend::Backend>(
         }
 
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match app.input_mode {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match app.input_mode {
                     InputMode::Filter => keys::handle_filter_key(&mut app, key),
                     InputMode::SnoozeSelect => keys::handle_snooze_key(&mut app, key),
                     InputMode::NewSession => keys::handle_new_session_key(&mut app, key),
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::ConfirmKill => keys::handle_confirm_kill_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
+                },
+                // Modals get their own hit-testing in a later task; for
+                // now the mouse is only live while no modal is open.
+                Event::Mouse(ev) if app.input_mode == InputMode::None => {
+                    mouse::handle_mouse(&mut app, ev)
                 }
+                _ => {}
             }
         }
         let snapshot = persist_snapshot(&app);
@@ -823,6 +847,9 @@ pub(super) mod testutil {
             theme: crate::theme::load(),
             preview_cache: PreviewCache::default(),
             refresh_generation: 0,
+            hits: hit::HitMap::default(),
+            drag: None,
+            preview_scroll: 0,
         }
     }
 }

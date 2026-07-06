@@ -7,13 +7,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{snooze, tmux};
 
-use super::dispatch::{
-    kill_agent, pull_pane, rename_agent_window, resolve_pane, return_pane, tad_window_id,
-    OpenTarget, ResolvedPane,
-};
-use super::format::short_name;
+use super::action::{execute, Action};
+use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
 use super::rows::{self, RowKind, Section};
-use super::{App, ConfirmKillTarget, InputMode, NewSessionField, PinnedPane, TextInput};
+use super::{App, ConfirmKillTarget, InputMode, NewSessionField};
 
 pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -21,13 +18,13 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
     match key.code {
         // Navigate the (filtered) rows without leaving filter mode —
         // the whole point: see a match, arrow to it, Enter, done.
-        KeyCode::Down => move_selection(app, 1),
-        KeyCode::Up => move_selection(app, -1),
-        KeyCode::PageDown => move_selection(app, 10),
-        KeyCode::PageUp => move_selection(app, -10),
+        KeyCode::Down => execute(app, Action::MoveCursor(1)),
+        KeyCode::Up => execute(app, Action::MoveCursor(-1)),
+        KeyCode::PageDown => execute(app, Action::MoveCursor(10)),
+        KeyCode::PageUp => execute(app, Action::MoveCursor(-10)),
         KeyCode::Tab => jump_next_section(app),
         KeyCode::BackTab => jump_prev_section(app),
-        KeyCode::Enter => activate_selected(app),
+        KeyCode::Enter => execute(app, Action::Activate(app.cursor)),
         // Esc clears the filter and exits filter mode in one step.
         KeyCode::Esc => {
             app.filter.clear();
@@ -194,171 +191,42 @@ pub(super) fn handle_new_session_key(app: &mut App, key: KeyEvent) {
 pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     app.flash = None;
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('q') | KeyCode::Esc => execute(app, Action::Quit),
         KeyCode::Tab => jump_next_section(app),
         KeyCode::BackTab => jump_prev_section(app),
+        // Digit shortcuts follow the sidebar's VISUAL section order
+        // (Sessions, Agents, Groups, Hosts — see rows::Section::ALL),
+        // not any historical view ordering.
         KeyCode::Char('1') => jump_to_section(app, Section::Sessions),
-        KeyCode::Char('2') => jump_to_section(app, Section::Groups),
-        KeyCode::Char('3') => jump_to_section(app, Section::Hosts),
-        KeyCode::Char('4') => jump_to_section(app, Section::Agents),
-        KeyCode::Down | KeyCode::Char('j') => move_selection(app, 1),
-        KeyCode::Up | KeyCode::Char('k') => move_selection(app, -1),
-        KeyCode::PageDown | KeyCode::Char('J') => move_selection(app, 10),
-        KeyCode::PageUp | KeyCode::Char('K') => move_selection(app, -10),
-        KeyCode::Home | KeyCode::Char('g') => {
-            if let Some(i) = rows::first_item_index(&app.rows) {
-                app.cursor = i;
-            }
+        KeyCode::Char('2') => jump_to_section(app, Section::Agents),
+        KeyCode::Char('3') => jump_to_section(app, Section::Groups),
+        KeyCode::Char('4') => jump_to_section(app, Section::Hosts),
+        KeyCode::Down | KeyCode::Char('j') => execute(app, Action::MoveCursor(1)),
+        KeyCode::Up | KeyCode::Char('k') => execute(app, Action::MoveCursor(-1)),
+        KeyCode::PageDown | KeyCode::Char('J') => execute(app, Action::MoveCursor(10)),
+        KeyCode::PageUp | KeyCode::Char('K') => execute(app, Action::MoveCursor(-10)),
+        KeyCode::Home | KeyCode::Char('g') => execute(app, Action::Home),
+        KeyCode::End | KeyCode::Char('G') => execute(app, Action::End),
+        KeyCode::Enter => execute(app, Action::Activate(app.cursor)),
+        // Toggle collapse on the section the cursor is currently in
+        // (on a header row, that's the header's own section).
+        KeyCode::Char(' ') => {
+            let section = current_section(&app.rows, app.cursor).unwrap_or(Section::Sessions);
+            execute(app, Action::ToggleSection(section));
         }
-        KeyCode::End | KeyCode::Char('G') => {
-            if let Some(i) = rows::last_item_index(&app.rows) {
-                app.cursor = i;
-            }
-        }
-        KeyCode::Enter => activate_selected(app),
-        KeyCode::Char('o') => {
-            let env = PullEnv {
-                inside_tmux: std::env::var_os("TMUX").is_some(),
-                tad_window_id: tad_window_id(),
-            };
-            // Resolve the selected row to stable ids first; the decision
-            // function never touches tmux itself.
-            let kind = app.selected_row().map(|r| r.kind.clone());
-            let pullable = matches!(kind, Some(RowKind::Session(_)) | Some(RowKind::Agent(_)));
-            let row = match &kind {
-                Some(RowKind::Session(name)) => resolve_pane(&tmux::exact_target(name)),
-                Some(RowKind::Agent(target)) => resolve_pane(&tmux::exact_target(target)),
-                _ => None,
-            };
-            let pinned = app.pins.first().cloned();
-            match decide_pull(pullable, row.as_ref(), pinned.as_ref(), &env) {
-                PullAction::None => {}
-                PullAction::Refuse(msg) => app.flash = Some(msg.to_string()),
-                PullAction::ReturnCurrent => {
-                    if let Some(p) = app.pins.pop() {
-                        return_pane(&p);
-                    }
-                    app.refresh();
-                }
-                PullAction::Pull(r) => {
-                    let _ = execute_pull(app, r);
-                }
-                PullAction::SwapTo(r) => {
-                    if let Some(p) = app.pins.pop() {
-                        return_pane(&p);
-                    }
-                    if !execute_pull(app, r) {
-                        app.flash =
-                            Some("swap failed — new pane vanished, original returned".to_string());
-                    }
-                }
-            }
-        }
-        KeyCode::Char('d') => {
-            // Arm the confirm-kill modal — nothing dies until the user
-            // confirms with y/Enter. The victim is captured here so a
-            // background refresh can't change what gets killed.
-            //   * Sessions → tmux kill-session (heavy: drops every pane
-            //     in the session)
-            //   * Agents   → SIGINT to the agent's claude PID (gentle:
-            //     claude flushes its transcript, pane stays open with
-            //     its shell so you can verify what happened)
-            match app.selected_row().map(|r| r.kind.clone()) {
-                Some(RowKind::Session(name)) => {
-                    app.confirm_kill = Some(ConfirmKillTarget::Session { name });
-                    app.input_mode = InputMode::ConfirmKill;
-                }
-                Some(RowKind::Agent(target)) => {
-                    if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
-                        app.confirm_kill = Some(ConfirmKillTarget::Agent {
-                            target: target.clone(),
-                            pid: agent.agent_pid,
-                            window_name: agent.window_name.clone(),
-                        });
-                        app.input_mode = InputMode::ConfirmKill;
-                    }
-                }
-                _ => {}
-            }
-        }
-        KeyCode::Char('R') => {
-            // Rename the tmux window containing the selected agent.
-            // Only meaningful on an Agent row; on others it's a no-op.
-            // Uppercase R so it doesn't collide with `r` (manual refresh).
-            if let Some(RowKind::Agent(target)) = app.selected_row().map(|r| r.kind.clone()) {
-                if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
-                    app.rename_agent_target = Some(target.clone());
-                    // Prefill with the current window name (pristine
-                    // so the first keystroke replaces it cleanly,
-                    // same UX as the Hosts `n`-prefilled SSH).
-                    app.rename_agent_text = TextInput::pristine(agent.window_name.clone());
-                    app.input_mode = InputMode::RenameAgent;
-                }
-            }
-        }
-        KeyCode::Char('s') => {
-            // Snooze the selected agent. Only meaningful on an Agent
-            // row — on others it's a no-op.
-            if matches!(app.selected_row().map(|r| &r.kind), Some(RowKind::Agent(_))) {
-                app.snooze_cursor = 0;
-                app.input_mode = InputMode::SnoozeSelect;
-            }
-        }
-        KeyCode::Char('S') => {
-            // Clear an active snooze on the selected agent. Useful if you
-            // snoozed the wrong row or changed your mind.
-            if let Some(RowKind::Agent(target)) = app.selected_row().map(|r| r.kind.clone()) {
-                let _ = snooze::clear(&target);
-            }
-        }
-        KeyCode::Char('/') => {
-            app.input_mode = InputMode::Filter;
-            app.filter.clear();
-            app.refresh_rows();
-            if let Some(i) = rows::first_item_index(&app.rows) {
-                app.cursor = i;
-            }
-        }
-        KeyCode::Char('n') => {
-            // `n` semantics depend on the selected row:
-            //   * Host   → new tmux session prefilled with the host as
-            //     the SSH target
-            //   * other → blank new tmux session
-            match app.selected_row().map(|r| r.kind.clone()) {
-                Some(RowKind::Host(h)) => {
-                    app.new_session_name = TextInput::pristine(short_name(&h));
-                    app.new_session_host = TextInput::pristine(h);
-                    app.new_session_field = NewSessionField::Name;
-                    app.input_mode = InputMode::NewSession;
-                }
-                _ => {
-                    app.new_session_name = TextInput::new();
-                    app.new_session_host = TextInput::new();
-                    app.new_session_field = NewSessionField::Name;
-                    app.input_mode = InputMode::NewSession;
-                }
-            }
-        }
-        KeyCode::Char('r') => app.refresh(),
-        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
+        // Only meaningful in Narrow layout (the renderer ignores it
+        // otherwise), so it's harmless to bind unconditionally here.
+        KeyCode::Char('`') => execute(app, Action::ToggleOverlay),
+        KeyCode::Char('o') => execute(app, Action::TogglePin(app.cursor)),
+        KeyCode::Char('d') => execute(app, Action::Kill),
+        KeyCode::Char('R') => execute(app, Action::Rename),
+        KeyCode::Char('s') => execute(app, Action::Snooze),
+        KeyCode::Char('S') => execute(app, Action::ClearSnooze),
+        KeyCode::Char('/') => execute(app, Action::Filter),
+        KeyCode::Char('n') => execute(app, Action::NewSession),
+        KeyCode::Char('r') => execute(app, Action::Refresh),
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => execute(app, Action::Quit),
         _ => {}
-    }
-}
-
-/// What Enter does: map the selected row's kind to a dispatch target
-/// and schedule the dashboard to exit into it. No-op on rows that
-/// aren't an open-able item (section/group headers).
-fn activate_selected(app: &mut App) {
-    let target = match app.selected_row().map(|r| r.kind.clone()) {
-        Some(RowKind::Session(name)) => Some(OpenTarget::AttachExisting(name)),
-        Some(RowKind::Group(name)) => Some(OpenTarget::Group(name)),
-        Some(RowKind::Host(name)) => Some(OpenTarget::Host(name)),
-        Some(RowKind::Agent(target)) => Some(OpenTarget::JumpToPane(target)),
-        _ => None,
-    };
-    if let Some(t) = target {
-        app.open_after = Some(t);
-        app.should_quit = true;
     }
 }
 
@@ -373,9 +241,7 @@ fn current_section(rows: &[rows::Row], cursor: usize) -> Option<Section> {
 }
 
 fn jump_to_section(app: &mut App, section: Section) {
-    if let Some(i) = rows::section_header_index(&app.rows, section) {
-        app.cursor = i;
-    }
+    execute(app, Action::JumpSection(section));
 }
 
 fn jump_next_section(app: &mut App) {
@@ -391,89 +257,6 @@ fn jump_prev_section(app: &mut App) {
     let idx = Section::ALL.iter().position(|s| *s == cur).unwrap_or(0);
     let prev = Section::ALL[(idx + n - 1) % n];
     jump_to_section(app, prev);
-}
-
-fn move_selection(app: &mut App, delta: i32) {
-    if let Some(next) = rows::step_selectable(&app.rows, app.cursor, delta) {
-        app.cursor = next;
-    }
-}
-
-/// Everything `decide_pull` needs about the environment, gathered by
-/// the caller so the decision stays pure.
-pub(super) struct PullEnv {
-    pub(super) inside_tmux: bool,
-    /// None = not in a regular pane (popup, or resolution failed).
-    pub(super) tad_window_id: Option<String>,
-}
-
-#[derive(Debug)]
-pub(super) enum PullAction {
-    None,
-    Refuse(&'static str),
-    ReturnCurrent,
-    Pull(ResolvedPane),
-    SwapTo(ResolvedPane),
-}
-
-/// What should `o` do? Pure — all tmux state arrives pre-resolved.
-/// `pullable` is true iff the currently-selected row is a Session or
-/// Agent row (the only kinds `o` can pin).
-fn decide_pull(
-    pullable: bool,
-    row: Option<&ResolvedPane>,
-    pinned: Option<&PinnedPane>,
-    env: &PullEnv,
-) -> PullAction {
-    if !env.inside_tmux {
-        return PullAction::Refuse("pull needs tad inside tmux");
-    }
-    let Some(tad_win) = env.tad_window_id.as_deref() else {
-        return PullAction::Refuse("pull doesn't work in the popup — run tad in a regular pane");
-    };
-    // Something's already out: `o` is primarily the way home, from any
-    // selection. Selecting a different pullable row swaps instead.
-    if let Some(p) = pinned {
-        return match row {
-            Some(r) if r.pane_id != p.pane_id && r.window_id != tad_win => {
-                PullAction::SwapTo(r.clone())
-            }
-            _ => PullAction::ReturnCurrent,
-        };
-    }
-    match (pullable, row) {
-        (true, Some(r)) => {
-            if r.window_id == tad_win {
-                PullAction::Refuse("that pane is already here")
-            } else {
-                PullAction::Pull(r.clone())
-            }
-        }
-        _ => PullAction::None,
-    }
-}
-
-/// Run the join and record the pinned state; flash on failure (the
-/// pane can vanish between resolution and join).
-/// Returns true if the join succeeded.
-fn execute_pull(app: &mut App, r: ResolvedPane) -> bool {
-    let label = format!("{}:{}", r.session, r.window_name);
-    if pull_pane(&r) {
-        app.pins.clear();
-        app.pins.push(PinnedPane {
-            pane_id: r.pane_id,
-            origin_window_id: r.window_id,
-            origin_session: r.session,
-            origin_window_name: r.window_name,
-            origin_window_index: r.window_index,
-            label,
-        });
-        app.refresh();
-        true
-    } else {
-        app.flash = Some("pull failed — pane vanished?".to_string());
-        false
-    }
 }
 
 pub(super) fn handle_confirm_kill_key(app: &mut App, key: KeyEvent) {
@@ -512,124 +295,7 @@ fn confirm_kill_accepts(code: KeyCode) -> bool {
 mod tests {
     use super::*;
     use crate::dashboard::testutil::{mk_agent, mk_app, mk_data, mk_session};
-    use crate::dashboard::{ConfirmKillTarget, InputMode, PinnedPane};
-
-    fn rp(pane: &str, win: &str) -> ResolvedPane {
-        ResolvedPane {
-            pane_id: pane.into(),
-            window_id: win.into(),
-            session: "origin".into(),
-            window_name: "work".into(),
-            window_index: "1".into(),
-        }
-    }
-
-    fn pinned(pane: &str) -> PinnedPane {
-        PinnedPane {
-            pane_id: pane.into(),
-            origin_window_id: "@9".into(),
-            origin_session: "origin".into(),
-            origin_window_name: "work".into(),
-            origin_window_index: "1".into(),
-            label: "origin:work".into(),
-        }
-    }
-
-    fn env_ok() -> PullEnv {
-        PullEnv {
-            inside_tmux: true,
-            tad_window_id: Some("@1".into()),
-        }
-    }
-
-    #[test]
-    fn pull_refused_outside_tmux() {
-        let env = PullEnv {
-            inside_tmux: false,
-            tad_window_id: None,
-        };
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), None, &env),
-            PullAction::Refuse(m) if m.contains("inside tmux")
-        ));
-    }
-
-    #[test]
-    fn pull_refused_in_popup() {
-        let env = PullEnv {
-            inside_tmux: true,
-            tad_window_id: None,
-        };
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), None, &env),
-            PullAction::Refuse(m) if m.contains("popup")
-        ));
-    }
-
-    #[test]
-    fn pull_noop_on_non_pullable_rows_even_with_resolved_pane() {
-        // Group/Host rows never resolve to a pane in practice, but
-        // decide_pull must still no-op if it somehow received one.
-        assert!(matches!(
-            decide_pull(false, Some(&rp("%5", "@2")), None, &env_ok()),
-            PullAction::None
-        ));
-    }
-
-    #[test]
-    fn pull_noop_without_selection() {
-        assert!(matches!(
-            decide_pull(true, None, None, &env_ok()),
-            PullAction::None
-        ));
-    }
-
-    #[test]
-    fn pull_refused_when_pane_already_in_tads_window() {
-        // tad's window is @1; the row's pane lives in @1 too.
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@1")), None, &env_ok()),
-            PullAction::Refuse(m) if m.contains("already here")
-        ));
-    }
-
-    #[test]
-    fn pull_plain_pull_when_nothing_out() {
-        let row = rp("%5", "@2");
-        match decide_pull(true, Some(&row), None, &env_ok()) {
-            PullAction::Pull(r) => assert_eq!(r, row),
-            other => panic!("expected Pull, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pull_same_row_again_returns_it() {
-        assert!(matches!(
-            decide_pull(true, Some(&rp("%5", "@2")), Some(&pinned("%5")), &env_ok()),
-            PullAction::ReturnCurrent
-        ));
-    }
-
-    #[test]
-    fn pull_different_row_swaps() {
-        let row = rp("%6", "@3");
-        match decide_pull(true, Some(&row), Some(&pinned("%5")), &env_ok()) {
-            PullAction::SwapTo(r) => assert_eq!(r, row),
-            other => panic!("expected SwapTo, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pull_returns_current_regardless_of_pullable_when_something_is_out() {
-        // `o` always offers the way home, even when the current
-        // selection isn't itself pullable.
-        for pullable in [true, false] {
-            assert!(matches!(
-                decide_pull(pullable, None, Some(&pinned("%5")), &env_ok()),
-                PullAction::ReturnCurrent
-            ));
-        }
-    }
+    use crate::dashboard::{ConfirmKillTarget, InputMode};
 
     #[test]
     fn flash_clears_on_next_keypress() {
@@ -716,22 +382,6 @@ mod tests {
         assert!(!confirm_kill_accepts(KeyCode::Down));
     }
 
-    /// Something is out and the newly-selected row's pane is (somehow)
-    /// already in tad's window: can't pull it, so `o` falls back to
-    /// returning the current pane — safe, pinned here on purpose.
-    #[test]
-    fn pull_with_target_in_tads_window_returns_current() {
-        assert!(matches!(
-            decide_pull(
-                true,
-                Some(&rp("%6", "@1")), // different pane, but in tad's window @1
-                Some(&pinned("%5")),
-                &env_ok()
-            ),
-            PullAction::ReturnCurrent
-        ));
-    }
-
     #[test]
     fn cancel_clears_modal_without_side_effects() {
         let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
@@ -778,5 +428,55 @@ mod tests {
             current_section(&app.rows, app.cursor),
             Some(Section::Sessions)
         );
+    }
+
+    /// `1`/`2`/`3`/`4` follow the sidebar's visual order — Sessions,
+    /// Agents, Groups, Hosts — not any older view ordering.
+    #[test]
+    fn digit_keys_jump_to_sections_in_visual_order() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        let cases = [
+            ('1', Section::Sessions),
+            ('2', Section::Agents),
+            ('3', Section::Groups),
+            ('4', Section::Hosts),
+        ];
+        for (digit, expect) in cases {
+            handle_key(&mut app, KeyCode::Char(digit), KeyModifiers::NONE);
+            assert_eq!(
+                app.selected_row().map(|r| r.kind.clone()),
+                Some(RowKind::SectionHeader(expect)),
+                "digit {digit}"
+            );
+        }
+    }
+
+    #[test]
+    fn space_toggles_the_cursors_section_from_a_header_row() {
+        let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
+        app.cursor = rows::section_header_index(&app.rows, Section::Sessions).unwrap();
+        assert!(!app.collapsed.contains(&Section::Sessions));
+        handle_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(app.collapsed.contains(&Section::Sessions));
+        handle_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!app.collapsed.contains(&Section::Sessions));
+    }
+
+    #[test]
+    fn space_toggles_the_containing_section_from_an_item_row() {
+        let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
+        app.cursor = rows::index_of(&app.rows, &RowKind::Session("work".into())).unwrap();
+        handle_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(app.collapsed.contains(&Section::Sessions));
+    }
+
+    #[test]
+    fn backtick_toggles_sidebar_overlay() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        assert!(!app.sidebar_overlay);
+        handle_key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+        assert!(app.sidebar_overlay);
+        handle_key(&mut app, KeyCode::Char('`'), KeyModifiers::NONE);
+        assert!(!app.sidebar_overlay);
     }
 }

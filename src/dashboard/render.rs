@@ -13,6 +13,8 @@ use ratatui::Frame;
 
 use crate::theme::Theme;
 
+use super::action::Action;
+use super::hit::Hit;
 use super::modal::{
     render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
     render_snooze_modal,
@@ -60,6 +62,10 @@ pub(super) fn scroll_to_cursor(cursor: usize, scroll: usize, viewport: usize) ->
 }
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
+    // Rebuilt fresh every frame — nothing about mouse hit-testing is
+    // stale across renders.
+    app.hits.clear();
+
     let area = f.area();
     let mode = layout_mode(area.width, area.height);
     if mode == LayoutMode::TooSmall {
@@ -87,7 +93,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
             render_sidebar(f, main_area, app);
         } else {
             render_preview(f, main_area, app);
-            render_menu_chip(f, main_area, &app.theme);
+            render_menu_chip(f, main_area, app);
         }
     } else {
         let sidebar_w = app
@@ -100,6 +106,16 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
             .split(main_area);
         render_sidebar(f, split[0], app);
         render_preview(f, split[1], app);
+        // The draggable column between them — registered last so it
+        // wins over the SidebarZone/PreviewZone hits either side of it
+        // register on their own edge column.
+        let divider_rect = Rect {
+            x: split[0].x + split[0].width.saturating_sub(1),
+            y: main_area.y,
+            width: 1,
+            height: main_area.height,
+        };
+        app.hits.register(divider_rect, Hit::Divider);
     }
 
     render_footer(f, footer_area, app);
@@ -132,8 +148,9 @@ fn render_too_small(f: &mut Frame, area: Rect) {
 }
 
 /// Small top-left hint that the sidebar exists but is hidden — the
-/// only affordance in narrow, non-overlay mode.
-fn render_menu_chip(f: &mut Frame, area: Rect, theme: &Theme) {
+/// only affordance in narrow, non-overlay mode. Also the one way to
+/// open it by mouse: clicking it toggles the overlay.
+fn render_menu_chip(f: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -143,10 +160,12 @@ fn render_menu_chip(f: &mut Frame, area: Rect, theme: &Theme) {
         width: area.width.min(3),
         height: 1,
     };
+    app.hits
+        .register(chip_area, Hit::Click(Action::ToggleOverlay));
     let para = Paragraph::new(Span::styled(
         "☰",
         Style::default()
-            .fg(theme.accent_bold)
+            .fg(app.theme.accent_bold)
             .add_modifier(Modifier::BOLD),
     ));
     f.render_widget(para, chip_area);
@@ -173,11 +192,13 @@ fn empty_hint_line(section: Section, theme: &Theme, width: usize) -> Line<'stati
 }
 
 /// Build the sidebar's rendered content lines (row lines plus
-/// render-level empty-section hints) and the index within that Vec
-/// corresponding to `app.cursor`. Pure given `App`'s current state —
-/// no IO, easy to unit test.
-fn build_sidebar_lines(app: &App, width: u16) -> (Vec<Line<'static>>, usize) {
+/// render-level empty-section hints), a parallel Vec mapping each line
+/// back to its `app.rows` index (`None` for a hint line — there's no
+/// row to click), and the line index corresponding to `app.cursor`.
+/// Pure given `App`'s current state — no IO, easy to unit test.
+fn build_sidebar_lines(app: &App, width: u16) -> (Vec<Line<'static>>, Vec<Option<usize>>, usize) {
     let mut lines = Vec::with_capacity(app.rows.len());
+    let mut line_row: Vec<Option<usize>> = Vec::with_capacity(app.rows.len());
     let mut cursor_idx = 0usize;
     for (i, row) in app.rows.iter().enumerate() {
         if i == app.cursor {
@@ -191,6 +212,7 @@ fn build_sidebar_lines(app: &App, width: u16) -> (Vec<Line<'static>>, usize) {
             &app.pins,
             width,
         ));
+        line_row.push(Some(i));
         if let RowKind::SectionHeader(section) = &row.kind {
             let section = *section;
             let expanded = !app.collapsed.contains(&section);
@@ -201,10 +223,11 @@ fn build_sidebar_lines(app: &App, width: u16) -> (Vec<Line<'static>>, usize) {
                 .unwrap_or(false);
             if expanded && !has_items {
                 lines.push(empty_hint_line(section, &app.theme, width as usize));
+                line_row.push(None);
             }
         }
     }
-    (lines, cursor_idx)
+    (lines, line_row, cursor_idx)
 }
 
 /// Patch a background color (and bold) onto every span in a line —
@@ -224,13 +247,19 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     let content_w = inner_w.saturating_sub(2); // 2-col gutter
     let viewport = area.height.saturating_sub(2) as usize; // top/bottom borders
 
-    let (lines, cursor_idx) = build_sidebar_lines(app, content_w);
+    let (lines, line_row, cursor_idx) = build_sidebar_lines(app, content_w);
     app.sidebar_scroll = scroll_to_cursor(cursor_idx, app.sidebar_scroll, viewport.max(1));
 
+    // Whole-rect zone first — the per-row/dot registrations below are
+    // more specific and, being registered after, win at their exact
+    // rects (see `hit::HitMap::at`).
+    app.hits.register(area, Hit::SidebarZone);
+
+    let scroll = app.sidebar_scroll;
     let visible: Vec<Line> = lines
         .into_iter()
         .enumerate()
-        .skip(app.sidebar_scroll)
+        .skip(scroll)
         .take(viewport.max(1))
         .map(|(i, line)| {
             let gutter = if i == cursor_idx { "▶ " } else { "  " };
@@ -244,6 +273,43 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
             }
         })
         .collect();
+
+    // Per-row click regions for the lines actually on screen, at their
+    // real terminal position (inside the border, below the gutter).
+    for (display_row, line_idx) in (scroll..scroll + visible.len()).enumerate() {
+        let Some(Some(row_i)) = line_row.get(line_idx) else {
+            continue; // an empty-section hint line — nothing to click
+        };
+        let row_i = *row_i;
+        let Some(row) = app.rows.get(row_i) else {
+            continue;
+        };
+        let y = area.y + 1 + display_row as u16;
+        let row_rect = Rect {
+            x: area.x + 1,
+            y,
+            width: inner_w,
+            height: 1,
+        };
+        if let RowKind::SectionHeader(section) = &row.kind {
+            let section = *section;
+            app.hits
+                .register(row_rect, Hit::Click(Action::ToggleSection(section)));
+        } else if row.selectable {
+            app.hits
+                .register(row_rect, Hit::Click(Action::Select(row_i)));
+            if matches!(&row.kind, RowKind::Agent(_) | RowKind::Session(_)) {
+                let dot_rect = Rect {
+                    x: area.x + 1 + 2, // past the 2-col gutter
+                    y,
+                    width: 3.min(content_w),
+                    height: 1,
+                };
+                app.hits
+                    .register(dot_rect, Hit::Click(Action::TogglePin(row_i)));
+            }
+        }
+    }
 
     let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
         format!(" sidebar — /{} ", app.filter.as_str())
@@ -259,13 +325,16 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
+    app.hits.register(area, Hit::PreviewZone);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(" preview ");
+    let scroll = app.preview_scroll;
     let para = Paragraph::new(app.preview_lines())
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(para, area);
 }
 
@@ -311,8 +380,26 @@ fn footer_chips(app: &App) -> Vec<(&'static str, String)> {
     chips
 }
 
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    let theme = &app.theme;
+/// The `Action` a click on footer chip `key` should run. `o`'s label
+/// varies (pin vs. return) but it's the same action either way.
+fn chip_action(app: &App, key: &str) -> Option<Action> {
+    match key {
+        "↵" => Some(Action::Activate(app.cursor)),
+        "o" => Some(Action::TogglePin(app.cursor)),
+        "n" => Some(Action::NewSession),
+        "d" => Some(Action::Kill),
+        "R" => Some(Action::Rename),
+        "s" => Some(Action::Snooze),
+        "t" => Some(Action::OpenThemePicker),
+        "/" => Some(Action::Filter),
+        "r" => Some(Action::Refresh),
+        "q" => Some(Action::Quit),
+        _ => None,
+    }
+}
+
+fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
+    let theme = app.theme;
     let line = match app.input_mode {
         InputMode::Filter => {
             let value = app.filter.as_str();
@@ -335,11 +422,11 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
             }
             spans.push(Span::raw("  "));
-            spans.extend(chip("↑↓", "nav", theme));
-            spans.extend(chip("↵", "open", theme));
-            spans.extend(chip("⇥", "section", theme));
-            spans.extend(chip("^U", "clear", theme));
-            spans.extend(chip("Esc", "exit", theme));
+            spans.extend(chip("↑↓", "nav", &theme));
+            spans.extend(chip("↵", "open", &theme));
+            spans.extend(chip("⇥", "section", &theme));
+            spans.extend(chip("^U", "clear", &theme));
+            spans.extend(chip("Esc", "exit", &theme));
             Line::from(spans)
         }
         InputMode::NewSession => Line::from(Span::styled(
@@ -368,8 +455,24 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 ))
             } else {
                 let mut spans = Vec::new();
+                let mut x = area.x;
                 for (key, label) in footer_chips(app) {
-                    spans.extend(chip(key, &label, theme));
+                    let chip_spans = chip(key, &label, &theme);
+                    let width: u16 = chip_spans
+                        .iter()
+                        .map(|s| s.content.chars().count() as u16)
+                        .sum();
+                    if let Some(action) = chip_action(app, key) {
+                        let rect = Rect {
+                            x,
+                            y: area.y,
+                            width,
+                            height: 1,
+                        };
+                        app.hits.register(rect, Hit::Click(action));
+                    }
+                    x += width;
+                    spans.extend(chip_spans);
                 }
                 Line::from(spans)
             }
@@ -427,7 +530,7 @@ mod tests {
     #[test]
     fn build_sidebar_lines_hints_empty_expanded_sections() {
         let app = crate::dashboard::testutil::mk_app(mk_data(vec![], vec![]));
-        let (lines, _) = build_sidebar_lines(&app, 40);
+        let (lines, _, _) = build_sidebar_lines(&app, 40);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(texts.iter().any(|t| t.contains("no sessions")));
         assert!(texts.iter().any(|t| t.contains("no agents running")));
@@ -441,7 +544,7 @@ mod tests {
         let mut app = crate::dashboard::testutil::mk_app(data);
         app.collapsed.insert(Section::Sessions);
         app.refresh_rows();
-        let (lines, _) = build_sidebar_lines(&app, 40);
+        let (lines, _, _) = build_sidebar_lines(&app, 40);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(!texts.iter().any(|t| t.contains("no sessions")));
     }
@@ -450,7 +553,7 @@ mod tests {
     fn build_sidebar_lines_no_hint_when_section_has_items() {
         let data = mk_data(vec![mk_session("web")], vec![]);
         let app = crate::dashboard::testutil::mk_app(data);
-        let (lines, _) = build_sidebar_lines(&app, 40);
+        let (lines, _, _) = build_sidebar_lines(&app, 40);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(!texts.iter().any(|t| t.contains("no sessions")));
         assert!(texts.iter().any(|t| t.contains("web")));
@@ -466,7 +569,7 @@ mod tests {
         let mut app = crate::dashboard::testutil::mk_app(data);
         app.cursor =
             crate::dashboard::rows::section_header_index(&app.rows, Section::Agents).unwrap();
-        let (lines, cursor_idx) = build_sidebar_lines(&app, 40);
+        let (lines, _, cursor_idx) = build_sidebar_lines(&app, 40);
         assert!(line_text(&lines[cursor_idx])
             .trim_start()
             .starts_with("AGENTS"));
