@@ -40,12 +40,13 @@ use crossterm::{
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::{backend::CrosstermBackend, Terminal};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::{
-    agents::{self, Agent},
-    config, groups,
+    agents::{self, Agent, AgentState},
+    config, groups, notify,
     sessions::{self, Session},
     theme::{self, Theme},
 };
@@ -503,12 +504,14 @@ pub(super) struct App {
     /// Bumped once per `refresh()`; animates `agents::state_dot`'s
     /// Working frames.
     pub(super) spinner_tick: u64,
-    /// Agent state as of the previous refresh, keyed by target — lets
-    /// a later task detect state transitions (e.g. Working → Blocked)
-    /// worth notifying on.
-    // TODO(herdr-cockpit): consumed by the notifications task.
-    #[allow(dead_code)]
-    pub(super) prev_agent_states: std::collections::HashMap<String, crate::agents::AgentState>,
+    /// Agent state as of the previous refresh, keyed by target.
+    /// `refresh()` diffs this against the freshly computed state each
+    /// tick (via `blocked_transitions`) to detect genuine
+    /// Working/absent → Blocked transitions worth a desktop
+    /// notification, then replaces it wholesale. Seeded from the
+    /// initial scan in `App::new` so simply opening the dashboard with
+    /// already-blocked agents doesn't fire one notification per row.
+    pub(super) prev_agent_states: HashMap<String, AgentState>,
     /// Cursor over `data.ui.snooze_intervals` in the snooze modal.
     pub(super) snooze_cursor: usize,
     /// New window name being typed in the rename-agent modal.
@@ -559,6 +562,46 @@ pub(super) struct App {
     pub(super) preview_scroll: u16,
 }
 
+/// Compute every present agent's semantic state for this tick, using
+/// the same `snoozed` + `attention_idle` inputs the row/dot renderer
+/// uses (`format::snoozed`, `agents::agent_state`) so the notification
+/// path and the sidebar can never disagree about what "Blocked" means.
+/// Shared by `App::new` (to seed `prev_agent_states` from the initial
+/// scan) and `App::refresh` (to detect transitions each tick).
+fn agent_states(data: &AppData) -> Vec<(String, AgentState)> {
+    data.agents
+        .iter()
+        .map(|a| {
+            (
+                a.target.clone(),
+                agents::agent_state(a, format::snoozed(data, &a.target), data.ui.attention_idle),
+            )
+        })
+        .collect()
+}
+
+/// Targets that should fire a desktop notification this refresh:
+/// present in `now` as Blocked, previous state != Blocked (or absent),
+/// not snoozed, and cfg enabled.
+pub(super) fn blocked_transitions(
+    prev: &HashMap<String, AgentState>,
+    now: &[(String, AgentState)],
+    snoozed: &dyn Fn(&str) -> bool,
+    enabled: bool,
+) -> Vec<String> {
+    if !enabled {
+        return Vec::new();
+    }
+    now.iter()
+        .filter(|(target, state)| {
+            *state == AgentState::Blocked
+                && prev.get(target) != Some(&AgentState::Blocked)
+                && !snoozed(target)
+        })
+        .map(|(target, _)| target.clone())
+        .collect()
+}
+
 impl App {
     fn new() -> Self {
         let data = AppData::load();
@@ -572,6 +615,12 @@ impl App {
             .and_then(|(section, item)| rows::index_of(&rows, &kind_for_selection(*section, item)))
             .or_else(|| rows::first_item_index(&rows))
             .unwrap_or(0);
+        // Seed from the initial scan rather than starting empty: every
+        // agent already Blocked when tad opens must NOT fire a
+        // notification on the very first refresh — only genuine
+        // transitions observed while the dashboard is running should.
+        let prev_agent_states: HashMap<String, AgentState> =
+            agent_states(&data).into_iter().collect();
         App {
             data,
             rows,
@@ -583,7 +632,7 @@ impl App {
             pins: Vec::new(),
             saved_border_status: None,
             spinner_tick: 0,
-            prev_agent_states: std::collections::HashMap::new(),
+            prev_agent_states,
             snooze_cursor: 0,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
@@ -639,6 +688,28 @@ impl App {
         if dropped > 0 {
             self.flash = Some(pins_vanished_message(dropped));
         }
+
+        // Compute every present agent's state once this refresh (the
+        // same snoozed + attention_idle inputs the row/dot renderer
+        // uses — see `format::snoozed` and `agents::agent_state`), fire
+        // a desktop notification for genuine Working/absent → Blocked
+        // transitions, then replace `prev_agent_states` wholesale so
+        // the next refresh diffs against this tick.
+        let now_states = agent_states(&self.data);
+        let notify_enabled = self.data.ui.notify_on_blocked;
+        let targets = blocked_transitions(
+            &self.prev_agent_states,
+            &now_states,
+            &|target| format::snoozed(&self.data, target),
+            notify_enabled,
+        );
+        for target in &targets {
+            if let Some(agent) = self.data.agents.iter().find(|a| &a.target == target) {
+                notify::send_blocked(&agent.window_name);
+            }
+        }
+        self.prev_agent_states = now_states.into_iter().collect();
+
         self.refresh_rows();
     }
 
@@ -878,7 +949,7 @@ pub(super) mod testutil {
             pins: Vec::new(),
             saved_border_status: None,
             spinner_tick: 0,
-            prev_agent_states: std::collections::HashMap::new(),
+            prev_agent_states: HashMap::new(),
             snooze_cursor: 0,
             rename_agent_text: TextInput::new(),
             rename_agent_target: None,
@@ -910,6 +981,120 @@ mod tests {
     use super::testutil::mk_data;
     use super::*;
     use rows::{RowKind, Section};
+
+    // ---- blocked_transitions: full transition matrix ----
+
+    #[test]
+    fn blocked_transitions_absent_to_blocked_fires() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert_eq!(fired, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_working_to_blocked_fires() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Working);
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert_eq!(fired, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_blocked_to_blocked_does_not_fire() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Blocked);
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_blocked_then_working_then_blocked_fires_again() {
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("t".to_string(), AgentState::Blocked);
+
+        // Tick: Working — no fire.
+        let now1 = vec![("t".to_string(), AgentState::Working)];
+        let fired1 = blocked_transitions(&prev, &now1, &|_| false, true);
+        assert!(fired1.is_empty());
+
+        // What refresh() does between ticks: replace prev wholesale.
+        prev = now1.into_iter().collect();
+
+        // Next tick: Blocked again — fires, because the immediately
+        // preceding state was Working, not Blocked.
+        let now2 = vec![("t".to_string(), AgentState::Blocked)];
+        let fired2 = blocked_transitions(&prev, &now2, &|_| false, true);
+        assert_eq!(fired2, vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn blocked_transitions_snoozed_suppressed() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| true, true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_disabled_suppressed() {
+        let prev: HashMap<String, AgentState> = HashMap::new();
+        let now = vec![("t".to_string(), AgentState::Blocked)];
+        let fired = blocked_transitions(&prev, &now, &|_| false, false);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn blocked_transitions_ignores_targets_not_in_now() {
+        // A target present only in `prev` (e.g. vanished pane) isn't
+        // in `now` at all, so it can't fire regardless of its old
+        // state — `now` is the sole source of "is this target here".
+        let mut prev: HashMap<String, AgentState> = HashMap::new();
+        prev.insert("gone".to_string(), AgentState::Working);
+        let now: Vec<(String, AgentState)> = vec![];
+        let fired = blocked_transitions(&prev, &now, &|_| false, true);
+        assert!(fired.is_empty());
+    }
+
+    // ---- seeding: opening the dashboard must not notify for agents
+    // already Blocked at startup ----
+
+    #[test]
+    fn seeding_from_initial_scan_suppresses_notification_on_first_refresh() {
+        let blocked = testutil::mk_agent("s:0.0", "s", 1);
+        let mut data = mk_data(vec![], vec![blocked]);
+        // Force AwaitingInput so agent_state resolves to Blocked.
+        data.agents[0].attention = crate::transcript::Attention::AwaitingInput;
+
+        // This is exactly what App::new() does: seed prev from the
+        // same initial scan rather than starting from an empty map.
+        let seeded: HashMap<String, AgentState> = agent_states(&data).into_iter().collect();
+
+        // The following refresh sees the same data (nothing changed)
+        // — no transition, so no notification, even though the agent
+        // is Blocked.
+        let now = agent_states(&data);
+        let fired = blocked_transitions(&seeded, &now, &|t| format::snoozed(&data, t), true);
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn empty_seed_would_have_fired_for_the_same_data() {
+        // Contrast case proving the seeding test above is meaningful:
+        // without seeding (empty prev, as if freshly constructed with
+        // `HashMap::new()`), the same already-blocked agent WOULD
+        // fire — this is the absent→Blocked rule from the matrix.
+        let blocked = testutil::mk_agent("s:0.0", "s", 1);
+        let mut data = mk_data(vec![], vec![blocked]);
+        data.agents[0].attention = crate::transcript::Attention::AwaitingInput;
+
+        let empty_prev: HashMap<String, AgentState> = HashMap::new();
+        let now = agent_states(&data);
+        let fired = blocked_transitions(&empty_prev, &now, &|t| format::snoozed(&data, t), true);
+        assert_eq!(fired, vec!["s:0.0".to_string()]);
+    }
 
     #[test]
     fn pins_vanished_message_is_singular_for_exactly_one() {
