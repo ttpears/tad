@@ -54,20 +54,27 @@ pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
                 action::execute(app, act);
             }
         }
-        // The divider drag/persist below only ever starts in
-        // `InputMode::None` (a `Hit::Divider` down-click is blocked by
-        // `hit_allowed` in any modal mode), so no separate mode check
-        // is needed here.
+        // A drag can only *start* in `InputMode::None` (a `Hit::Divider`
+        // down-click is blocked by `hit_allowed` in any modal mode),
+        // but a mode-opening key doesn't necessarily clear an
+        // already-in-progress drag (action.rs's `enter_mode` belt does
+        // that for the known modal-opening paths, but nothing stops a
+        // future one from forgetting) — so these two arms re-check the
+        // mode themselves rather than trusting that belt alone.
         MouseEventKind::Drag(MouseButton::Left) => {
-            if app.drag == Some(DragKind::Divider) {
+            if app.input_mode == InputMode::None && app.drag == Some(DragKind::Divider) {
                 action::execute(app, Action::SetSidebarWidth(ev.column));
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            if app.drag.take() == Some(DragKind::Divider) {
+            let was_divider_drag = app.drag.take() == Some(DragKind::Divider);
+            if was_divider_drag && app.input_mode == InputMode::None {
                 // Live resize during the drag already updated
                 // sidebar_width frame-by-frame; persist the final
-                // value now that the gesture is done.
+                // value now that the gesture is done. If a modal opened
+                // mid-drag, skip the save — the drag is still cleared
+                // above, but nothing about the sidebar should change
+                // while the modal has exclusive input.
                 super::save_state(app);
             }
         }
@@ -92,6 +99,17 @@ pub(super) fn handle_mouse(app: &mut App, ev: MouseEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::testutil::{mk_app, mk_data};
+    use crossterm::event::KeyModifiers;
+
+    fn mouse_ev(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 50,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
 
     #[test]
     fn click_on_selected_row_promotes_to_activate() {
@@ -170,4 +188,47 @@ mod tests {
             );
         }
     }
+
+    // -- handle_mouse: a divider drag that was already in progress when
+    // a modal opened (the modal-opening keys don't themselves touch
+    // `app.drag`, only `action::enter_mode` does — this is the second,
+    // independent belt guarding the same invariant directly in
+    // `handle_mouse`) must not keep resizing or persisting the sidebar
+    // while the modal has exclusive input.
+
+    #[test]
+    fn drag_left_is_inert_while_a_modal_is_open() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.drag = Some(DragKind::Divider);
+        app.input_mode = InputMode::ThemeSelect;
+        let before = app.sidebar_width;
+        handle_mouse(&mut app, mouse_ev(MouseEventKind::Drag(MouseButton::Left)));
+        assert_eq!(app.sidebar_width, before, "sidebar_width must not move");
+        assert_eq!(
+            app.drag,
+            Some(DragKind::Divider),
+            "drag state itself is untouched by a no-op Drag event"
+        );
+    }
+
+    #[test]
+    fn up_left_clears_drag_but_skips_save_while_a_modal_is_open() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.drag = Some(DragKind::Divider);
+        app.input_mode = InputMode::ThemeSelect;
+        let before = app.sidebar_width;
+        handle_mouse(&mut app, mouse_ev(MouseEventKind::Up(MouseButton::Left)));
+        assert!(app.drag.is_none(), "Up always clears the drag state");
+        assert_eq!(
+            app.sidebar_width, before,
+            "no save_state / sidebar mutation while a modal is open"
+        );
+    }
+
+    // Note: no "still works outside a modal" counterpart test for the
+    // `Up(Left)` arm here — that path calls the real `save_state`,
+    // which writes to the user's actual state file
+    // (`dirs::state_dir()/tad/dashboard.state`, no test seam), so
+    // exercising it would leave a side effect on the machine running
+    // `cargo test`.
 }

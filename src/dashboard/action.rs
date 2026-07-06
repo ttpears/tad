@@ -112,7 +112,7 @@ pub(super) fn execute(app: &mut App, action: Action) {
         Action::Snooze => {
             if matches!(app.selected_row().map(|r| &r.kind), Some(RowKind::Agent(_))) {
                 app.snooze_cursor = 0;
-                app.input_mode = InputMode::SnoozeSelect;
+                enter_mode(app, InputMode::SnoozeSelect);
             }
         }
         Action::ClearSnooze => {
@@ -163,6 +163,22 @@ pub(super) fn execute(app: &mut App, action: Action) {
     }
 }
 
+/// Enter `mode`, clearing any in-progress divider drag along with it.
+///
+/// A drag can only *start* while `input_mode` is `None` (`mouse.rs`'s
+/// `hit_allowed` blocks a `Hit::Divider` down-click in any modal mode),
+/// but the keys that open a modal don't otherwise touch `app.drag` —
+/// without this, a drag begun just before a modal-opening key lands
+/// would sit in `app.drag` and keep firing `SetSidebarWidth`/
+/// `save_state` off drag/release events that land while the modal has
+/// exclusive input. `mouse.rs` also re-checks `input_mode` itself
+/// belt-and-suspenders, but every modal-opening path should route
+/// through here rather than assigning `app.input_mode` directly.
+fn enter_mode(app: &mut App, mode: InputMode) {
+    app.drag = None;
+    app.input_mode = mode;
+}
+
 /// `t` / the footer's theme chip: open the picker, capturing the
 /// active theme (and its name, for the initial cursor position) so
 /// Esc can restore it after the cursor's live-preview has moved
@@ -176,7 +192,7 @@ fn open_theme_picker(app: &mut App) {
         .as_deref()
         .and_then(|n| names.iter().position(|x| *x == n))
         .unwrap_or(0);
-    app.input_mode = InputMode::ThemeSelect;
+    enter_mode(app, InputMode::ThemeSelect);
 }
 
 /// Move the theme-picker cursor to `i` and live-apply that theme —
@@ -240,7 +256,7 @@ fn kill_selected(app: &mut App) {
     match app.selected_row().map(|r| r.kind.clone()) {
         Some(RowKind::Session(name)) => {
             app.confirm_kill = Some(ConfirmKillTarget::Session { name });
-            app.input_mode = InputMode::ConfirmKill;
+            enter_mode(app, InputMode::ConfirmKill);
         }
         Some(RowKind::Agent(target)) => {
             if let Some(agent) = app.data.agents.iter().find(|a| a.target == target) {
@@ -249,7 +265,7 @@ fn kill_selected(app: &mut App) {
                     pid: agent.agent_pid,
                     window_name: agent.window_name.clone(),
                 });
-                app.input_mode = InputMode::ConfirmKill;
+                enter_mode(app, InputMode::ConfirmKill);
             }
         }
         _ => {}
@@ -266,7 +282,7 @@ fn rename_selected(app: &mut App) {
             // first keystroke replaces it cleanly, same UX as the
             // Hosts-view new-session prefill).
             app.rename_agent_text = TextInput::pristine(agent.window_name.clone());
-            app.input_mode = InputMode::RenameAgent;
+            enter_mode(app, InputMode::RenameAgent);
         }
     }
 }
@@ -281,13 +297,13 @@ fn new_session_selected(app: &mut App) {
             app.new_session_name = TextInput::pristine(format::short_name(&h));
             app.new_session_host = TextInput::pristine(h);
             app.new_session_field = NewSessionField::Name;
-            app.input_mode = InputMode::NewSession;
+            enter_mode(app, InputMode::NewSession);
         }
         _ => {
             app.new_session_name = TextInput::new();
             app.new_session_host = TextInput::new();
             app.new_session_field = NewSessionField::Name;
-            app.input_mode = InputMode::NewSession;
+            enter_mode(app, InputMode::NewSession);
         }
     }
 }
@@ -538,6 +554,20 @@ mod tests {
         let captured = app.theme_before.expect("theme_before must be captured");
         assert_eq!(format!("{:?}", captured.accent), before_accent);
         assert!(app.theme_cursor < theme::builtin_names().len());
+    }
+
+    #[test]
+    fn opening_the_theme_picker_clears_an_in_progress_divider_drag() {
+        // A divider drag started just before `t` is pressed isn't
+        // cleared by the key handling itself — only `enter_mode`
+        // (routed through here via `open_theme_picker`) does that, so
+        // this is the representative case for the belt described in
+        // `enter_mode`'s doc comment.
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.drag = Some(crate::dashboard::hit::DragKind::Divider);
+        execute(&mut app, Action::OpenThemePicker);
+        assert_eq!(app.input_mode, InputMode::ThemeSelect);
+        assert!(app.drag.is_none());
     }
 
     #[test]
