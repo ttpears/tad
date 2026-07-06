@@ -135,7 +135,7 @@ fn target_alive(target: &str, fmt: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Send a pulled pane home.
+/// Send a pinned pane home.
 ///   * pane gone (user killed it while out) → no-op
 ///   * origin window alive → join back into it (`-d`: focus stays here)
 ///   * window closed (the pane was its only one) → break-pane into the
@@ -144,8 +144,8 @@ fn target_alive(target: &str, fmt: &str) -> bool {
 ///   * origin session also gone → break-pane with no target lands it as
 ///     its own window in tad's session, renamed; not stranded beside tad
 ///
-/// Callers are responsible for clearing `App::pulled_pane` (use `.take()`).
-pub(super) fn return_pane(p: &super::PulledPane) {
+/// Callers are responsible for removing the pane from `App::pins`.
+pub(super) fn return_pane(p: &super::PinnedPane) {
     if !target_alive(&p.pane_id, "#{pane_id}") {
         return;
     }

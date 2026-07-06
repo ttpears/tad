@@ -5,16 +5,12 @@
 //! logic here, pure and IO-free, means it can be exhaustively unit
 //! tested without tmux and without touching the renderer at all.
 
-// TODO(herdr-cockpit): consumed by the sidebar-render task — remove this
-// allow once wired up.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use crate::agents::Agent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum Section {
+pub(crate) enum Section {
     Sessions,
     Agents,
     Groups,
@@ -59,7 +55,7 @@ impl Section {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RowKind {
+pub(crate) enum RowKind {
     SectionHeader(Section),
     /// Session name.
     Session(String),
@@ -72,7 +68,7 @@ pub(super) enum RowKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Row {
+pub(crate) struct Row {
     pub(super) kind: RowKind,
     /// Cursor can land here. True for everything except AgentGroupHeader.
     pub(super) selectable: bool,

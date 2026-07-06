@@ -11,6 +11,7 @@ use crate::snooze;
 use crate::theme::Theme;
 use crate::transcript;
 
+use super::rows::{Row, RowKind};
 use super::AppData;
 
 pub(super) fn format_session_line(data: &AppData, name: &str, theme: &Theme) -> Line<'static> {
@@ -171,23 +172,6 @@ pub(super) fn agent_status(
 }
 
 pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> Line<'static> {
-    // Session-header rows (emitted by the Agents view's grouped items
-    // list) are visually distinct dividers — bold session name in the
-    // accent colour, with the inline count summary. The sigil isn't
-    // shown; it's just an in-band marker for `is_agent_header`.
-    if let Some(rest) = target.strip_prefix(super::AGENT_HEADER_SIGIL) {
-        let label = rest.trim_start();
-        return Line::from(vec![
-            Span::styled("── ", Style::default().fg(theme.border)),
-            Span::styled(
-                label.to_string(),
-                Style::default()
-                    .fg(theme.accent_bold)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ─────────────", Style::default().fg(theme.border)),
-        ]);
-    }
     let Some(agent) = data.agents.iter().find(|a| a.target == target) else {
         return Line::from(target.to_string());
     };
@@ -240,6 +224,38 @@ pub(super) fn format_agent_line(data: &AppData, target: &str, theme: &Theme) -> 
         ));
     }
     Line::from(spans)
+}
+
+fn format_agent_group_header(session: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("── ", Style::default().fg(theme.border)),
+        Span::styled(
+            session.to_string(),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ─────────────", Style::default().fg(theme.border)),
+    ])
+}
+
+/// Temporary flat-list row renderer for the two-pane layout this task
+/// keeps compiling. Task 6 (real sidebar render) replaces this with
+/// per-section-aware drawing (indentation, collapse carets, dots, …).
+pub(super) fn format_row(data: &AppData, row: &Row, theme: &Theme) -> Line<'static> {
+    match &row.kind {
+        RowKind::SectionHeader(section) => Line::from(Span::styled(
+            section.title(),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        )),
+        RowKind::Session(name) => format_session_line(data, name, theme),
+        RowKind::Group(name) => format_group_line(data, name, theme),
+        RowKind::Host(name) => format_host_line(data, name, theme),
+        RowKind::Agent(target) => format_agent_line(data, target, theme),
+        RowKind::AgentGroupHeader(session) => format_agent_group_header(session, theme),
+    }
 }
 
 // ---- shared display helpers ----

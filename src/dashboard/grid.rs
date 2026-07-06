@@ -2,17 +2,13 @@
 //! overhaul, Task 3).
 //!
 //! Pure decision logic for the multi-pane "pin grid" that replaces the
-//! single-pane pull (see `dashboard.rs`'s `PulledPane` / `keys.rs`'s
+//! single-pane pull (see `dashboard.rs`'s `PinnedPane` / `keys.rs`'s
 //! `decide_pull` for the one-pane precursor this generalizes). Nothing
 //! in this module touches tmux — callers resolve panes and gather
 //! environment facts, then hand them here for a pure decision.
 
 // TODO(herdr-cockpit): consumed by Task 8 — remove this allow once wired up.
 #![allow(dead_code)]
-
-/// Temporary alias: Task 5 renames `PulledPane` → `PinnedPane` crate-wide.
-/// Until then this lets pin-grid code refer to the new name.
-pub(super) type PinnedPane = super::PulledPane;
 
 /// Max number of panes the grid holds beside tad.
 pub(super) const MAX_PINS: usize = 4;
@@ -82,7 +78,7 @@ pub(super) struct PinEnv {
 ///   7. otherwise → Pin
 pub(super) fn decide_pin(
     row: Option<&super::dispatch::ResolvedPane>,
-    pins: &[PinnedPane],
+    pins: &[super::PinnedPane],
     env: &PinEnv,
 ) -> PinAction {
     if !env.inside_tmux {
@@ -121,8 +117,8 @@ mod tests {
         }
     }
 
-    fn pinned(pane: &str) -> PinnedPane {
-        PinnedPane {
+    fn pinned(pane: &str) -> super::super::PinnedPane {
+        super::super::PinnedPane {
             pane_id: pane.into(),
             origin_window_id: "@9".into(),
             origin_session: "origin".into(),

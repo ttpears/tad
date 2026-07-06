@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::snooze;
 
+use super::rows::RowKind;
 use super::{App, ConfirmKillTarget, NewSessionField, TextInput};
 
 pub(super) fn render_rename_agent_modal(f: &mut Frame, area: Rect, app: &App) {
@@ -92,7 +93,10 @@ pub(super) fn render_snooze_modal(f: &mut Frame, area: Rect, app: &App) {
     // Snooze durations come from the per-refresh `data.ui` cache (which
     // pulled them from config.yaml once), not a fresh file read.
     let intervals = &app.data.ui.snooze_intervals;
-    let target = app.selected().unwrap_or_default();
+    let target = match app.selected_row().map(|r| &r.kind) {
+        Some(RowKind::Agent(t)) => t.clone(),
+        _ => String::new(),
+    };
     let width = 56.min(area.width.saturating_sub(4));
     let height = (intervals.len() as u16 + 5).min(area.height.saturating_sub(2));
     let popup = centered_rect(width, height, area);

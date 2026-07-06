@@ -1,21 +1,25 @@
-//! Top-level frame composition: the three-row layout (tabs / main /
+//! Top-level frame composition: the three-row layout (header / main /
 //! status), the two-column main pane (list / preview), and the
 //! per-mode footer. Modal overlays are drawn on top by `ui()`.
+//!
+//! The list here is a temporary flat rendering of `app.rows` via
+//! `format::format_row` — Task 6 replaces this with the real sidebar
+//! (indentation, collapse carets, state dots, scrolling).
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::agents;
 
-use super::format::{format_agent_line, format_group_line, format_host_line, format_session_line};
 use super::modal::{
     render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
     render_snooze_modal,
 };
-use super::{App, InputMode, View};
+use super::rows::RowKind;
+use super::{format, App, InputMode};
 
 pub(super) fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -28,7 +32,7 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    render_tabs(f, chunks[0], app);
+    render_header(f, chunks[0], app);
     render_main(f, chunks[1], app);
     render_status(f, chunks[2], app);
 
@@ -46,50 +50,43 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    // The Agents tab is annotated with a live count so you can see the cockpit's state from any view.
-    let agents_title = if app.data.agents.is_empty() {
-        "Agents".to_string()
+fn render_header(f: &mut Frame, area: Rect, app: &App) {
+    // Live agent summary so the cockpit's state is visible without
+    // scrolling to the Agents section.
+    let agents_summary = if app.data.agents.is_empty() {
+        "no agents".to_string()
     } else {
         let c = agents::counts(&app.data.agents, std::time::Duration::from_secs(30));
         if c.idle == 0 {
-            format!("Agents ({})", c.total)
+            format!("{} agents", c.total)
         } else if c.active == 0 {
-            format!("Agents ({} idle)", c.total)
+            format!("{} agents idle", c.total)
         } else {
-            format!("Agents ({}/{})", c.active, c.total)
+            format!("{}/{} agents active", c.active, c.total)
         }
     };
-    let titles: Vec<Line> = vec![
-        Line::from(View::Sessions.title()),
-        Line::from(View::Groups.title()),
-        Line::from(View::Hosts.title()),
-        Line::from(agents_title),
-    ];
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.border))
-                .title(" tad "),
-        )
-        .select(app.view.index())
-        .style(Style::default().fg(app.theme.muted))
-        .highlight_style(
+    let line = Line::from(vec![
+        Span::styled(
+            " tad ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
-        );
-    f.render_widget(tabs, area);
+        ),
+        Span::styled(agents_summary, Style::default().fg(app.theme.muted)),
+    ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border));
+    f.render_widget(Paragraph::new(line).block(block), area);
 }
 
 /// 40/60 list/preview normally; the list takes everything while a pane
-/// is pulled — the real pane sits where the preview was. The preview
+/// is pinned — the real pane sits where the preview was. The preview
 /// carries the live content (transcript tail, pane capture) so it gets
 /// the bigger share; the list's widest rows (Agents, ~66 cols) still
 /// fit at 40% of a wide terminal and clip gracefully on narrow ones.
-fn main_constraints(pulled: bool) -> [Constraint; 2] {
-    if pulled {
+fn main_constraints(pinned: bool) -> [Constraint; 2] {
+    if pinned {
         [Constraint::Percentage(100), Constraint::Percentage(0)]
     } else {
         [Constraint::Percentage(40), Constraint::Percentage(60)]
@@ -97,85 +94,35 @@ fn main_constraints(pulled: bool) -> [Constraint; 2] {
 }
 
 fn render_main(f: &mut Frame, area: Rect, app: &mut App) {
-    let pulled = app.pulled_pane.is_some();
+    let pinned = !app.pins.is_empty();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(main_constraints(pulled))
+        .constraints(main_constraints(pinned))
         .split(area);
     render_list(f, chunks[0], app);
-    if !pulled {
+    if !pinned {
         render_preview(f, chunks[1], app);
     }
 }
 
 fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
-    let items_strs = app.items();
     let theme = &app.theme;
-    let list_items: Vec<ListItem> = items_strs
+    let list_items: Vec<ListItem> = app
+        .rows
         .iter()
-        .map(|name| {
-            let line = match app.view {
-                View::Sessions => format_session_line(&app.data, name, theme),
-                View::Groups => format_group_line(&app.data, name, theme),
-                View::Hosts => format_host_line(&app.data, name, theme),
-                View::Agents => format_agent_line(&app.data, name, theme),
-            };
-            ListItem::new(line)
-        })
+        .map(|row| ListItem::new(format::format_row(&app.data, row, theme)))
         .collect();
 
     let title = if app.input_mode == InputMode::Filter || !app.filter.is_empty() {
-        format!(" {} — /{} ", app.view.title(), app.filter.as_str())
+        format!(" sidebar — /{} ", app.filter.as_str())
     } else {
-        // For Agents view, items_strs includes synthetic session-header
-        // separators — count the real agents from data, not items, so
-        // the title doesn't claim "Agents (15)" when actually 8.
-        let count = match app.view {
-            super::View::Agents => app.data.agents.len(),
-            _ => items_strs.len(),
-        };
-        format!(" {} ({}) ", app.view.title(), count)
+        " sidebar ".to_string()
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(title);
-
-    // Empty view: instead of a blank box, show a muted hint. The Groups
-    // hint points at `tad config` — the wizard is opt-in, so this is the
-    // main breadcrumb to it for someone who hasn't set up any groups.
-    if list_items.is_empty() && app.input_mode != InputMode::Filter && app.filter.is_empty() {
-        let hint = match app.view {
-            View::Groups => vec![
-                Line::from(Span::styled(
-                    "No groups yet.",
-                    Style::default().fg(app.theme.fg),
-                )),
-                Line::from(Span::styled(
-                    "Run `tad config` to set up groups.",
-                    Style::default().fg(app.theme.muted),
-                )),
-            ],
-            View::Sessions => vec![Line::from(Span::styled(
-                "No tmux sessions. Press n to start one.",
-                Style::default().fg(app.theme.muted),
-            ))],
-            View::Agents => vec![Line::from(Span::styled(
-                "No Claude agents running.",
-                Style::default().fg(app.theme.muted),
-            ))],
-            View::Hosts => vec![Line::from(Span::styled(
-                "No hosts. Add groups with `tad config`.",
-                Style::default().fg(app.theme.muted),
-            ))],
-        };
-        f.render_widget(
-            Paragraph::new(hint).block(block).wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
 
     let list = List::new(list_items)
         .block(block)
@@ -186,13 +133,9 @@ fn render_list(f: &mut Frame, area: Rect, app: &mut App) {
         )
         .highlight_symbol("▶ ");
 
-    let state = match app.view {
-        View::Sessions => &mut app.list_state_sessions,
-        View::Groups => &mut app.list_state_groups,
-        View::Hosts => &mut app.list_state_hosts,
-        View::Agents => &mut app.list_state_agents,
-    };
-    f.render_stateful_widget(list, area, state);
+    let mut state = ListState::default();
+    state.select(Some(app.cursor));
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_preview(f: &mut Frame, area: Rect, app: &mut App) {
@@ -230,7 +173,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
             }
             spans.push(Span::styled(
-                "    ↑↓ nav  ↵ open  ⇥ view  ^U clear  Esc exit",
+                "    ↑↓ nav  ↵ open  ⇥ section  ^U clear  Esc exit",
                 Style::default().fg(theme.muted),
             ));
             Line::from(spans)
@@ -267,29 +210,29 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                     ]
                 };
                 let mut spans = Vec::new();
-                if let Some(p) = &app.pulled_pane {
+                if let Some(p) = app.pins.first() {
                     spans.push(Span::styled(
-                        format!("◀ {} pulled  ", p.label),
+                        format!("◀ {} pinned  ", p.label),
                         Style::default()
                             .fg(theme.accent_bold)
                             .add_modifier(Modifier::BOLD),
                     ));
                     spans.extend(bind("o", "return"));
                 }
+                let kind = app.selected_row().map(|r| r.kind.clone());
+                let pullable = matches!(kind, Some(RowKind::Session(_)) | Some(RowKind::Agent(_)));
                 spans.extend(bind("↑↓/jk", "nav"));
-                spans.extend(bind("⇥", "view"));
+                spans.extend(bind("⇥", "section"));
                 spans.extend(bind("1/2/3/4", "jump"));
                 spans.extend(bind("↵", "open"));
                 spans.extend(bind("n", "new"));
-                if app.pulled_pane.is_none()
-                    && (app.view == View::Sessions || app.view == View::Agents)
-                {
+                if app.pins.is_empty() && pullable {
                     spans.extend(bind("o", "pull"));
                 }
-                if app.view == View::Sessions {
+                if matches!(kind, Some(RowKind::Session(_))) {
                     spans.extend(bind("d", "kill"));
                 }
-                if app.view == View::Agents {
+                if matches!(kind, Some(RowKind::Agent(_))) {
                     spans.extend(bind("d", "kill"));
                     spans.extend(bind("R", "rename"));
                     spans.extend(bind("s", "snooze"));
@@ -309,7 +252,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_takes_everything_while_a_pane_is_pulled() {
+    fn list_takes_everything_while_a_pane_is_pinned() {
         assert_eq!(
             main_constraints(true),
             [Constraint::Percentage(100), Constraint::Percentage(0)]
