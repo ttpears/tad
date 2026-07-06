@@ -136,8 +136,8 @@ pub(super) fn pin_pane(
     let mut args: Vec<String> = vec!["join-pane".to_string()];
     args.push(if step.horizontal { "-h" } else { "-v" }.to_string());
     if let Some(pct) = step.size_pct {
-        args.push("-p".to_string());
-        args.push(pct.to_string());
+        args.push("-l".to_string());
+        args.push(format!("{}%", pct));
     }
     args.push("-s".to_string());
     args.push(r.pane_id.clone());
