@@ -494,6 +494,72 @@ mod tests {
         );
     }
 
+    /// Verify that Attention::AwaitingInput always produces Blocked,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_awaiting_input_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::AwaitingInput);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Blocked,
+                "Attention::AwaitingInput with {} mtime should be Blocked",
+                desc
+            );
+        }
+    }
+
+    /// Verify that Attention::Working always produces Working,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_working_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::Working);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Working,
+                "Attention::Working with {} mtime should be Working",
+                desc
+            );
+        }
+    }
+
+    /// Verify that Attention::Away always produces Away,
+    /// regardless of mtime (fresh, stale, or no transcript).
+    #[test]
+    fn agent_state_away_overrides_mtime() {
+        let window = Duration::from_secs(30);
+        let now = SystemTime::now();
+        let mtime_scenarios = [
+            ("fresh", Some(now)),
+            ("stale", Some(now - Duration::from_secs(90))),
+            ("no_transcript", None),
+        ];
+        for (desc, mtime) in &mtime_scenarios {
+            let agent = mk_agent(*mtime, transcript::Attention::Away);
+            assert_eq!(
+                agent_state(&agent, false, window),
+                AgentState::Away,
+                "Attention::Away with {} mtime should be Away",
+                desc
+            );
+        }
+    }
+
     #[test]
     fn state_dot_animates_working_over_four_frames() {
         let frames = ['◐', '◓', '◑', '◒'];
