@@ -226,8 +226,6 @@ pub fn counts(agents: &[Agent], active_window: Duration) -> StatusCounts {
 /// the mtime-based activity heuristic, and the user's snooze flag into
 /// a single value the dashboard can render without knowing about any
 /// of the underlying signals.
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentState {
     /// Waiting on the human right now (or otherwise flagged as needing
@@ -244,8 +242,6 @@ pub enum AgentState {
 /// snoozed → Away; AwaitingInput → Blocked; Working → Working;
 /// Attention::Away → Away; Unknown → Active(mtime within active_window)
 /// ? Working : Idle (NoTranscript → Idle).
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 pub fn agent_state(a: &Agent, snoozed: bool, active_window: Duration) -> AgentState {
     if snoozed {
         return AgentState::Away;
@@ -263,8 +259,6 @@ pub fn agent_state(a: &Agent, snoozed: bool, active_window: Duration) -> AgentSt
 
 /// Sidebar dot for a state. `tick` animates Working (frames ◐◓◑◒,
 /// tick % 4). Blocked '●', Idle '○', Away '◌'.
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 pub fn state_dot(state: AgentState, tick: u64) -> char {
     const WORKING_FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
     match state {
@@ -276,16 +270,12 @@ pub fn state_dot(state: AgentState, tick: u64) -> char {
 }
 
 /// Aggregate counts for the dashboard's section headers.
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 pub struct StateCounts {
     pub blocked: usize,
     pub working: usize,
     pub total: usize,
 }
 
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 pub fn state_counts(states: &[AgentState]) -> StateCounts {
     let total = states.len();
     let blocked = states.iter().filter(|s| **s == AgentState::Blocked).count();
@@ -299,8 +289,6 @@ pub fn state_counts(states: &[AgentState]) -> StateCounts {
 
 /// Section-header count label per spec: "blocked/total" when blocked>0,
 /// else "working/total" when working>0, else "total".
-// TODO(herdr-cockpit): consumed by a later dashboard-rendering task.
-#[allow(dead_code)]
 pub fn header_count_label(c: &StateCounts) -> String {
     if c.blocked > 0 {
         format!("{}/{}", c.blocked, c.total)

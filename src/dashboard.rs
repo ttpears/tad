@@ -462,18 +462,15 @@ pub(super) struct App {
     /// Index into `rows`. Always on a selectable row (see
     /// `rows::step_selectable`) except transiently during a rebuild.
     pub(super) cursor: usize,
-    /// First visible row in the sidebar viewport; the renderer keeps
-    /// this in sync with `cursor` so the selection stays on screen.
-    // TODO(herdr-cockpit): consumed by the sidebar-render task.
-    #[allow(dead_code)]
+    /// First visible row in the sidebar viewport; `render::scroll_to_cursor`
+    /// keeps this in sync with `cursor` so the selection stays on screen.
     pub(super) sidebar_scroll: usize,
     pub(super) collapsed: std::collections::HashSet<rows::Section>,
     /// Sidebar width in columns; persisted, clamped to 20..=60.
     pub(super) sidebar_width: u16,
     /// Narrow-terminal overlay mode: is the sidebar currently drawn
-    /// full-screen over the main pane?
-    // TODO(herdr-cockpit): consumed by the sidebar-render task.
-    #[allow(dead_code)]
+    /// full-screen over the main pane? (No key toggles this yet — a
+    /// later task wires one up; the renderer already honors it.)
     pub(super) sidebar_overlay: bool,
     /// Panes currently pinned beside tad. Treated as at-most-one until
     /// Task 8 wires up the multi-pane grid via `grid::decide_pin`.
