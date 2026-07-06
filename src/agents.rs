@@ -44,6 +44,15 @@ pub struct Agent {
     /// Mtime of the most recent transcript file (provider-specific
     /// location), if one exists.
     pub last_activity: Option<SystemTime>,
+    /// Currently write-only: nothing reads this back after construction
+    /// (the preview pane captures the live tmux pane instead — see
+    /// `dashboard/preview.rs`). Left in place, with the dead-code lint
+    /// suppressed, because `dashboard/format.rs` test fixtures (edited
+    /// concurrently on another branch) still populate it in `Agent`
+    /// struct literals; removing the field would break that file's
+    /// compilation. Safe to delete for real once that work lands and
+    /// its fixtures are updated to drop the field too.
+    #[allow(dead_code)]
     pub transcript_path: Option<PathBuf>,
     /// Best-effort "is this agent waiting for me right now" derived
     /// from the tail of the provider's transcript. Unknown when
