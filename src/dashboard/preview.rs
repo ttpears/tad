@@ -160,12 +160,7 @@ pub(super) fn preview_session(data: &AppData, name: &str, theme: &Theme) -> Vec<
             // Strip trailing blank lines first — a mostly-empty pane
             // would otherwise preview as 12 blank rows.
             let all: Vec<&str> = text.lines().collect();
-            let end = all
-                .iter()
-                .rposition(|l| !l.trim().is_empty())
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let shown = &all[end.saturating_sub(PANE_PREVIEW_LINES)..end];
+            let shown = tail_window(&all, PANE_PREVIEW_LINES);
             if shown.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "(pane is blank)".to_string(),
@@ -377,59 +372,42 @@ pub(super) fn preview_agent(data: &AppData, target: &str, theme: &Theme) -> Vec<
         Line::from(""),
     ];
 
-    // Body: the last thing the agent said. When awaiting input this is
-    // naturally the question / approval it's blocked on. Falls back to
-    // the old metadata card so the pane is never bare.
-    // Build the fallback metadata card once; both no-tail arms use it.
-    let push_card = |lines: &mut Vec<Line<'static>>, why: &str| {
-        lines.push(Line::from(Span::styled(
-            why.to_string(),
-            Style::default().fg(theme.muted),
-        )));
-        lines.push(Line::from(""));
-        let kv = |k: &str, v: String| -> Line<'static> {
-            Line::from(vec![
-                Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
-                Span::styled(v, Style::default().fg(theme.fg)),
-            ])
-        };
-        lines.push(kv("session", agent.session.clone()));
-        lines.push(kv(
-            "window",
-            format!("{} ({})", agent.window_name, agent.window_index),
-        ));
-        lines.push(kv("pane", agent.pane_index.clone()));
-        lines.push(kv("pid", agent.agent_pid.to_string()));
-        lines.push(kv(
-            "provider",
-            crate::provider::by_id(agent.provider_id)
-                .map(|p| p.label().to_string())
-                .unwrap_or_else(|| agent.provider_id.to_string()),
-        ));
-    };
-    let tail = agent
-        .transcript_path
-        .as_deref()
-        .map(crate::transcript::last_assistant_text);
-    match tail {
-        Some(Some(text)) => {
+    // Body: a live look at the agent's OWN pane. transcript_path is
+    // discovered per-CWD (agents::scan calls provider.latest_transcript
+    // per cwd), so agents sharing a cwd — the common case for two
+    // panes in one tmux session — resolved to the same newest
+    // transcript file and previewed identically. The pane is the only
+    // source that's always unique per agent, since agent.target
+    // (`session:window.pane`) is unique by construction. Falls back to
+    // the metadata card so the pane is never bare when capture fails
+    // (e.g. the pane vanished between scan and render).
+    let capture = tmux::run(["capture-pane", "-p", "-t", &agent.target])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    match capture {
+        Some(text) => {
             lines.push(Line::from(Span::styled(
-                "── last message ──────────────".to_string(),
+                "── pane ──────────────────────".to_string(),
                 Style::default().fg(theme.border),
             )));
-            // str::lines() drops a trailing newline's empty element —
-            // intentional; messages often end with a bare newline.
-            for l in text.lines() {
+            let all: Vec<&str> = text.lines().collect();
+            let shown = tail_window(&all, PANE_PREVIEW_LINES);
+            if shown.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    l.to_string(),
-                    Style::default().fg(theme.fg),
+                    "(pane is blank)".to_string(),
+                    Style::default().fg(theme.muted),
                 )));
+            } else {
+                for l in shown {
+                    lines.push(Line::from(Span::styled(
+                        clean_capture_line(l),
+                        Style::default().fg(theme.fg),
+                    )));
+                }
             }
         }
-        // Transcript exists but no assistant text in the tail window.
-        Some(None) => push_card(&mut lines, "no recent message"),
-        // Agent has no transcript on disk at all.
-        None => push_card(&mut lines, "no transcript — can't show last message"),
+        None => push_metadata_card(&mut lines, agent, "no capture — pane gone?", theme),
     }
 
     lines.push(Line::from(""));
@@ -449,6 +427,54 @@ fn clean_capture_line(l: &str) -> String {
         .chars()
         .filter(|c| !c.is_control())
         .collect()
+}
+
+/// Trailing window of a `capture-pane` dump: trims trailing blank
+/// lines first (a mostly-empty pane would otherwise preview as `max`
+/// blank rows), then keeps at most `max` of what's left. Pure so it's
+/// testable without a real tmux pane.
+fn tail_window<'a>(all: &'a [&'a str], max: usize) -> &'a [&'a str] {
+    let end = all
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    &all[end.saturating_sub(max)..end]
+}
+
+/// Metadata card shown in place of a live pane capture — when the
+/// pane vanished (target gone) there's nothing else to show. Pure
+/// (no tmux) so it's directly testable.
+fn push_metadata_card(
+    lines: &mut Vec<Line<'static>>,
+    agent: &crate::agents::Agent,
+    why: &str,
+    theme: &Theme,
+) {
+    lines.push(Line::from(Span::styled(
+        why.to_string(),
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+    let kv = |k: &str, v: String| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{:<10}", k), Style::default().fg(theme.muted)),
+            Span::styled(v, Style::default().fg(theme.fg)),
+        ])
+    };
+    lines.push(kv("session", agent.session.clone()));
+    lines.push(kv(
+        "window",
+        format!("{} ({})", agent.window_name, agent.window_index),
+    ));
+    lines.push(kv("pane", agent.pane_index.clone()));
+    lines.push(kv("pid", agent.agent_pid.to_string()));
+    lines.push(kv(
+        "provider",
+        crate::provider::by_id(agent.provider_id)
+            .map(|p| p.label().to_string())
+            .unwrap_or_else(|| agent.provider_id.to_string()),
+    ));
 }
 
 /// Does a tmux session already exist for this host? Matches on the
@@ -481,20 +507,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn write_temp_transcript(content: &str) -> std::path::PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let p = std::env::temp_dir().join(format!(
-            "tad-preview-test-{}-{nanos}.jsonl",
-            std::process::id()
-        ));
-        std::fs::write(&p, content).unwrap();
-        p
     }
 
     fn data_with_group(hosts: Vec<&str>, sessions: Vec<&str>) -> crate::dashboard::AppData {
@@ -551,47 +563,49 @@ mod tests {
     }
 
     #[test]
-    fn agent_preview_shows_transcript_tail() {
-        let path = write_temp_transcript(
-            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"shall I deploy?\"}]}}\n",
-        );
-        let mut a = mk_agent("work:1.0", "work", 100);
-        a.transcript_path = Some(path.clone());
-        let data = mk_data(vec![], vec![a]);
-        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
-        assert!(text.contains("last message"));
-        assert!(text.contains("shall I deploy?"));
-        // The metadata card is gone in the tail case.
-        assert!(!text.contains("provider"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn agent_preview_without_transcript_falls_back_to_card() {
-        let data = mk_data(vec![], vec![mk_agent("work:1.0", "work", 100)]);
-        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
-        assert!(text.contains("no transcript"));
-        // Card facts still present so the pane isn't bare.
-        assert!(text.contains("session"));
-        assert!(text.contains("pid"));
-    }
-
-    #[test]
-    fn agent_preview_with_empty_transcript_says_no_recent_message() {
-        let path = write_temp_transcript("{\"type\":\"agent-name\",\"name\":\"alpha\"}\n");
-        let mut a = mk_agent("work:1.0", "work", 100);
-        a.transcript_path = Some(path.clone());
-        let data = mk_data(vec![], vec![a]);
-        let text = lines_text(&preview_agent(&data, "work:1.0", &theme()));
-        assert!(text.contains("no recent message"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn agent_preview_gone_agent_degrades() {
+        // Early-return path — no agent found, so preview_agent never
+        // reaches the pane-capture code and stays tmux-free.
         let data = mk_data(vec![], vec![]);
         let text = lines_text(&preview_agent(&data, "nope:0.0", &theme()));
         assert!(text.contains("gone"));
+    }
+
+    // preview_agent's live-pane body (like preview_session's) shells out
+    // to tmux and can't be exercised in a hermetic test. Its two extracted
+    // pure pieces — the tail-window trim and the metadata fallback card —
+    // are tested directly below instead.
+
+    #[test]
+    fn tail_window_trims_trailing_blanks_before_capping() {
+        let all = ["one", "two", "three", "", ""];
+        // Trailing blanks are dropped first, then capped to `max` — a
+        // mostly-empty pane must not preview as rows of blank lines.
+        assert_eq!(tail_window(&all, 2), ["two", "three"]);
+    }
+
+    #[test]
+    fn tail_window_keeps_everything_under_the_cap() {
+        let all = ["only one line"];
+        assert_eq!(tail_window(&all, 12), ["only one line"]);
+    }
+
+    #[test]
+    fn tail_window_all_blank_is_empty() {
+        let all = ["", "  ", ""];
+        assert!(tail_window(&all, 12).is_empty());
+    }
+
+    #[test]
+    fn metadata_card_shows_agent_facts_and_reason() {
+        let a = mk_agent("work:1.0", "work", 100);
+        let mut lines = vec![];
+        push_metadata_card(&mut lines, &a, "no capture — pane gone?", &theme());
+        let text = lines_text(&lines);
+        assert!(text.contains("no capture"));
+        assert!(text.contains("session"));
+        assert!(text.contains("pid"));
+        assert!(text.contains("provider"));
     }
 
     /// Real tabs survive capture-pane (tmux returns the pane's cells
