@@ -19,10 +19,12 @@
 
 mod dispatch;
 mod format;
+mod grid;
 mod keys;
 mod modal;
 mod preview;
 mod render;
+mod rows;
 
 use anyhow::Result;
 use crossterm::{
