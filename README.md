@@ -13,8 +13,8 @@
 </p>
 
 A tmux session and group manager. Bare `tad` opens a native TUI dashboard —
-a collapsible sidebar cockpit covering live sessions, running agents, named
-groups, and the hosts inside those groups — with live updates every ~1.5s.
+a collapsible sidebar cockpit of live sessions and running agents, with named
+groups and their hosts a keystroke away (`g` / `h`) — with live updates every ~1.5s.
 `tad <name>` resolves in order:
 attach to an existing tmux session by that name → SSH into it as a discovered
 host (in a new session) → create a new blank session by that name.
@@ -159,8 +159,8 @@ Results are **ranked**: ssh-config and known_hosts entries come first,
 then shell-history hosts by frequency. History-only hosts seen fewer than
 `min_history_uses` times (default: 2) are hidden unless they also appear
 in ssh-config or known_hosts. Discovered hosts appear live in the
-dashboard's Hosts view and in shell completion. Discovery is never written
-to config — it is always fresh.
+dashboard's hosts picker (`h`) and in shell completion. Discovery is never
+written to config — it is always fresh.
 
 Tune via `~/.config/tad/config.yaml` (all keys optional):
 
@@ -185,7 +185,7 @@ there you can:
 
 Groups are **optional** — an organizing convenience on top of the
 automatic host discovery. Open a group with `tad -g <group>`. The empty
-Groups view in the dashboard points you to `tad config` as a reminder.
+groups picker (`g`) in the dashboard points you to `tad config` as a reminder.
 
 ## Migrating from a shell-function `tad`
 
@@ -433,10 +433,13 @@ in scripts, `panes` keeps it off.
 ## Dashboard
 
 Bare `tad` opens a persistent sidebar cockpit, not a tab-cycling
-screen: **Sessions**, **Agents**, **Groups**, and **Hosts** are
-sections stacked in one scrollable sidebar, each collapsible, with a
-live preview of the selected row's pane alongside it. Rows carry a
-semantic status dot instead of plain text:
+screen: **Sessions** and **Agents** are the two sections stacked in
+one scrollable sidebar, each collapsible, with a live preview of the
+selected row's pane alongside it. **Groups** and **Hosts** are
+reference material rather than day-to-day views, so they live behind
+on-demand pickers — press `g` for groups, `h` for hosts — instead of
+taking up permanent sidebar space. Rows carry a semantic status dot
+instead of plain text:
 
 ```
 ●  blocked   — needs your input
@@ -453,29 +456,31 @@ Everything is clickable as well as keyboard-driven: click a row to
 select it, click it again (or double-click) to open it, scroll the
 sidebar or preview with the wheel, and drag the divider between them
 to resize. The footer is a row of clickable chips (`open`, `pin`,
-`new`, `kill`, `theme`, `filter`, `refresh`, `quit`, …) that mirror
+`new`, `kill`, `groups`, `hosts`, `theme`, `filter`, `refresh`,
+`quit`, …) that mirror
 whatever keys apply to the current row, and every modal (theme
-picker, snooze picker, rename, kill confirmation) is clickable too.
-Mouse support needs tmux's own mouse mode; see `tad doctor` and the
-note below.
+picker, snooze picker, rename, kill confirmation, group/host picker)
+is clickable too. Mouse support needs tmux's own mouse mode; see
+`tad doctor` and the note below.
 
 Keys (any section):
 - `↑/↓` or `j/k`         move selection
 - `Tab` / `Shift-Tab`    jump to next/previous section
-- `1` / `2` / `3` / `4`  jump to Sessions / Agents / Groups / Hosts
+- `1` / `2`              jump to Sessions / Agents
                          (the sidebar's visual top-to-bottom order)
 - `Space`                collapse/expand the section under the cursor
 - `` ` ``                toggle the sidebar as an overlay — only
                          matters in narrow terminals, where the
                          sidebar auto-hides behind a `☰` chip
-- `g` / `G`              first / last item
+- `g` / `h`              open the groups / hosts picker (a filterable
+                         overlay; type to narrow, `↑↓` to pick, `Enter`
+                         opens the group / SSHes the host, `Esc` closes)
+- `Home` / `G`           first / last item
 - `Enter`                open the highlighted item
 - `t`                    open the theme picker (live preview as you
                          move; `Enter` confirms, `Esc` cancels)
-- `n`                    new — context-sensitive:
-                         * Hosts section → new tmux session with the
-                           host prefilled as the SSH target
-                         * other sections → blank new tmux session prompt
+- `n`                    new blank tmux session prompt (to SSH into a
+                         discovered host, use the `h` picker instead)
 - `o`                    pin the selected pane into a tmux split
                          beside tad (sessions: the session's active
                          pane; agents: the agent's pane) and focus

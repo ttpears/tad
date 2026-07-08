@@ -177,6 +177,7 @@ mod tests {
             InputMode::RenameAgent,
             InputMode::ConfirmKill,
             InputMode::ThemeSelect,
+            InputMode::Picker,
         ] {
             assert!(
                 hit_allowed(&Hit::Modal(Action::ModalConfirm), mode),

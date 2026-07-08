@@ -15,6 +15,7 @@ use super::dispatch::{self, resolve_pane, tad_window_id, OpenTarget};
 use super::format;
 use super::grid;
 use super::keys;
+use super::picker::{self, PickerKind};
 use super::rows::{self, RowKind, Section};
 use super::{App, ConfirmKillTarget, InputMode, NewSessionField, PinnedPane, TextInput};
 
@@ -43,6 +44,12 @@ pub(crate) enum Action {
     Quit,
     /// `t` (or the footer's theme chip): opens the theme picker.
     OpenThemePicker,
+    /// `g`/`h` (or their footer chips): open the groups/hosts picker.
+    OpenPicker(PickerKind),
+    /// A click on group/host picker row `i`: select it and open it in
+    /// one gesture (a picker list has no separate "confirm" step —
+    /// clicking a name IS choosing it).
+    PickerOption(usize),
     /// A click on theme-picker row `i`: moves the cursor there and
     /// live-applies that theme, same as arrowing to it with j/k.
     ThemeOption(usize),
@@ -132,6 +139,14 @@ pub(super) fn execute(app: &mut App, action: Action) {
         Action::Refresh => app.refresh(),
         Action::Quit => app.should_quit = true,
         Action::OpenThemePicker => open_theme_picker(app),
+        Action::OpenPicker(kind) => open_picker(app, kind),
+        Action::PickerOption(i) => {
+            let len = picker::items(&app.data, app.picker_kind, app.picker_filter.as_str()).len();
+            if i < len {
+                app.picker_cursor = i;
+                activate_picker(app);
+            }
+        }
         Action::ThemeOption(i) => apply_theme_cursor(app, i),
         Action::SnoozeOption(i) => {
             if i < app.data.ui.snooze_intervals.len() {
@@ -195,6 +210,33 @@ fn open_theme_picker(app: &mut App) {
     enter_mode(app, InputMode::ThemeSelect);
 }
 
+/// `g`/`h` (or their footer chips): open the groups/hosts picker fresh
+/// — empty filter, cursor and scroll at the top.
+fn open_picker(app: &mut App, kind: PickerKind) {
+    app.picker_kind = kind;
+    app.picker_filter.clear();
+    app.picker_cursor = 0;
+    app.picker_scroll = 0;
+    enter_mode(app, InputMode::Picker);
+}
+
+/// Open the highlighted group/host: map it to the same `OpenTarget` the
+/// old sidebar rows used and schedule the dashboard to exit into it. A
+/// no-op when the filtered list is empty (nothing under the cursor).
+pub(super) fn activate_picker(app: &mut App) {
+    let items = picker::items(&app.data, app.picker_kind, app.picker_filter.as_str());
+    let Some(name) = items.get(app.picker_cursor).cloned() else {
+        return;
+    };
+    let target = match app.picker_kind {
+        PickerKind::Groups => OpenTarget::Group(name),
+        PickerKind::Hosts => OpenTarget::Host(name),
+    };
+    app.input_mode = InputMode::None;
+    app.open_after = Some(target);
+    app.should_quit = true;
+}
+
 /// Move the theme-picker cursor to `i` and live-apply that theme —
 /// shared by a click on picker row `i` (`Action::ThemeOption`) and
 /// `keys::handle_theme_key`'s j/k/arrow handling.
@@ -222,6 +264,7 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
         InputMode::RenameAgent => keys::handle_rename_agent_key(app, key),
         InputMode::ConfirmKill => keys::handle_confirm_kill_key(app, key),
         InputMode::ThemeSelect => keys::handle_theme_key(app, key),
+        InputMode::Picker => keys::handle_picker_key(app, key),
         InputMode::None | InputMode::Filter => {}
     }
 }
@@ -233,8 +276,6 @@ fn handle_modal_key(app: &mut App, code: KeyCode) {
 fn activate(app: &mut App, i: usize) {
     let target = match app.rows.get(i).map(|r| r.kind.clone()) {
         Some(RowKind::Session(name)) => Some(OpenTarget::AttachExisting(name)),
-        Some(RowKind::Group(name)) => Some(OpenTarget::Group(name)),
-        Some(RowKind::Host(name)) => Some(OpenTarget::Host(name)),
         Some(RowKind::Agent(target)) => Some(OpenTarget::JumpToPane(target)),
         _ => None,
     };
@@ -288,24 +329,13 @@ fn rename_selected(app: &mut App) {
 }
 
 fn new_session_selected(app: &mut App) {
-    // `n` semantics depend on the selected row:
-    //   * Host   → new tmux session prefilled with the host as the
-    //     SSH target
-    //   * other → blank new tmux session
-    match app.selected_row().map(|r| r.kind.clone()) {
-        Some(RowKind::Host(h)) => {
-            app.new_session_name = TextInput::pristine(format::short_name(&h));
-            app.new_session_host = TextInput::pristine(h);
-            app.new_session_field = NewSessionField::Name;
-            enter_mode(app, InputMode::NewSession);
-        }
-        _ => {
-            app.new_session_name = TextInput::new();
-            app.new_session_host = TextInput::new();
-            app.new_session_field = NewSessionField::Name;
-            enter_mode(app, InputMode::NewSession);
-        }
-    }
+    // `n` always opens a blank new-session modal now that hosts aren't
+    // sidebar rows — the SSH-prefill flow lives on the host picker's
+    // Enter (`OpenTarget::Host`) instead.
+    app.new_session_name = TextInput::new();
+    app.new_session_host = TextInput::new();
+    app.new_session_field = NewSessionField::Name;
+    enter_mode(app, InputMode::NewSession);
 }
 
 /// What `o` (or a click on the pin dot) does: resolve the target row
@@ -511,25 +541,13 @@ mod tests {
     }
 
     #[test]
-    fn toggle_pin_noops_on_group_host_and_header_rows() {
-        let mut data = mk_data(vec![], vec![]);
-        data.groups = vec![(
-            "g1".to_string(),
-            crate::config::Group {
-                layout: "panes".to_string(),
-                hosts: vec![],
-            },
-        )];
-        data.hosts = vec![crate::dashboard::HostRow {
-            name: "h1".to_string(),
-            groups: vec![],
-            source: String::new(),
-        }];
-        let mut app = mk_app(data);
+    fn toggle_pin_noops_on_header_rows() {
+        // A section header and an agent-group header are the only
+        // non-pane rows left in the tree (groups/hosts are pickers now).
+        let mut app = mk_app(mk_data(vec![], vec![mk_agent("s1:0.0", "s1", 5)]));
         for kind in [
-            RowKind::Group("g1".into()),
-            RowKind::Host("h1".into()),
-            RowKind::SectionHeader(Section::Groups),
+            RowKind::SectionHeader(Section::Sessions),
+            RowKind::AgentGroupHeader("s1".into()),
         ] {
             let i = rows::index_of(&app.rows, &kind).unwrap();
             // `toggle_pin` reads the *real* process environment (no
@@ -543,6 +561,48 @@ mod tests {
             execute(&mut app, Action::TogglePin(i));
             assert_eq!(app.pins.len(), pins_before, "kind {kind:?} changed pins");
         }
+    }
+
+    #[test]
+    fn open_picker_enters_picker_mode_fresh() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        app.picker_filter = TextInput::pristine("stale".to_string());
+        app.picker_cursor = 7;
+        execute(&mut app, Action::OpenPicker(PickerKind::Hosts));
+        assert_eq!(app.input_mode, InputMode::Picker);
+        assert_eq!(app.picker_kind, PickerKind::Hosts);
+        assert!(app.picker_filter.is_empty());
+        assert_eq!(app.picker_cursor, 0);
+    }
+
+    #[test]
+    fn activate_picker_sets_open_target_for_highlighted_group() {
+        let mut data = mk_data(vec![], vec![]);
+        data.groups = vec![(
+            "prod-web".to_string(),
+            crate::config::Group {
+                layout: "panes".to_string(),
+                hosts: vec![],
+            },
+        )];
+        let mut app = mk_app(data);
+        execute(&mut app, Action::OpenPicker(PickerKind::Groups));
+        activate_picker(&mut app);
+        assert!(matches!(
+            &app.open_after,
+            Some(OpenTarget::Group(name)) if name == "prod-web"
+        ));
+        assert!(app.should_quit);
+        assert_eq!(app.input_mode, InputMode::None);
+    }
+
+    #[test]
+    fn activate_picker_on_empty_list_is_a_noop() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        execute(&mut app, Action::OpenPicker(PickerKind::Groups));
+        activate_picker(&mut app);
+        assert!(app.open_after.is_none());
+        assert!(!app.should_quit);
     }
 
     #[test]

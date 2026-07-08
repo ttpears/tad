@@ -27,6 +27,7 @@ mod hit;
 mod keys;
 mod modal;
 mod mouse;
+mod picker;
 mod preview;
 mod render;
 mod rows;
@@ -200,8 +201,6 @@ fn kind_for_selection(section: rows::Section, item: &str) -> rows::RowKind {
     match section {
         rows::Section::Sessions => rows::RowKind::Session(item.to_string()),
         rows::Section::Agents => rows::RowKind::Agent(item.to_string()),
-        rows::Section::Groups => rows::RowKind::Group(item.to_string()),
-        rows::Section::Hosts => rows::RowKind::Host(item.to_string()),
     }
 }
 
@@ -212,8 +211,6 @@ fn selection_key(kind: &rows::RowKind) -> Option<(rows::Section, String)> {
         rows::RowKind::SectionHeader(s) => Some((*s, String::new())),
         rows::RowKind::Session(n) => Some((rows::Section::Sessions, n.clone())),
         rows::RowKind::Agent(t) => Some((rows::Section::Agents, t.clone())),
-        rows::RowKind::Group(n) => Some((rows::Section::Groups, n.clone())),
-        rows::RowKind::Host(n) => Some((rows::Section::Hosts, n.clone())),
         rows::RowKind::AgentGroupHeader(_) => None,
     }
 }
@@ -325,8 +322,8 @@ pub(super) struct AppData {
     pub(super) ui: crate::ui_config::UiConfig,
 }
 
-/// One row in the Hosts view: a host name, the groups it belongs to (if
-/// any), and a pre-rendered source tag from discovery.
+/// One entry in the hosts picker: a host name, the groups it belongs to
+/// (if any), and a pre-rendered source tag from discovery.
 #[derive(Debug, Clone)]
 pub(super) struct HostRow {
     pub(super) name: String,
@@ -466,6 +463,11 @@ pub(super) enum InputMode {
     /// theme so the picker doubles as a preview; Esc restores whatever
     /// was active before the picker opened.
     ThemeSelect,
+    /// `g`/`h` (or their footer chips): filterable overlay listing
+    /// groups or hosts (which one is in `App::picker_kind`). Type to
+    /// filter, ↑↓ to pick, Enter opens the item, Esc closes. See
+    /// `picker.rs`.
+    Picker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -560,6 +562,16 @@ pub(super) struct App {
     /// Vertical scroll offset into the preview pane (mouse wheel over
     /// `PreviewZone`); reset to 0 whenever the selection changes.
     pub(super) preview_scroll: u16,
+    /// Which list the group/host picker (`InputMode::Picker`) is
+    /// showing. Meaningless unless the picker is open.
+    pub(super) picker_kind: picker::PickerKind,
+    /// Filter text typed in the open picker.
+    pub(super) picker_filter: TextInput,
+    /// Cursor over the picker's filtered items.
+    pub(super) picker_cursor: usize,
+    /// First visible picker item — keeps `picker_cursor` on screen the
+    /// same way `sidebar_scroll` tracks the sidebar cursor.
+    pub(super) picker_scroll: usize,
 }
 
 /// Compute every present agent's semantic state for this tick, using
@@ -606,7 +618,7 @@ impl App {
     fn new() -> Self {
         let data = AppData::load();
         let persisted = load_state();
-        let sidebar_width = persisted.sidebar_width.unwrap_or(32).clamp(20, 60);
+        let sidebar_width = persisted.sidebar_width.unwrap_or(44).clamp(20, 60);
         let collapsed = persisted.collapsed;
         let rows = rows::build_rows(&data, &collapsed, "");
         let cursor = persisted
@@ -655,6 +667,10 @@ impl App {
             hits: hit::HitMap::default(),
             drag: None,
             preview_scroll: 0,
+            picker_kind: picker::PickerKind::Groups,
+            picker_filter: TextInput::new(),
+            picker_cursor: 0,
+            picker_scroll: 0,
         }
     }
 
@@ -728,10 +744,7 @@ impl App {
         };
         let kind = row.kind.clone();
         let name = match &kind {
-            rows::RowKind::Session(n)
-            | rows::RowKind::Group(n)
-            | rows::RowKind::Host(n)
-            | rows::RowKind::Agent(n) => n.clone(),
+            rows::RowKind::Session(n) | rows::RowKind::Agent(n) => n.clone(),
             rows::RowKind::SectionHeader(_) | rows::RowKind::AgentGroupHeader(_) => {
                 return no_selection();
             }
@@ -742,8 +755,6 @@ impl App {
                 rows::RowKind::Session(_) => {
                     preview::preview_session(&self.data, &name, &self.theme)
                 }
-                rows::RowKind::Group(_) => preview::preview_group(&self.data, &name, &self.theme),
-                rows::RowKind::Host(_) => preview::preview_host(&self.data, &name, &self.theme),
                 rows::RowKind::Agent(_) => preview::preview_agent(&self.data, &name, &self.theme),
                 rows::RowKind::SectionHeader(_) | rows::RowKind::AgentGroupHeader(_) => {
                     unreachable!("handled above")
@@ -867,6 +878,7 @@ fn app_loop<B: ratatui::backend::Backend>(
                     InputMode::RenameAgent => keys::handle_rename_agent_key(&mut app, key),
                     InputMode::ConfirmKill => keys::handle_confirm_kill_key(&mut app, key),
                     InputMode::ThemeSelect => keys::handle_theme_key(&mut app, key),
+                    InputMode::Picker => keys::handle_picker_key(&mut app, key),
                     InputMode::None => keys::handle_key(&mut app, key.code, key.modifiers),
                 },
                 // Mouse always flows through — while a modal is open,
@@ -972,6 +984,10 @@ pub(super) mod testutil {
             hits: hit::HitMap::default(),
             drag: None,
             preview_scroll: 0,
+            picker_kind: picker::PickerKind::Groups,
+            picker_filter: TextInput::new(),
+            picker_cursor: 0,
+            picker_scroll: 0,
         }
     }
 }
@@ -1107,51 +1123,44 @@ mod tests {
         assert_eq!(pins_vanished_message(0), "0 pinned panes vanished");
     }
 
-    fn mk_data_with_group(layout: &str) -> AppData {
-        let mut data = mk_data(vec![], vec![]);
-        data.groups = vec![(
-            "prod".to_string(),
-            crate::config::Group {
-                layout: layout.to_string(),
-                hosts: vec!["web1".to_string()],
-            },
-        )];
-        data
-    }
-
     #[test]
     fn preview_cache_serves_stale_until_generation_bumps() {
-        let mut app = testutil::mk_app(mk_data_with_group("panes"));
+        // An agent whose pane doesn't exist degrades to the tmux-free
+        // metadata card (see preview::preview_agent), which echoes the
+        // agent's window name — a body field we can mutate to observe
+        // caching without a real tmux server.
+        let mut app = testutil::mk_app(mk_data(vec![], vec![testutil::mk_agent("s:0.0", "s", 1)]));
+        app.cursor = rows::index_of(&app.rows, &RowKind::Agent("s:0.0".into())).unwrap();
         let first = format!("{:?}", app.preview_lines());
+        assert!(first.contains('w'), "metadata card echoes window name");
         // Mutate underlying data WITHOUT bumping the generation — the
         // cache must serve the stale lines (that's the point: no
         // rebuild per frame).
-        app.data.groups[0].1.layout = "windows".to_string();
+        app.data.agents[0].window_name = "renamed-window".to_string();
         let cached = format!("{:?}", app.preview_lines());
         assert_eq!(first, cached);
         // What refresh() does each ~1.5s tick:
         app.refresh_generation = app.refresh_generation.wrapping_add(1);
         let rebuilt = format!("{:?}", app.preview_lines());
         assert_ne!(cached, rebuilt);
-        assert!(rebuilt.contains("windows"));
+        assert!(rebuilt.contains("renamed-window"));
     }
 
     #[test]
     fn preview_cache_misses_on_selection_change() {
-        let mut app = testutil::mk_app(mk_data_with_group("panes"));
-        app.data.groups.push((
-            "staging".to_string(),
-            crate::config::Group {
-                layout: "browse".to_string(),
-                hosts: vec![],
-            },
+        let mut app = testutil::mk_app(mk_data(
+            vec![],
+            vec![
+                testutil::mk_agent("s1:0.0", "s1", 5),
+                testutil::mk_agent("s2:0.0", "s2", 5),
+            ],
         ));
-        app.refresh_rows();
+        app.cursor = rows::index_of(&app.rows, &RowKind::Agent("s1:0.0".into())).unwrap();
         let first = format!("{:?}", app.preview_lines());
-        app.cursor = rows::index_of(&app.rows, &RowKind::Group("staging".into())).unwrap();
+        app.cursor = rows::index_of(&app.rows, &RowKind::Agent("s2:0.0".into())).unwrap();
         let second = format!("{:?}", app.preview_lines());
         assert_ne!(first, second);
-        assert!(second.contains("staging"));
+        assert!(second.contains("s2:0.0"));
     }
 
     #[test]
@@ -1161,27 +1170,6 @@ mod tests {
         let mut app = testutil::mk_app(mk_data(vec![], vec![]));
         let lines = format!("{:?}", app.preview_lines());
         assert!(lines.contains("no selection"));
-    }
-
-    #[test]
-    fn preview_cache_keys_on_row_kind_not_just_name() {
-        // A session and a group sharing the same name must not collide
-        // in the cache — this is exactly why the key is RowKind, not
-        // a bare String.
-        let mut data = mk_data(vec![testutil::mk_session("shared")], vec![]);
-        data.groups = vec![(
-            "shared".to_string(),
-            crate::config::Group {
-                layout: "panes".to_string(),
-                hosts: vec![],
-            },
-        )];
-        let mut app = testutil::mk_app(data);
-        app.cursor = rows::index_of(&app.rows, &RowKind::Session("shared".into())).unwrap();
-        let session_preview = format!("{:?}", app.preview_lines());
-        app.cursor = rows::index_of(&app.rows, &RowKind::Group("shared".into())).unwrap();
-        let group_preview = format!("{:?}", app.preview_lines());
-        assert_ne!(session_preview, group_preview);
     }
 
     #[test]
@@ -1220,7 +1208,7 @@ mod tests {
     #[test]
     fn parse_state_round_trips_selected_collapsed_and_width() {
         let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert(Section::Hosts);
+        collapsed.insert(Section::Agents);
         let content = serialize_state(
             Some((Section::Agents, "work:1.0".to_string())),
             &collapsed,
@@ -1248,7 +1236,7 @@ mod tests {
 
     #[test]
     fn parse_state_tolerates_legacy_single_slug_file() {
-        for slug in ["sessions", "groups", "hosts", "agents"] {
+        for slug in ["sessions", "agents"] {
             let parsed = parse_state(slug);
             assert_eq!(
                 parsed.selected,
@@ -1261,11 +1249,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_state_rejects_legacy_projects_slug() {
-        // Pre-removal builds persisted "projects"; from_slug rejects
-        // it so the caller falls back to the default (Sessions header).
-        let state = parse_state("projects");
-        assert!(state.selected.is_none());
+    fn parse_state_rejects_retired_section_slugs() {
+        // "projects" (older removal) and "groups"/"hosts" (now on-demand
+        // pickers, no longer sidebar sections) all fall through
+        // `from_slug` to None, so the caller falls back to the default
+        // (Sessions header) rather than restoring a phantom selection.
+        for slug in ["projects", "groups", "hosts"] {
+            assert!(parse_state(slug).selected.is_none(), "slug {slug}");
+        }
+    }
+
+    #[test]
+    fn parse_state_drops_retired_collapsed_slugs() {
+        // A state file written by an older build could carry
+        // `collapsed=groups,hosts`; those slugs no longer resolve to a
+        // section and must be silently dropped, leaving nothing
+        // collapsed.
+        let parsed = parse_state("selected=\ncollapsed=groups,hosts\nsidebar=40\n");
+        assert!(parsed.collapsed.is_empty());
+        assert_eq!(parsed.sidebar_width, Some(40));
     }
 
     #[test]
@@ -1279,11 +1281,18 @@ mod tests {
                 .as_nanos()
         ));
         let mut collapsed = std::collections::HashSet::new();
-        collapsed.insert(Section::Groups);
-        let content = serialize_state(Some((Section::Hosts, "web1".to_string())), &collapsed, 45);
+        collapsed.insert(Section::Agents);
+        let content = serialize_state(
+            Some((Section::Sessions, "web1".to_string())),
+            &collapsed,
+            45,
+        );
         save_state_to(&path, &content);
         let loaded = load_state_from(&path);
-        assert_eq!(loaded.selected, Some((Section::Hosts, "web1".to_string())));
+        assert_eq!(
+            loaded.selected,
+            Some((Section::Sessions, "web1".to_string()))
+        );
         assert_eq!(loaded.collapsed, collapsed);
         assert_eq!(loaded.sidebar_width, Some(45));
         let _ = std::fs::remove_file(&path);
