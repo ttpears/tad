@@ -10,6 +10,7 @@ use crate::{snooze, tmux};
 
 use super::action::{self, execute, Action};
 use super::dispatch::{kill_agent, rename_agent_window, OpenTarget};
+use super::picker::{self, PickerKind};
 use super::rows::{self, RowKind, Section};
 use super::{App, ConfirmKillTarget, InputMode, NewSessionField};
 
@@ -57,6 +58,63 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
     } else if app.cursor >= app.rows.len() {
         app.cursor = app.rows.len().saturating_sub(1);
     }
+}
+
+/// Groups/hosts picker (`InputMode::Picker`). Mirrors `handle_filter_key`:
+/// the filter field owns letter keys (so `j`/`k`/`g`/`h` type into it,
+/// not navigate), the list is driven by the arrow/page keys only, Enter
+/// opens the highlighted item and Esc closes. Which list — groups or
+/// hosts — is `app.picker_kind`.
+pub(super) fn handle_picker_key(app: &mut App, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let filter_before = app.picker_filter.as_str().to_string();
+    match key.code {
+        KeyCode::Esc => close_picker(app),
+        KeyCode::Enter => action::activate_picker(app),
+        KeyCode::Down => picker_move(app, 1),
+        KeyCode::Up => picker_move(app, -1),
+        KeyCode::PageDown => picker_move(app, 10),
+        KeyCode::PageUp => picker_move(app, -10),
+        // Backspace on an empty filter is a no-op; Esc is the way out.
+        KeyCode::Backspace if app.picker_filter.is_empty() => {}
+        KeyCode::Backspace => app.picker_filter.backspace(),
+        KeyCode::Delete => app.picker_filter.delete(),
+        KeyCode::Left => app.picker_filter.left(),
+        KeyCode::Right => app.picker_filter.right(),
+        KeyCode::Home => app.picker_filter.home(),
+        KeyCode::End => app.picker_filter.end(),
+        KeyCode::Char('u') if ctrl => app.picker_filter.clear(),
+        KeyCode::Char('a') if ctrl => app.picker_filter.home(),
+        KeyCode::Char('e') if ctrl => app.picker_filter.end(),
+        KeyCode::Char('c') if ctrl => app.should_quit = true,
+        KeyCode::Char(c) if !ctrl => app.picker_filter.insert(c),
+        _ => {}
+    }
+    // Typing narrows the list — snap back to the top match so Enter
+    // just works and the cursor can't dangle past the new end.
+    if app.picker_filter.as_str() != filter_before {
+        app.picker_cursor = 0;
+        app.picker_scroll = 0;
+    }
+}
+
+/// Move the picker cursor `delta` items, clamped to the filtered list
+/// (no wraparound — same feel as the theme picker).
+fn picker_move(app: &mut App, delta: i32) {
+    let n = picker::items(&app.data, app.picker_kind, app.picker_filter.as_str()).len();
+    if n == 0 {
+        return;
+    }
+    let max = (n - 1) as i32;
+    let cur = (app.picker_cursor as i32).min(max);
+    app.picker_cursor = (cur + delta).clamp(0, max) as usize;
+}
+
+fn close_picker(app: &mut App) {
+    app.input_mode = InputMode::None;
+    app.picker_filter.clear();
+    app.picker_cursor = 0;
+    app.picker_scroll = 0;
 }
 
 pub(super) fn handle_rename_agent_key(app: &mut App, key: KeyEvent) {
@@ -264,17 +322,18 @@ pub(super) fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Tab => jump_next_section(app),
         KeyCode::BackTab => jump_prev_section(app),
         // Digit shortcuts follow the sidebar's VISUAL section order
-        // (Sessions, Agents, Groups, Hosts — see rows::Section::ALL),
-        // not any historical view ordering.
+        // (Sessions, Agents — see rows::Section::ALL).
         KeyCode::Char('1') => jump_to_section(app, Section::Sessions),
         KeyCode::Char('2') => jump_to_section(app, Section::Agents),
-        KeyCode::Char('3') => jump_to_section(app, Section::Groups),
-        KeyCode::Char('4') => jump_to_section(app, Section::Hosts),
         KeyCode::Down | KeyCode::Char('j') => execute(app, Action::MoveCursor(1)),
         KeyCode::Up | KeyCode::Char('k') => execute(app, Action::MoveCursor(-1)),
         KeyCode::PageDown | KeyCode::Char('J') => execute(app, Action::MoveCursor(10)),
         KeyCode::PageUp | KeyCode::Char('K') => execute(app, Action::MoveCursor(-10)),
-        KeyCode::Home | KeyCode::Char('g') => execute(app, Action::Home),
+        // `g`/`h` open the on-demand group/host pickers; jump-to-top is
+        // the Home key only now (the old vim `g` binding gave way).
+        KeyCode::Char('g') => execute(app, Action::OpenPicker(PickerKind::Groups)),
+        KeyCode::Char('h') => execute(app, Action::OpenPicker(PickerKind::Hosts)),
+        KeyCode::Home => execute(app, Action::Home),
         KeyCode::End | KeyCode::Char('G') => execute(app, Action::End),
         KeyCode::Enter => execute(app, Action::Activate(app.cursor)),
         // Toggle collapse on the section the cursor is currently in
@@ -415,27 +474,76 @@ mod tests {
     }
 
     #[test]
-    fn d_on_group_and_host_rows_does_nothing() {
+    fn d_on_a_section_header_does_nothing() {
+        let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
+        app.cursor = rows::section_header_index(&app.rows, Section::Sessions).unwrap();
+        handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.confirm_kill.is_none());
+    }
+
+    #[test]
+    fn g_opens_the_groups_picker_and_h_opens_hosts() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::Picker);
+        assert_eq!(app.picker_kind, PickerKind::Groups);
+        app.input_mode = InputMode::None;
+        handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(app.input_mode, InputMode::Picker);
+        assert_eq!(app.picker_kind, PickerKind::Hosts);
+    }
+
+    #[test]
+    fn home_jumps_to_the_first_item() {
+        let mut app = mk_app(mk_data(
+            vec![mk_session("alpha"), mk_session("beta")],
+            vec![],
+        ));
+        app.cursor = rows::last_item_index(&app.rows).unwrap();
+        handle_key(&mut app, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(app.cursor, rows::first_item_index(&app.rows).unwrap());
+    }
+
+    #[test]
+    fn picker_filter_narrows_and_enter_opens_highlighted_host() {
         let mut data = mk_data(vec![], vec![]);
-        data.groups = vec![(
-            "g1".to_string(),
-            crate::config::Group {
-                layout: "panes".to_string(),
-                hosts: vec![],
+        data.hosts = vec![
+            crate::dashboard::HostRow {
+                name: "web01".to_string(),
+                groups: vec![],
+                source: String::new(),
             },
-        )];
-        data.hosts = vec![crate::dashboard::HostRow {
-            name: "h1".to_string(),
-            groups: vec![],
-            source: String::new(),
-        }];
+            crate::dashboard::HostRow {
+                name: "db01".to_string(),
+                groups: vec![],
+                source: String::new(),
+            },
+        ];
         let mut app = mk_app(data);
-        for kind in [RowKind::Group("g1".into()), RowKind::Host("h1".into())] {
-            app.cursor = rows::index_of(&app.rows, &kind).unwrap();
-            handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
-            assert_eq!(app.input_mode, InputMode::None);
-            assert!(app.confirm_kill.is_none());
+        handle_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+        // Type "web" — only web01 survives, cursor snaps to the top match.
+        for c in "web".chars() {
+            handle_picker_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
         }
+        assert_eq!(app.picker_cursor, 0);
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            &app.open_after,
+            Some(OpenTarget::Host(name)) if name == "web01"
+        ));
+    }
+
+    #[test]
+    fn picker_esc_closes_without_opening_anything() {
+        let mut app = mk_app(mk_data(vec![], vec![]));
+        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+        handle_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.open_after.is_none());
     }
 
     #[test]
@@ -470,17 +578,18 @@ mod tests {
     #[test]
     fn jump_to_section_moves_cursor_to_that_headers_row() {
         let mut app = mk_app(mk_data(vec![mk_session("work")], vec![]));
-        jump_to_section(&mut app, Section::Hosts);
+        jump_to_section(&mut app, Section::Agents);
         assert_eq!(
             app.selected_row().map(|r| r.kind.clone()),
-            Some(RowKind::SectionHeader(Section::Hosts))
+            Some(RowKind::SectionHeader(Section::Agents))
         );
     }
 
     #[test]
     fn jump_next_section_cycles_forward_and_wraps() {
         let mut app = mk_app(mk_data(vec![], vec![]));
-        // Starts on Sessions' header (only section headers exist here).
+        // Starts on Sessions' header (only section headers exist here);
+        // with two sections it toggles Sessions ↔ Agents.
         jump_next_section(&mut app);
         assert_eq!(
             current_section(&app.rows, app.cursor),
@@ -489,28 +598,15 @@ mod tests {
         jump_next_section(&mut app);
         assert_eq!(
             current_section(&app.rows, app.cursor),
-            Some(Section::Groups)
-        );
-        jump_next_section(&mut app);
-        assert_eq!(current_section(&app.rows, app.cursor), Some(Section::Hosts));
-        jump_next_section(&mut app);
-        assert_eq!(
-            current_section(&app.rows, app.cursor),
             Some(Section::Sessions)
         );
     }
 
-    /// `1`/`2`/`3`/`4` follow the sidebar's visual order — Sessions,
-    /// Agents, Groups, Hosts — not any older view ordering.
+    /// `1`/`2` follow the sidebar's visual order — Sessions, Agents.
     #[test]
     fn digit_keys_jump_to_sections_in_visual_order() {
         let mut app = mk_app(mk_data(vec![], vec![]));
-        let cases = [
-            ('1', Section::Sessions),
-            ('2', Section::Agents),
-            ('3', Section::Groups),
-            ('4', Section::Hosts),
-        ];
+        let cases = [('1', Section::Sessions), ('2', Section::Agents)];
         for (digit, expect) in cases {
             handle_key(&mut app, KeyCode::Char(digit), KeyModifiers::NONE);
             assert_eq!(

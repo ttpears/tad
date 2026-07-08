@@ -16,9 +16,10 @@ use crate::theme::Theme;
 use super::action::Action;
 use super::hit::Hit;
 use super::modal::{
-    render_confirm_kill_modal, render_new_session_modal, render_rename_agent_modal,
-    render_snooze_modal, render_theme_modal,
+    render_confirm_kill_modal, render_new_session_modal, render_picker_modal,
+    render_rename_agent_modal, render_snooze_modal, render_theme_modal,
 };
+use super::picker::PickerKind;
 use super::rows::{RowKind, Section};
 use super::{format, App, InputMode};
 
@@ -135,6 +136,9 @@ pub(super) fn ui(f: &mut Frame, app: &mut App) {
     if app.input_mode == InputMode::ThemeSelect {
         render_theme_modal(f, area, app);
     }
+    if app.input_mode == InputMode::Picker {
+        render_picker_modal(f, area, app);
+    }
 }
 
 fn render_too_small(f: &mut Frame, area: Rect) {
@@ -180,8 +184,6 @@ fn render_menu_chip(f: &mut Frame, area: Rect, app: &mut App) {
 fn empty_hint_text(section: Section) -> &'static str {
     match section {
         Section::Sessions => "no sessions — n starts one",
-        Section::Groups => "no groups — run `tad config`",
-        Section::Hosts => "no hosts — add groups via `tad config`",
         Section::Agents => "no agents running",
     }
 }
@@ -376,6 +378,8 @@ fn footer_chips(app: &App) -> Vec<(&'static str, String)> {
         chips.push(("R", "rename".to_string()));
         chips.push(("s", "snooze".to_string()));
     }
+    chips.push(("g", "groups".to_string()));
+    chips.push(("h", "hosts".to_string()));
     chips.push(("t", "theme".to_string()));
     chips.push(("/", "filter".to_string()));
     chips.push(("r", "refresh".to_string()));
@@ -393,6 +397,8 @@ fn chip_action(app: &App, key: &str) -> Option<Action> {
         "d" => Some(Action::Kill),
         "R" => Some(Action::Rename),
         "s" => Some(Action::Snooze),
+        "g" => Some(Action::OpenPicker(PickerKind::Groups)),
+        "h" => Some(Action::OpenPicker(PickerKind::Hosts)),
         "t" => Some(Action::OpenThemePicker),
         "/" => Some(Action::Filter),
         "r" => Some(Action::Refresh),
@@ -450,6 +456,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         )),
         InputMode::ThemeSelect => Line::from(Span::styled(
             "↑↓ pick theme   ↵ confirm   Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
+        InputMode::Picker => Line::from(Span::styled(
+            "type to filter   ↑↓ pick   ↵ open   Esc cancel",
             Style::default().fg(theme.muted),
         )),
         InputMode::None => {
@@ -541,8 +551,6 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(texts.iter().any(|t| t.contains("no sessions")));
         assert!(texts.iter().any(|t| t.contains("no agents running")));
-        assert!(texts.iter().any(|t| t.contains("no groups")));
-        assert!(texts.iter().any(|t| t.contains("no hosts")));
     }
 
     #[test]
@@ -602,23 +610,20 @@ mod tests {
     }
 
     #[test]
-    fn footer_chips_omits_agent_only_bindings_on_group_row() {
-        let mut data = mk_data(vec![], vec![]);
-        data.groups = vec![(
-            "g1".to_string(),
-            crate::config::Group {
-                layout: "panes".to_string(),
-                hosts: vec![],
-            },
-        )];
-        let mut app = crate::dashboard::testutil::mk_app(data);
+    fn footer_chips_omits_row_specific_bindings_on_a_section_header() {
+        // A section header isn't a session/agent, so none of the
+        // row-specific chips (pin/kill/rename/snooze) show — but the
+        // always-on group/host pickers do.
+        let mut app = crate::dashboard::testutil::mk_app(mk_data(vec![mk_session("work")], vec![]));
         app.cursor =
-            crate::dashboard::rows::index_of(&app.rows, &RowKind::Group("g1".into())).unwrap();
+            crate::dashboard::rows::section_header_index(&app.rows, Section::Sessions).unwrap();
         let keys: Vec<&str> = footer_chips(&app).iter().map(|(k, _)| *k).collect();
         assert!(!keys.contains(&"R"));
         assert!(!keys.contains(&"s"));
         assert!(!keys.contains(&"d"));
         assert!(!keys.contains(&"o"));
+        assert!(keys.contains(&"g"));
+        assert!(keys.contains(&"h"));
     }
 
     #[test]

@@ -13,24 +13,15 @@ use crate::agents::Agent;
 pub(crate) enum Section {
     Sessions,
     Agents,
-    Groups,
-    Hosts,
 }
 
 impl Section {
-    pub(super) const ALL: [Section; 4] = [
-        Section::Sessions,
-        Section::Agents,
-        Section::Groups,
-        Section::Hosts,
-    ];
+    pub(super) const ALL: [Section; 2] = [Section::Sessions, Section::Agents];
 
     pub(super) fn title(self) -> &'static str {
         match self {
             Section::Sessions => "SESSIONS",
             Section::Agents => "AGENTS",
-            Section::Groups => "GROUPS",
-            Section::Hosts => "HOSTS",
         }
     }
 
@@ -38,17 +29,17 @@ impl Section {
         match self {
             Section::Sessions => "sessions",
             Section::Agents => "agents",
-            Section::Groups => "groups",
-            Section::Hosts => "hosts",
         }
     }
 
+    /// Legacy slugs `groups`/`hosts` (now on-demand pickers, no longer
+    /// sidebar sections) and the even-older `projects` all fall through
+    /// to `None` — a persisted selection/collapse referencing them is
+    /// dropped gracefully.
     pub(super) fn from_slug(s: &str) -> Option<Section> {
         match s {
             "sessions" => Some(Section::Sessions),
             "agents" => Some(Section::Agents),
-            "groups" => Some(Section::Groups),
-            "hosts" => Some(Section::Hosts),
             _ => None,
         }
     }
@@ -63,8 +54,6 @@ pub(crate) enum RowKind {
     AgentGroupHeader(String),
     /// Agent target `session:win.pane`.
     Agent(String),
-    Group(String),
-    Host(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +117,9 @@ fn agent_rows(data: &super::AppData, filter_lower: &str, filter_active: bool) ->
     out
 }
 
-/// Build the full sidebar row list. Order: Sessions, Agents, Groups, Hosts.
+/// Build the full sidebar row list. Order: Sessions, Agents. Groups and
+/// hosts are no longer sidebar sections — they live behind the on-demand
+/// `g`/`h` pickers (see `picker.rs`).
 /// - Every section always emits its SectionHeader row.
 /// - A collapsed section emits only its header.
 /// - With a non-empty filter (case-insensitive substring on the item name /
@@ -157,18 +148,6 @@ pub(super) fn build_rows(
                 .map(|s| RowKind::Session(s.name.clone()))
                 .collect(),
             Section::Agents => agent_rows(data, &filter_lower, filter_active),
-            Section::Groups => data
-                .groups
-                .iter()
-                .filter(|(name, _)| matches(name, &filter_lower))
-                .map(|(name, _)| RowKind::Group(name.clone()))
-                .collect(),
-            Section::Hosts => data
-                .hosts
-                .iter()
-                .filter(|h| matches(&h.name, &filter_lower))
-                .map(|h| RowKind::Host(h.name.clone()))
-                .collect(),
         };
 
         let hide = if filter_active {
@@ -266,7 +245,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn build_rows_emits_four_section_headers_in_order_even_empty() {
+    fn build_rows_emits_both_section_headers_in_order_even_empty() {
         let data = mk_data(vec![], vec![]);
         let rows = build_rows(&data, &HashSet::new(), "");
         let headers: Vec<Section> = rows
@@ -276,15 +255,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            headers,
-            vec![
-                Section::Sessions,
-                Section::Agents,
-                Section::Groups,
-                Section::Hosts
-            ]
-        );
+        assert_eq!(headers, vec![Section::Sessions, Section::Agents]);
     }
 
     #[test]
@@ -333,9 +304,6 @@ mod tests {
 
         let s_idx = section_header_index(&rows, Section::Sessions).unwrap();
         assert_eq!(rows[s_idx + 1].kind, RowKind::Session("web".into()));
-
-        let g_idx = section_header_index(&rows, Section::Groups).unwrap();
-        assert_eq!(rows[g_idx + 1].kind, RowKind::SectionHeader(Section::Hosts));
 
         let a_idx = section_header_index(&rows, Section::Agents).unwrap();
         assert_eq!(rows[a_idx + 1].kind, RowKind::Agent("web:0.0".into()));

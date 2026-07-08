@@ -1,5 +1,6 @@
 //! Modal overlays: new-session, snooze-picker, rename-agent,
-//! confirm-kill, theme-picker. Render functions over `&mut App` — the
+//! confirm-kill, theme-picker, group/host picker. Render functions over
+//! `&mut App` — the
 //! `&mut` is only so each can register its own `Hit::Modal` click
 //! regions as it draws (see `hit::HitMap`); none of them otherwise
 //! mutate `App`. The corresponding `handle_*_key` lives in `keys.rs`
@@ -15,6 +16,7 @@ use crate::{snooze, theme};
 
 use super::action::Action;
 use super::hit::Hit;
+use super::picker;
 use super::rows::RowKind;
 use super::{App, ConfirmKillTarget, NewSessionField, TextInput};
 
@@ -419,6 +421,146 @@ pub(super) fn render_theme_modal(f: &mut Frame, area: Rect, app: &mut App) {
         "↵ confirm",
         Action::ModalConfirm,
     );
+    register_hint_hit(
+        app,
+        popup,
+        hint_line,
+        HINT,
+        "Esc cancel",
+        Action::ModalCancel,
+    );
+}
+
+/// `InputMode::Picker` — the on-demand groups/hosts overlay. A search
+/// box (line 0) over a scrollable list of the filtered items; each item
+/// row reuses `format::format_{group,host}_row` so the meta column
+/// matches what the sidebar used to show. The list scrolls to keep
+/// `app.picker_cursor` visible (same `scroll_to_cursor` the sidebar
+/// uses). Rows register `Action::PickerOption` (click = open); the
+/// `↵ open` / `Esc cancel` chips route through `ModalConfirm`/`Cancel`.
+pub(super) fn render_picker_modal(f: &mut Frame, area: Rect, app: &mut App) {
+    let kind = app.picker_kind;
+    let items = picker::items(&app.data, kind, app.picker_filter.as_str());
+    let theme = app.theme;
+
+    // Size on the UNFILTERED count so the popup keeps a stable height as
+    // the user types — if it shrank with the filtered list, `Clear`
+    // (which only wipes the current, smaller rect) would leave stale
+    // rows from the taller render behind.
+    let total = match kind {
+        picker::PickerKind::Groups => app.data.groups.len(),
+        picker::PickerKind::Hosts => app.data.hosts.len(),
+    };
+    let width = 60.min(area.width.saturating_sub(4)).max(1);
+    // borders(2) + filter line(1) + blank(1) + hint(1) = 5 chrome rows.
+    let item_rows = (total as u16).max(1);
+    let height = (item_rows + 5).min(area.height.saturating_sub(2)).max(6);
+    let popup = centered_rect(width, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            kind.title(),
+            Style::default()
+                .fg(theme.accent_bold)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    // Line 0: the filter box, with a block cursor (same treatment as the
+    // footer's `/` filter).
+    let value = app.picker_filter.as_str();
+    let cur = app.picker_filter.cursor.min(value.len());
+    let (pre, post) = value.split_at(cur);
+    let mut filter_spans = vec![
+        Span::raw("  "),
+        Span::styled("/", Style::default().fg(theme.warning)),
+        Span::styled(pre.to_string(), Style::default().fg(theme.fg)),
+    ];
+    if post.is_empty() {
+        filter_spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+    } else {
+        let mut chars = post.chars();
+        let c = chars.next().unwrap_or(' ');
+        let rest: String = chars.collect();
+        filter_spans.push(Span::styled(
+            c.to_string(),
+            Style::default().bg(theme.accent).fg(theme.fg),
+        ));
+        filter_spans.push(Span::styled(rest, Style::default().fg(theme.fg)));
+    }
+    let mut lines: Vec<Line> = vec![Line::from(filter_spans)];
+
+    // Scroll the list so the cursor stays visible; content width leaves
+    // room for the 2-col marker gutter.
+    let viewport = (popup.height as usize).saturating_sub(5).max(1);
+    let scroll = super::render::scroll_to_cursor(app.picker_cursor, app.picker_scroll, viewport);
+    app.picker_scroll = scroll;
+    let content_w = popup.width.saturating_sub(4);
+
+    // Absolute item index of each visible row, so click hits (registered
+    // after the borrow of `items` ends) target the right entry.
+    let mut visible_indices: Vec<usize> = Vec::new();
+    if items.is_empty() {
+        // Distinguish "nothing configured" from "filter matched nothing"
+        // — the fix suggested by each differs.
+        let msg = if total == 0 {
+            kind.empty_hint().to_string()
+        } else {
+            "no matches".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(theme.muted),
+        )));
+    } else {
+        for (i, name) in items.iter().enumerate().skip(scroll).take(viewport) {
+            let selected = i == app.picker_cursor;
+            let marker = if selected { "▶ " } else { "  " };
+            let marker_style = if selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            let row = match kind {
+                picker::PickerKind::Groups => {
+                    super::format::format_group_row(&app.data, name, &theme, content_w)
+                }
+                picker::PickerKind::Hosts => {
+                    super::format::format_host_row(&app.data, name, &theme, content_w)
+                }
+            };
+            let mut spans = vec![Span::styled(marker.to_string(), marker_style)];
+            spans.extend(row.spans);
+            lines.push(Line::from(spans));
+            visible_indices.push(i);
+        }
+    }
+
+    const HINT: &str = "  ↵ open   Esc cancel";
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        HINT,
+        Style::default().fg(theme.muted),
+    )));
+    let hint_line = (lines.len() - 1) as u16;
+
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, popup);
+
+    // Row click regions (each visible item is line `1 + display_row`).
+    for (display_row, item_idx) in visible_indices.into_iter().enumerate() {
+        register_row_hit(
+            app,
+            popup,
+            1 + display_row as u16,
+            Action::PickerOption(item_idx),
+        );
+    }
+    register_hint_hit(app, popup, hint_line, HINT, "↵ open", Action::ModalConfirm);
     register_hint_hit(
         app,
         popup,

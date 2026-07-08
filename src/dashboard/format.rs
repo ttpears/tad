@@ -1,7 +1,7 @@
 //! Per-row-kind formatters for the sidebar cockpit, plus a few shared
-//! display helpers (cwd → `~/…`, fixed-width truncation, FQDN → short
-//! tmux-friendly name). Pure functions over `&AppData`; no side
-//! effects, called once per visible row per render frame.
+//! display helpers (cwd → `~/…`, fixed-width truncation). Pure
+//! functions over `&AppData`; no side effects, called once per visible
+//! row per render frame.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -145,8 +145,6 @@ fn format_section_header(
             (label, color)
         }
         Section::Sessions => (data.sessions.len().to_string(), theme.muted),
-        Section::Groups => (data.groups.len().to_string(), theme.muted),
-        Section::Hosts => (data.hosts.len().to_string(), theme.muted),
     };
     let used = title.chars().count() + count_text.chars().count();
     let pad = width.saturating_sub(used).max(1);
@@ -265,7 +263,15 @@ fn format_agent_group_header(data: &AppData, session: &str, theme: &Theme) -> Li
     Line::from(Span::styled(text, Style::default().fg(theme.muted)))
 }
 
-fn format_group_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Line<'static> {
+/// Group row: name + `N hosts · layout`. Rendered in the on-demand
+/// groups picker (`modal::render_picker_modal`), no longer in the
+/// sidebar tree.
+pub(super) fn format_group_row(
+    data: &AppData,
+    name: &str,
+    theme: &Theme,
+    width: u16,
+) -> Line<'static> {
     let Some((_, g)) = data.groups.iter().find(|(n, _)| n == name) else {
         return Line::from(name.to_string());
     };
@@ -285,7 +291,14 @@ fn format_group_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Li
     )
 }
 
-fn format_host_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Line<'static> {
+/// Host row: name + `groups · source`. Rendered in the on-demand hosts
+/// picker (`modal::render_picker_modal`), no longer in the sidebar tree.
+pub(super) fn format_host_row(
+    data: &AppData,
+    name: &str,
+    theme: &Theme,
+    width: u16,
+) -> Line<'static> {
     let row = data.hosts.iter().find(|r| r.name == name);
     let groups = row.map(|r| r.groups.join(", ")).unwrap_or_default();
     let source = row.map(|r| r.source.clone()).unwrap_or_default();
@@ -311,11 +324,10 @@ fn format_host_row(data: &AppData, name: &str, theme: &Theme, width: u16) -> Lin
 
 /// Compact sidebar row renderer, dispatched per `RowKind`:
 /// - `SectionHeader` — bold accent title, right-aligned count
-///   (`header_count_label` for Agents, plain item count otherwise).
+///   (`header_count_label` for Agents, plain item count for Sessions).
 /// - `Session` — attached-dot + name + activity.
 /// - `Agent` — state dot + window name + `◂` when pinned.
 /// - `AgentGroupHeader` — muted `session · N agents · M awaiting`.
-/// - `Group`/`Host` — name + muted meta.
 ///
 /// Always clipped to `width` display columns.
 pub(super) fn format_row(
@@ -333,8 +345,6 @@ pub(super) fn format_row(
         RowKind::Session(name) => format_session_row(data, name, theme, width),
         RowKind::Agent(target) => format_agent_row(data, target, theme, tick, pins),
         RowKind::AgentGroupHeader(session) => format_agent_group_header(data, session, theme),
-        RowKind::Group(name) => format_group_row(data, name, theme, width),
-        RowKind::Host(name) => format_host_row(data, name, theme, width),
     };
     clip_line(line, width as usize)
 }
@@ -416,13 +426,6 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
     } else {
         s.chars().take(max).collect()
     }
-}
-
-/// Strip any FQDN suffix to make a tmux-friendly session name. Used
-/// when the `n` modal on the Hosts view prefills the session name
-/// field from the selected host.
-pub(super) fn short_name(s: &str) -> String {
-    s.split('.').next().unwrap_or(s).to_string()
 }
 
 /// Shorten a cwd for display: replace `$HOME` prefix with `~`. The
@@ -675,26 +678,9 @@ mod tests {
             ("a-much-longer-group-name".to_string(), g2),
         ];
         let theme = crate::theme::load();
-        let short = format_row(
-            &data,
-            &Row {
-                kind: RowKind::Group("g".into()),
-                selectable: true,
-            },
-            &theme,
-            0,
-            &[],
-            30,
-        );
-        let long = format_row(
-            &data,
-            &Row {
-                kind: RowKind::Group("a-much-longer-group-name".into()),
-                selectable: true,
-            },
-            &theme,
-            0,
-            &[],
+        let short = clip_line(format_group_row(&data, "g", &theme, 30), 30);
+        let long = clip_line(
+            format_group_row(&data, "a-much-longer-group-name", &theme, 30),
             30,
         );
         assert_eq!(line_text(&short).chars().count(), 30);
@@ -713,17 +699,7 @@ mod tests {
         let mut data = mk_data(vec![], vec![]);
         data.groups = vec![(long_name.clone(), g)];
         let theme = crate::theme::load();
-        let line = format_row(
-            &data,
-            &Row {
-                kind: RowKind::Group(long_name.clone()),
-                selectable: true,
-            },
-            &theme,
-            0,
-            &[],
-            30,
-        );
+        let line = clip_line(format_group_row(&data, &long_name, &theme, 30), 30);
         let text = line_text(&line);
         assert_eq!(text.chars().count(), 30, "got {text:?}");
         assert!(text.ends_with("1 hosts · panes"), "got {text:?}");
@@ -746,26 +722,9 @@ mod tests {
             },
         ];
         let theme = crate::theme::load();
-        let short = format_row(
-            &data,
-            &Row {
-                kind: RowKind::Host("h".into()),
-                selectable: true,
-            },
-            &theme,
-            0,
-            &[],
-            30,
-        );
-        let long = format_row(
-            &data,
-            &Row {
-                kind: RowKind::Host("a-much-longer-host-name".into()),
-                selectable: true,
-            },
-            &theme,
-            0,
-            &[],
+        let short = clip_line(format_host_row(&data, "h", &theme, 30), 30);
+        let long = clip_line(
+            format_host_row(&data, "a-much-longer-host-name", &theme, 30),
             30,
         );
         assert_eq!(line_text(&short).chars().count(), 30);
