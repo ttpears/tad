@@ -24,6 +24,20 @@ group; for multi-pane layouts you're prompted whether to enable tmux
 
 ![tad dashboard demo](docs/screenshots/dashboard.gif)
 
+## Contents
+
+- [Install](#install)
+- [Usage](#usage)
+- [Dashboard](#dashboard)
+- [Jumping back to the dashboard from inside tmux](#jumping-back-to-the-dashboard-from-inside-tmux)
+- [Claude Code cockpit](#claude-code-cockpit)
+- [Host discovery / `tad config`](#host-discovery--tad-config)
+- [Groups config](#groups-config)
+- [Configuration](#configuration)
+- [Theme](#theme)
+- [Files](#files)
+- [Contributing](#contributing)
+
 ## Install
 
 Only requirement at runtime: `tmux`. The dashboard ships inside the
@@ -47,7 +61,8 @@ to upstream. PKGBUILD sources live at `packaging/aur/tmux-tad/` and
 ### Debian / Ubuntu (.deb)
 
 ```sh
-TAD_VERSION=v0.7.0
+# check https://github.com/ttpears/tad/releases/latest for the current version
+TAD_VERSION=v0.17.0
 curl -fLO "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.deb"
 sudo apt install "./tad-${TAD_VERSION}-x86_64.deb"   # pulls in tmux if needed
 ```
@@ -58,7 +73,8 @@ resolves the `tmux` dependency.)
 ### Fedora / RHEL (.rpm)
 
 ```sh
-TAD_VERSION=v0.7.0
+# check https://github.com/ttpears/tad/releases/latest for the current version
+TAD_VERSION=v0.17.0
 sudo dnf install "https://github.com/ttpears/tad/releases/download/${TAD_VERSION}/tad-${TAD_VERSION}-x86_64.rpm"
 ```
 
@@ -80,7 +96,8 @@ Each [release](https://github.com/ttpears/tad/releases) ships a static
 Linux x86_64 binary, matching completion files, and a `SHA256SUMS`.
 
 ```sh
-TAD_VERSION=v0.7.0
+# check https://github.com/ttpears/tad/releases/latest for the current version
+TAD_VERSION=v0.17.0
 BASE="https://github.com/ttpears/tad/releases/download/${TAD_VERSION}"
 
 mkdir -p ~/.local/bin \
@@ -138,112 +155,11 @@ Completion scripts live in `completions/`. `tad <TAB>` completes tmux
 **sessions** and **discovered hosts**. Group names complete after
 `tad -g <TAB>` — they are not offered at the bare top level.
 
-## Host discovery / `tad config`
+### Migrating from a shell-function `tad`
 
-### Automatic live discovery
-
-On every dashboard launch (and for CLI dispatch and shell completion),
-`tad` automatically scans **local sources only** for host names — no
-network, no DNS:
-
-- **`~/.ssh/config`** — concrete `Host` entries, including one-level-deep
-  `Include`. Wildcard patterns are skipped.
-- **`~/.ssh/known_hosts`** — non-hashed entries. `@cert-authority` and
-  `|1|...` hashed entries are skipped.
-- **Shell history** — `$HISTFILE`, `~/.bash_history`, `~/.zsh_history`,
-  fish history. Extracts hosts from `ssh user@host -p 22` style
-  invocations, strips `user@` and flag values, ignores `sshfs` /
-  `ssh-add` / `ssh-keygen` / `ssh-copy-id`.
-
-Results are **ranked**: ssh-config and known_hosts entries come first,
-then shell-history hosts by frequency. History-only hosts seen fewer than
-`min_history_uses` times (default: 2) are hidden unless they also appear
-in ssh-config or known_hosts. Discovered hosts appear live in the
-dashboard's hosts picker (`h`) and in shell completion. Discovery is never
-written to config — it is always fresh.
-
-Tune via `~/.config/tad/config.yaml` (all keys optional):
-
-```yaml
-discovery:
-  min_history_uses: 2      # history-only hosts below this are hidden
-  shell_history: true      # toggle sources independently
-  ssh_config: true
-  known_hosts: true
-```
-
-### `tad config` — groups editor
-
-`tad config` opens a slim TUI groups editor. On an empty config it goes
-straight to add-a-group; otherwise it lists your existing groups. From
-there you can:
-
-- **Add a group** — enter a name, pick a layout, then select member hosts
-  from the live discovered host list (with `/` filter) or type them in.
-- **Delete a group.**
-- **Pick a theme.**
-
-Groups are **optional** — an organizing convenience on top of the
-automatic host discovery. Open a group with `tad -g <group>`. The empty
-groups picker (`g`) in the dashboard points you to `tad config` as a reminder.
-
-## Migrating from a shell-function `tad`
-
-`tad` started as a small bash function — usually a few lines wrapping
-`tmux attach/new-session` with a confirmation prompt. If you've been
-carrying something like this around in your `.bashrc`, `.zshrc`, or a
-dotfiles repo:
-
-```bash
-function tad() {
-   local s=$1
-   if [ -z "$s" ]; then tmux ls; return; fi
-   tmux has-session -t "$s" 2>/dev/null && tmux attach -d -t "$s" \
-      || tmux new-session -s "$s"
-}
-```
-
-…the binary replaces it entirely. To migrate:
-
-1. **Install the binary** (see above). Make sure `~/.local/bin` comes
-   before any directory holding the old function on `PATH`. Verify:
-   ```sh
-   command -v tad     # should print ~/.local/bin/tad
-   tad --version      # should print a version number
-   ```
-2. **Remove the function definition** from your shell rc files. Grep
-   for it:
-   ```sh
-   grep -nE 'function tad|^\s*tad\s*\(\)' ~/.bash* ~/.zsh* 2>/dev/null
-   ```
-   Then delete those blocks. Functions in your current shell session
-   live in memory — `unfunction tad` (zsh) or `unset -f tad` (bash) to
-   evict the old one without restarting.
-3. **Remove any `complete -F` line** that paired with the old function:
-   ```sh
-   grep -n 'complete .* tad' ~/.bash*
-   ```
-   The Rust binary ships its own bash + zsh completions; the old one
-   would conflict.
-4. **Define your groups** (optional). Run `tad config` to open the
-   groups editor — it shows discovered hosts (from your ssh-config,
-   known_hosts, and shell history automatically) so you can pick
-   members without typing them manually. Or open `tad groups edit`
-   and hand-edit, or run `tad groups add` for a single-group
-   interactive prompt. The config lives at
-   `~/.config/tad/config.yaml` under the `groups:` key. The old
-   function knew nothing about groups; everything else is a strict
-   superset of the old behavior so existing muscle memory still works:
-   - `tad <name>` — attach existing session, or SSH into a discovered
-     host, or create a new session (replaces the old simple attach-or-create)
-   - `tad` — opens the dashboard (was: list sessions)
-   - new: `tad -g <group>`, `tad groups`, `tad config`, etc.
-5. **Optional: pick a theme**. Drop `theme: tokyonight` into
-   `~/.config/tad/config.yaml` (or any of the built-ins; see Theme
-   section).
-
-Your existing tmux sessions are untouched — `tad` only reads tmux state
-and asks tmux to attach/create. Nothing on disk changes for tmux.
+If you've been carrying a small `tad()` function in your `.bashrc` or
+`.zshrc`, the binary replaces it entirely. See
+[docs/MIGRATING.md](docs/MIGRATING.md) for the step-by-step swap.
 
 ## Usage
 
@@ -282,153 +198,6 @@ tad --select-agent <target>  open the dashboard on the Agents view with the
 The `tad groups …` family used to live as flat subcommands
 (`tad groups-add`, `tad group-hosts`, etc.). Those still parse but error
 with a one-line hint pointing to the new form — update any scripts.
-
-## Jumping back to the dashboard from inside tmux
-
-Once you've attached into a tmux session, you usually want to flip back
-to the dashboard without leaving — open another group, switch sessions,
-kill a stale one. `tad tmux-keybind --install` writes a `display-popup`
-binding so you can:
-
-```
-prefix + D     # opens tad in a tmux popup; quit tad and you're back
-```
-
-The binding lives in a marker-delimited managed block, so re-running the
-command updates in place and any other config in the file is preserved.
-`tad tmux-keybind` (no flags) prints the snippet to stdout if you'd
-rather paste it yourself; `tad tmux-keybind --uninstall` removes it.
-
-**Where it writes.** To avoid clobbering Oh-My-Tmux / framework-managed
-`~/.tmux.conf` files, the target is auto-detected in this order:
-
-1. `--conf-path PATH` if given
-2. `$TAD_TMUX_CONF` env var
-3. `~/.tmux.conf.local`  (Oh-My-Tmux / gpakosz convention)
-4. `~/.tmux.local.conf`  (alternate spelling)
-5. `$XDG_CONFIG_HOME/tmux/tmux.conf` if present
-6. `~/.tmux.conf` (created if needed)
-
-Running `tad tmux-keybind` without `--install` always prints the
-resolved target path, so you can see where it would write before doing
-anything. Override key/dimensions with `--key`, `--width`, `--height`.
-
-Requires tmux 3.2+ for `display-popup`.
-
-## Claude Code cockpit: Agents view + status-line segment
-
-If you run multiple Claude Code agents across multiple tmux panes — one per
-repo, one per worktree, parallel investigations — tad has a view for that.
-
-**The Agents section** (jump with `2`) lists every tmux pane on this
-server whose process tree contains a `claude` process, showing
-`<session>:<window>.<pane>  <cwd>  <status>` per row with a semantic
-status dot (see the states legend in the Dashboard section above:
-`●` blocked, `◐◓◑◒` working, `○` idle, `◌` away).
-
-`Enter` runs `tmux switch-client` to jump straight to that pane. If
-you've installed the popup keybind, the loop is:
-
-```
-prefix + D  →  2  (Agents section)  →  ↑↓ to the blocked one  →  ↵  →  reply
-```
-
-**The status-line segment** so you never have to look first. Add this to
-your tmux config (auto-detected location — `~/.tmux.conf.local`,
-`~/.tmux.local.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf`, or
-`~/.tmux.conf`):
-
-```
-set -g status-interval 5
-set -g status-right '#(tad status) | %H:%M '
-```
-
-You'll see `claude: 3/12` (3 currently active, 12 total) in your status
-line. Format compacts to `claude: N` if all are active, or
-`claude: N idle` if none are active. Prints nothing when no agents are
-running, so when you're not using Claude Code your status line stays
-clean.
-
-The "active" threshold is the last 30s of transcript-write activity by
-default. Tune with `tad status --active-secs N`. tad does no caching, so
-if your status interval is low (1s) and you have hundreds of panes, the
-per-tick scan cost adds up — keep it at 5–15s.
-
-Detection is process-tree based (walks `/proc/<pane_pid>/task/*/children`
-looking for a `claude` comm), so it catches any agent regardless of how
-it was started.
-
-### `tad watch`: passive `@tad-attn` attention marker
-
-The status segment is for *checking* at a glance. `tad watch` is for
-*surfacing* attention without grabbing your screen. It's a long-running
-poller that watches every claude pane and, when one needs your input,
-sets the per-window tmux user-variable `@tad-attn=1` on that window.
-When you respond (or visit the pane), it unsets it. No popups, no
-modal interruptions — just a quiet bit you can render however you like.
-
-`tad install` writes a window-status block that appends a `!` to the
-window name when `@tad-attn` is set, so your tmux window list looks
-like:
-
-```
-[1] main   [2] salt !   [3] cops
-```
-
-…and the `!` disappears the moment you visit `salt` or the agent
-starts working again. Heavy theme users can opt out with
-`tad install --no-window-marker` and consume `@tad-attn` directly:
-
-```tmux
-set -g status-right '#(tad status) #{?@tad-attn,⚠ ,}%H:%M'
-```
-
-Start it once per user session — `tad install` writes a tmux
-session-created hook that does this for you:
-
-```tmux
-set-hook -g session-created 'run-shell -b "pgrep -x tad >/dev/null || tad watch &"'
-```
-
-A pidfile (`$XDG_STATE_HOME/tad/watch.pid`) guards against
-double-running. Snoozes from the dashboard `s` modal suppress the
-marker for the snoozed agent until the deadline.
-
-Tune via `~/.config/tad/config.yaml`:
-
-```yaml
-ui:
-  attention_idle_secs: 30         # mtime-fallback threshold
-  awaiting_freshness_secs: 600    # "user walked away" cutoff for status count
-```
-
-Pre-v0.11 configs with `ui.auto_popup*` keys still parse; the watcher
-prints a one-line deprecation notice on startup. `tad doctor` flags
-them too.
-
-## Groups config
-
-Lives in `~/.config/tad/config.yaml` under the `groups:` key (alongside
-`theme:` and `ui:`). See `examples/groups.yaml.example` for the group
-schema. Edit by hand, via `tad config`, or via `tad groups <add|rm|edit>`.
-
-Pre-v0.10 layouts used a separate `~/.config/tad/groups.yaml`. On first
-launch tad auto-migrates it: groups move into `config.yaml` and the old
-file is renamed to `groups.yaml.migrated` so the migration is one-shot
-and reversible.
-
-Layouts:
-- `panes`         — single window, one pane per host. **Default.**
-- `synced-panes`  — like panes; `synchronize-panes on` is the default when
-                    scripted/non-interactive.
-- `windows`       — one window per host. Use `Ctrl-b n/p` to switch.
-- `browse`        — don't auto-open anything. `tad -g <name> <TAB>` shows
-                    hosts for individual drill-in.
-
-For both `panes` and `synced-panes`, opening 2+ panes interactively prompts
-`Enable text-sync across panes? [Y/n]` (default yes). The layout choice now
-controls only the non-interactive fallback: `synced-panes` keeps sync on
-in scripts, `panes` keeps it off.
 
 ## Dashboard
 
@@ -526,6 +295,142 @@ set -g mouse on
 `tad doctor` checks this (`tmux show -gv mouse`) and warns if it's
 off.
 
+## Jumping back to the dashboard from inside tmux
+
+Once you've attached into a tmux session, you usually want to flip back
+to the dashboard without leaving — open another group, switch sessions,
+kill a stale one. `tad tmux-keybind --install` writes a `display-popup`
+binding so you can:
+
+```
+prefix + D     # opens tad in a tmux popup; quit tad and you're back
+```
+
+The binding lives in a marker-delimited managed block, so re-running the
+command updates in place and any other config in the file is preserved.
+`tad tmux-keybind` (no flags) prints the snippet to stdout if you'd
+rather paste it yourself; `tad tmux-keybind --uninstall` removes it.
+
+**Where it writes.** To avoid clobbering Oh-My-Tmux / framework-managed
+`~/.tmux.conf` files, the target is auto-detected in this order:
+
+1. `--conf-path PATH` if given
+2. `$TAD_TMUX_CONF` env var
+3. `~/.tmux.conf.local`  (Oh-My-Tmux / gpakosz convention)
+4. `~/.tmux.local.conf`  (alternate spelling)
+5. `$XDG_CONFIG_HOME/tmux/tmux.conf` if present
+6. `~/.tmux.conf` (created if needed)
+
+Running `tad tmux-keybind` without `--install` always prints the
+resolved target path, so you can see where it would write before doing
+anything. Override key/dimensions with `--key`, `--width`, `--height`.
+
+Requires tmux 3.2+ for `display-popup`.
+
+## Claude Code cockpit
+
+If you run multiple Claude Code agents across multiple tmux panes — one per
+repo, one per worktree, parallel investigations — tad has a cockpit for
+that:
+
+- **The Agents view** — every pane whose process tree contains a
+  `claude` process, with live status dots; `Enter` jumps straight to
+  the pane.
+- **`tad status`** — a one-line `claude: 3/12` summary for your tmux
+  status-line.
+- **`tad watch`** — a passive poller that marks windows whose agent
+  needs your input via the `@tad-attn` tmux user-variable.
+
+See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md) for setup and the full
+details.
+
+## Host discovery / `tad config`
+
+### Automatic live discovery
+
+On every dashboard launch (and for CLI dispatch and shell completion),
+`tad` automatically scans **local sources only** for host names — no
+network, no DNS:
+
+- **`~/.ssh/config`** — concrete `Host` entries, including one-level-deep
+  `Include`. Wildcard patterns are skipped.
+- **`~/.ssh/known_hosts`** — non-hashed entries. `@cert-authority` and
+  `|1|...` hashed entries are skipped.
+- **Shell history** — `$HISTFILE`, `~/.bash_history`, `~/.zsh_history`,
+  fish history. Extracts hosts from `ssh user@host -p 22` style
+  invocations, strips `user@` and flag values, ignores `sshfs` /
+  `ssh-add` / `ssh-keygen` / `ssh-copy-id`.
+
+Results are **ranked**: ssh-config and known_hosts entries come first,
+then shell-history hosts by frequency. History-only hosts seen fewer than
+`min_history_uses` times (default: 2) are hidden unless they also appear
+in ssh-config or known_hosts. Discovered hosts appear live in the
+dashboard's hosts picker (`h`) and in shell completion. Discovery is never
+written to config — it is always fresh.
+
+Tune via `~/.config/tad/config.yaml` (all keys optional):
+
+```yaml
+discovery:
+  min_history_uses: 2      # history-only hosts below this are hidden
+  shell_history: true      # toggle sources independently
+  ssh_config: true
+  known_hosts: true
+```
+
+### `tad config` — groups editor
+
+`tad config` opens a slim TUI groups editor. On an empty config it goes
+straight to add-a-group; otherwise it lists your existing groups. From
+there you can:
+
+- **Add a group** — enter a name, pick a layout, then select member hosts
+  from the live discovered host list (with `/` filter) or type them in.
+- **Delete a group.**
+- **Pick a theme.**
+
+Groups are **optional** — an organizing convenience on top of the
+automatic host discovery. Open a group with `tad -g <group>`. The empty
+groups picker (`g`) in the dashboard points you to `tad config` as a reminder.
+
+## Groups config
+
+Lives in `~/.config/tad/config.yaml` under the `groups:` key (alongside
+`theme:` and `ui:`). See `examples/groups.yaml.example` for the group
+schema. Edit by hand, via `tad config`, or via `tad groups <add|rm|edit>`.
+
+Pre-v0.10 layouts used a separate `~/.config/tad/groups.yaml`. On first
+launch tad auto-migrates it: groups move into `config.yaml` and the old
+file is renamed to `groups.yaml.migrated` so the migration is one-shot
+and reversible.
+
+Layouts:
+- `panes`         — single window, one pane per host. **Default.**
+- `synced-panes`  — like panes; `synchronize-panes on` is the default when
+                    scripted/non-interactive.
+- `windows`       — one window per host. Use `Ctrl-b n/p` to switch.
+- `browse`        — don't auto-open anything. `tad -g <name> <TAB>` shows
+                    hosts for individual drill-in.
+
+For both `panes` and `synced-panes`, opening 2+ panes interactively prompts
+`Enable text-sync across panes? [Y/n]` (default yes). The layout choice now
+controls only the non-interactive fallback: `synced-panes` keeps sync on
+in scripts, `panes` keeps it off.
+
+## Configuration
+
+Everything lives in one file, `~/.config/tad/config.yaml` (all keys
+optional). Each key is documented in the section that uses it:
+
+| Key | Documented in |
+| --- | --- |
+| `discovery:` | [Host discovery](#host-discovery--tad-config) |
+| `groups:` | [Groups config](#groups-config) |
+| `theme:` | [Theme](#theme) |
+| `ui:` | [Dashboard](#dashboard) and [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md) |
+
+See `examples/config.yaml.example` for a complete annotated example.
+
 ## Theme
 
 Set in `~/.config/tad/config.yaml`. Default is `tokyonight`. See
@@ -562,59 +467,7 @@ theme:
 ~/.config/tad/groups.yaml.migrated — pre-v0.10 leftover after auto-migration
 ```
 
-## Regenerating the README screenshots
+## Contributing
 
-The dashboard demo gif and stills are produced from `vhs` tapes using
-sample data under `docs/demo/`. A throwaway tmux server on socket
-`tad-demo` is seeded with sample sessions, and a tmux shim
-(`docs/demo/bin/tmux`) pins every call to that socket so your real tmux
-is never touched.
-
-```sh
-cargo build --release             # tapes use target/release/tad if present
-vhs docs/demo/dashboard.tape      # writes docs/screenshots/dashboard.gif
-bash docs/demo/render-themes.sh   # writes docs/screenshots/theme-*.png
-```
-
-To refresh the per-view PNGs (`dashboard-sessions.png`, etc.) extract
-frames from the new gif:
-
-```sh
-ffmpeg -y -i docs/screenshots/dashboard.gif -vf fps=2 /tmp/tad-f%03d.png
-# then cp the frames you like into docs/screenshots/
-```
-
-## Cutting a release
-
-1. Bump `version` in `Cargo.toml`, run `cargo build --release` so
-   `Cargo.lock` updates, and commit.
-2. Tag and push:
-   ```sh
-   git tag vX.Y.Z && git push origin vX.Y.Z
-   ```
-   `.github/workflows/release.yml` builds the binary, bundles
-   completions + examples + `LICENSE`, computes `SHA256SUMS`, and
-   publishes the GitHub release.
-3. Refresh both AUR PKGBUILDs and push to AUR:
-
-   **`tmux-tad`** (source build) — bump `pkgver` and refresh the source
-   tarball hash:
-   ```sh
-   curl -sL https://github.com/ttpears/tad/archive/vX.Y.Z.tar.gz | sha256sum
-   # paste into packaging/aur/tmux-tad/PKGBUILD, bump pkgver, then:
-   cd packaging/aur/tmux-tad
-   makepkg --printsrcinfo > .SRCINFO
-   # commit + push to ssh://aur@aur.archlinux.org/tmux-tad.git
-   ```
-
-   **`tmux-tad-bin`** (prebuilt binary) — bump `pkgver` and refresh the
-   release-artifact hashes:
-   ```sh
-   curl -sL https://github.com/ttpears/tad/releases/download/vX.Y.Z/SHA256SUMS
-   # paste each hash (binary, tad.bash, _tad, groups.example,
-   # config.example, LICENSE) into packaging/aur/tmux-tad-bin/PKGBUILD,
-   # bump pkgver, then:
-   cd packaging/aur/tmux-tad-bin
-   makepkg --printsrcinfo > .SRCINFO
-   # commit + push to ssh://aur@aur.archlinux.org/tmux-tad-bin.git
-   ```
+Build/test instructions and maintainer docs (releasing, regenerating
+the README screenshots) live in [CONTRIBUTING.md](CONTRIBUTING.md).
