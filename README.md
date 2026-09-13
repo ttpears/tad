@@ -22,6 +22,8 @@ host (in a new session) → create a new blank session by that name.
 group; for multi-pane layouts you're prompted whether to enable tmux
 `synchronize-panes` (default: yes).
 
+Field notes: [Why I removed half my tmux dashboard](https://hackyourworld.com/tad-tmux-dashboard-coding-agents/) covers the session model, UI cuts, and agent-workflow decisions behind the current cockpit.
+
 ![tad dashboard demo](docs/screenshots/dashboard.gif)
 
 ## Contents
